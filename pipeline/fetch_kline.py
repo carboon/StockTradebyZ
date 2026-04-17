@@ -164,28 +164,51 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
 
 # --------------------------- 读取 stocklist.csv & 过滤板块 --------------------------- #
 
-def _filter_by_boards_stocklist(df: pd.DataFrame, exclude_boards: set[str]) -> pd.DataFrame:
+def _filter_by_boards(df: pd.DataFrame, include: set[str] | None = None, exclude: set[str] | None = None) -> pd.DataFrame:
+    """按板块过滤股票。
+
+    include 非空时，仅保留指定板块；否则按 exclude 排除。
+    板块标识：main / gem / star / bj
+    """
     ts = df["ts_code"].astype(str).str.upper()
     num = ts.str.extract(r"(\d{6})", expand=False).str.zfill(6)
-    mask = pd.Series(True, index=df.index)
+    is_gem  = (ts.str.endswith(".SZ")) & num.str.startswith(("300", "301"))
+    is_star = (ts.str.endswith(".SH")) & num.str.startswith(("688",))
+    is_bj   = (ts.str.endswith(".BJ")) | num.str.startswith(("4", "8"))
 
-    if "gem" in exclude_boards:
-        mask &= ~((ts.str.endswith(".SZ")) & num.str.startswith(("300", "301")))
-    if "star" in exclude_boards:
-        mask &= ~((ts.str.endswith(".SH")) & num.str.startswith(("688",)))
-    if "bj" in exclude_boards:
-        mask &= ~((ts.str.endswith(".BJ")) | num.str.startswith(("4", "8")))
+    if include is not None:
+        mask = pd.Series(False, index=df.index)
+        if "main" in include:
+            mask |= ~(is_gem | is_star | is_bj)
+        if "gem" in include:
+            mask |= is_gem
+        if "star" in include:
+            mask |= is_star
+        if "bj" in include:
+            mask |= is_bj
+    else:
+        mask = pd.Series(True, index=df.index)
+        if exclude and "gem" in exclude:
+            mask &= ~is_gem
+        if exclude and "star" in exclude:
+            mask &= ~is_star
+        if exclude and "bj" in exclude:
+            mask &= ~is_bj
 
     return df[mask].copy()
 
 
-def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str]) -> List[str]:
-    df = pd.read_csv(stocklist_csv)    
-    df = _filter_by_boards_stocklist(df, exclude_boards)
+def load_codes_from_stocklist(stocklist_csv: Path, include_boards: set[str] | None = None, exclude_boards: set[str] | None = None) -> List[str]:
+    df = pd.read_csv(stocklist_csv)
+    df = _filter_by_boards(df, include=include_boards, exclude=exclude_boards)
     codes = df["symbol"].astype(str).str.zfill(6).tolist()
     codes = list(dict.fromkeys(codes))  # 去重保持顺序
-    logger.info("从 %s 读取到 %d 只股票（排除板块：%s）",
-                stocklist_csv, len(codes), ",".join(sorted(exclude_boards)) or "无")
+    if include_boards:
+        logger.info("从 %s 读取到 %d 只股票（指定板块：%s）",
+                    stocklist_csv, len(codes), ",".join(sorted(include_boards)))
+    else:
+        logger.info("从 %s 读取到 %d 只股票（排除板块：%s）",
+                    stocklist_csv, len(codes), ",".join(sorted(exclude_boards)) if exclude_boards else "无")
     return codes
 
 # --------------------------- 单只抓取（全量覆盖保存） --------------------------- #
@@ -232,14 +255,33 @@ def _load_config(config_path: Path = _CONFIG_PATH) -> dict:
 
 
 # --------------------------- 主入口 --------------------------- #
-def main(log_path: Optional[Path] = None):
-    # ---------- 读取 YAML 配置 ---------- #
-    cfg = _load_config()
+def main():
+    import argparse
 
-    # ---------- 日志路径（优先参数，其次 YAML，最后默认值） ---------- #
-    if log_path is None:
-        cfg_log = cfg.get("log")
-        log_path = _resolve_cfg_path(cfg_log) if cfg_log else _default_log_path()
+    parser = argparse.ArgumentParser(description="Tushare A股日线数据抓取")
+    parser.add_argument("--config", default=None, help="配置文件路径（默认 config/fetch_kline.yaml）")
+    parser.add_argument("--boards", nargs="+", default=None,
+                        choices=["main", "gem", "star", "bj"],
+                        help="指定抓取板块：main=主板, gem=创业板, star=科创板, bj=北交所（覆盖配置文件）")
+    parser.add_argument("--log", default=None, help="日志文件路径")
+    args = parser.parse_args()
+
+    # ---------- 读取 YAML 配置 ---------- #
+    cfg_path = Path(args.config) if args.config else _CONFIG_PATH
+    cfg = _load_config(cfg_path)
+
+    # ---------- 板块过滤：CLI 参数优先 ---------- #
+    if args.boards is not None:
+        include_boards = set(args.boards)
+        exclude_boards = None
+    else:
+        include_boards = None
+        exclude_boards = set(cfg.get("exclude_boards") or [])
+
+    # ---------- 日志路径 ---------- #
+    log_path = Path(args.log) if args.log else (
+        _resolve_cfg_path(cfg.get("log")) if cfg.get("log") else _default_log_path()
+    )
     setup_logging(log_path)
     logger.info("日志文件：%s", Path(log_path).resolve())
 
@@ -264,16 +306,16 @@ def main(log_path: Optional[Path] = None):
 
     # ---------- 从 stocklist.csv 读取股票池 ---------- #
     stocklist_path = _resolve_cfg_path(cfg.get("stocklist", "./pipeline/stocklist.csv"))
-    exclude_boards = set(cfg.get("exclude_boards") or [])
-    codes = load_codes_from_stocklist(stocklist_path, exclude_boards)
+    codes = load_codes_from_stocklist(stocklist_path, include_boards=include_boards, exclude_boards=exclude_boards)
 
     if not codes:
         logger.error("stocklist 为空或被过滤后无代码，请检查。")
         sys.exit(1)
 
+    board_desc = ",".join(sorted(include_boards)) if include_boards else (",".join(sorted(exclude_boards)) if exclude_boards else "无")
     logger.info(
-        "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 排除:%s",
-        len(codes), start, end, ",".join(sorted(exclude_boards)) or "无",
+        "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 板块:%s",
+        len(codes), start, end, board_desc,
     )
 
     # ---------- 多线程抓取（全量覆盖） ---------- #
@@ -293,6 +335,7 @@ def main(log_path: Optional[Path] = None):
             pass
 
     logger.info("全部任务完成，数据已保存至 %s", out_dir.resolve())
+
 
 if __name__ == "__main__":
     main()

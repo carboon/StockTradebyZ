@@ -89,10 +89,33 @@ CONFIG = {
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="批量导出候选股票 K 线图")
+    parser.add_argument("--date", default=None, help="指定导出日期（YYYY-MM-DD），默认从 candidates.json 读取")
+    parser.add_argument("--codes", nargs="+", default=None, help="指定股票代码列表（仅导出这些股票）")
+    args = parser.parse_args()
+
     candidates_path = Path(CONFIG["candidates"])
     raw_dir         = Path(CONFIG["raw_dir"])
 
-    codes, pick_date = _load_candidates(candidates_path)
+    if args.codes:
+        # 直接使用传入的代码列表
+        codes = args.codes
+        # pick_date 从 candidates.json 读取
+        with open(candidates_path, "r", encoding="utf-8") as f:
+            pick_date = json.load(f).get("pick_date", "")
+        export_date = args.date or pick_date
+        if not export_date:
+            print("[ERROR] 未指定 --date 且 candidates.json 中无 pick_date。")
+            sys.exit(1)
+        print(f"[INFO] 指定股票数量：{len(codes)}  pick_date：{export_date}")
+    else:
+        codes, pick_date = _load_candidates(candidates_path)
+        export_date = args.date or pick_date
+        if not export_date:
+            print("[ERROR] candidates.json 中未设置 pick_date，无法确定导出日期。")
+            sys.exit(1)
 
     # 导出日期直接读取 candidates.json 的 pick_date
     export_date = pick_date

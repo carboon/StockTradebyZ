@@ -19,8 +19,10 @@ from typing import Any, Dict, List, Optional
 class BaseReviewer:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.prompt = self.load_prompt(Path(config["prompt_path"]))
-        self.kline_dir = Path(config["kline_dir"])
+        prompt_path = config.get("prompt_path")
+        self.prompt = self.load_prompt(Path(prompt_path)) if prompt_path else ""
+        kline_dir = config.get("kline_dir")
+        self.kline_dir = Path(kline_dir) if kline_dir else None
         self.output_dir = Path(config["output_dir"])
 
     @staticmethod
@@ -33,12 +35,22 @@ class BaseReviewer:
             return json.load(f)
 
     def find_chart_images(self, pick_date: str, code: str) -> Optional[Path]:
+        if self.kline_dir is None:
+            return None
         date_dir = self.kline_dir / pick_date
         day_chart = date_dir / f"{code}_day.jpg"
         if not day_chart.exists():
             day_chart_png = date_dir / f"{code}_day.png"
             day_chart = day_chart_png if day_chart_png.exists() else None
         return day_chart
+
+    @staticmethod
+    def _is_recommendable(result: dict, min_score: float) -> bool:
+        score = float(result.get("total_score", 0) or 0)
+        verdict = result.get("verdict")
+        if verdict is None:
+            return score >= min_score
+        return verdict == "PASS" and score >= min_score
 
     @staticmethod
     def extract_json(text: str) -> dict:
@@ -56,8 +68,8 @@ class BaseReviewer:
         raise NotImplementedError("子类必须实现 review_stock 方法")
 
     def generate_suggestion(self, pick_date: str, all_results: List[dict], min_score: float) -> dict:
-        passed = [r for r in all_results if r.get("total_score", 0) >= min_score]
-        excluded = [r["code"] for r in all_results if r.get("total_score", 0) < min_score]
+        passed = [r for r in all_results if self._is_recommendable(r, min_score)]
+        excluded = [r["code"] for r in all_results if not self._is_recommendable(r, min_score)]
 
         passed.sort(key=lambda r: r.get("total_score", 0), reverse=True)
 

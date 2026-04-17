@@ -6,13 +6,16 @@ run_all.py
   步骤 1  pipeline/fetch_kline.py   — 拉取最新 K 线数据
   步骤 2  pipeline/cli.py preselect — 量化初选，生成候选列表
   步骤 3  dashboard/export_kline_charts.py — 导出候选股 K 线图
-  步骤 4  agent/gemini_review.py    — Gemini 图表分析评分
+  步骤 4  agent/*_review.py         — LLM 图表分析评分
   步骤 5  打印推荐购买的股票
 
 用法：
-    python run_all.py
-    python run_all.py --skip-fetch     # 跳过行情下载（已有最新数据时）
-    python run_all.py --start-from 3   # 从第 3 步开始（跳过前两步）
+    python run_all.py                           # 使用 GLM-4V-Flash（免费，默认）
+    python run_all.py --reviewer glm            # 使用智谱 GLM-4V-Flash（免费）
+    python run_all.py --reviewer qwen           # 使用通义千问 VL
+    python run_all.py --reviewer gemini         # 使用 Google Gemini
+    python run_all.py --skip-fetch              # 跳过行情下载（已有最新数据时）
+    python run_all.py --start-from 3            # 从第 3 步开始（跳过前两步）
 """
 from __future__ import annotations
 
@@ -20,10 +23,55 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = sys.executable  # 与当前进程同一个 Python 解释器
+
+# 支持的 reviewer 配置
+REVIEWERS = {
+    "glm": {
+        "name": "GLM-4V-Flash",
+        "script": ROOT / "agent" / "glm_reviewer.py",
+        "config": ROOT / "config" / "glm_review.yaml",
+        "env_var": "ZHIPUAI_API_KEY",
+        "free": True,
+    },
+    "qwen": {
+        "name": "通义千问 VL",
+        "script": ROOT / "agent" / "qwen_reviewer.py",
+        "config": ROOT / "config" / "qwen_review.yaml",
+        "env_var": "DASHSCOPE_API_KEY",
+        "free": False,
+    },
+    "gemini": {
+        "name": "Gemini",
+        "script": ROOT / "agent" / "gemini_review.py",
+        "config": ROOT / "config" / "gemini_review.yaml",
+        "env_var": "GEMINI_API_KEY",
+        "free": False,
+    },
+    "quant": {
+        "name": "量化评分",
+        "script": ROOT / "agent" / "quant_reviewer.py",
+        "config": ROOT / "config" / "quant_review.yaml",
+        "env_var": None,
+        "free": True,
+    },
+}
+
+
+def _is_data_fresh(raw_dir: Path) -> bool:
+    """检查 data/raw/ 下是否有今天修改过的 CSV 文件。"""
+    if not raw_dir.exists():
+        return False
+    today = date.today()
+    for f in raw_dir.glob("*.csv"):
+        mtime = date.fromtimestamp(f.stat().st_mtime)
+        if mtime == today:
+            return True
+    return False
 
 
 def _run(step_name: str, cmd: list[str]) -> None:
@@ -86,11 +134,17 @@ def _print_recommendations() -> None:
         score_str   = f"{score:.1f}" if isinstance(score, (int, float)) else str(score)
         print(f"{rank:>4}  {code:>8}  {score_str:>6}  {signal_type:>10}  {verdict:>6}  {comment}")
 
-    print(f"\n✅ 推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
+    print(f"\n推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="AgentTrader 全流程自动运行脚本")
+    parser.add_argument(
+        "--reviewer",
+        choices=["glm", "qwen", "gemini", "quant"],
+        default="glm",
+        help="选择图表分析模型：glm（智谱GLM-4V-Flash，免费，默认）、qwen（通义千问VL）、gemini（Google Gemini）、quant（量化评分，无需API Key）",
+    )
     parser.add_argument(
         "--skip-fetch", action="store_true",
         help="跳过步骤 1（行情下载），直接从初选开始",
@@ -102,41 +156,96 @@ def main() -> None:
     args = parser.parse_args()
 
     start = args.start_from
-    
+
     if args.skip_fetch and start == 1:
         start = 2
 
+    reviewer_info = REVIEWERS[args.reviewer]
+    reviewer_name = reviewer_info["name"]
+    reviewer_script = reviewer_info["script"]
+    env_var = reviewer_info["env_var"]
+    is_free = reviewer_info.get("free", False)
+
+    # 检查 API Key
+    import os
+    if env_var is None:
+        print(f"[INFO] 使用 {reviewer_name}（本地量化计算，无需 API Key）")
+    elif not os.environ.get(env_var):
+        print(f"[WARN] 未检测到环境变量 {env_var}")
+        if is_free:
+            print(f"       获取免费 API Key: https://open.bigmodel.cn/usercenter/apikeys")
+        print(f"       步骤 4 可能失败，请先设置 {env_var}")
+    else:
+        if is_free:
+            print(f"[INFO] 使用 {reviewer_name}（完全免费）")
+
     # ── 步骤 1：拉取 K 线数据 ─────────────────────────────────────────
     if start <= 1:
-        _run(
-            "1/4  拉取 K 线数据（fetch_kline）",
-            [PYTHON, "-m", "pipeline.fetch_kline"],
-        )
+        raw_dir = ROOT / "data" / "raw"
+        if _is_data_fresh(raw_dir) and not args.skip_fetch:
+            print(f"\n{'='*60}")
+            print("[步骤] 1  拉取 K 线数据 — 已跳过（数据已是今天最新的）")
+            print(f"{'='*60}")
+        elif args.skip_fetch:
+            print(f"\n{'='*60}")
+            print("[步骤] 1  拉取 K 线数据 — 已跳过（--skip-fetch）")
+            print(f"{'='*60}")
+        else:
+            _run(
+                "1  拉取 K 线数据（fetch_kline）",
+                [PYTHON, "-m", "pipeline.fetch_kline"],
+            )
 
     # ── 步骤 2：量化初选 ─────────────────────────────────────────────
     if start <= 2:
         _run(
-            "2/4  量化初选（cli preselect）",
+            "2  量化初选（cli preselect）",
             [PYTHON, "-m", "pipeline.cli", "preselect"],
         )
 
-    # ── 步骤 3：导出 K 线图 ──────────────────────────────────────────
-    if start <= 3:
+    # ── 步骤 3：导出 K 线图（仅 LLM 模式） ──────────────────────────
+    if start <= 3 and args.reviewer != "quant":
         _run(
-            "3/4  导出 K 线图（export_kline_charts）",
+            "3  导出 K 线图（export_kline_charts）",
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
         )
 
-    # ── 步骤 4：Gemini 图表分析 ──────────────────────────────────────
+    # ── 步骤 4：评分分析 ────────────────────────────────────────────
     if start <= 4:
         _run(
-            "4/4  Gemini 图表分析（gemini_review）",
-            [PYTHON, str(ROOT / "agent" / "gemini_review.py")],
+            f"4  {reviewer_name}评分（{args.reviewer}_review）",
+            [PYTHON, str(reviewer_script)],
         )
 
-    # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────
+    # ── 步骤 5：quant 模式 — 仅对 PASS 股票生成 K 线图 ────────────
+    if args.reviewer == "quant" and start <= 5:
+        candidates_file = ROOT / "data" / "candidates" / "candidates_latest.json"
+        if candidates_file.exists():
+            with open(candidates_file, encoding="utf-8") as f:
+                pick_date: str = json.load(f).get("pick_date", "")
+            suggestion_file = ROOT / "data" / "review" / pick_date / "suggestion.json"
+            if suggestion_file.exists():
+                with open(suggestion_file, encoding="utf-8") as f:
+                    suggestion: dict = json.load(f)
+                pass_codes = [r["code"] for r in suggestion.get("recommendations", []) if r.get("verdict") == "PASS"]
+                if pass_codes:
+                    print(f"\n{'='*60}")
+                    print(f"[步骤] 5  导出 PASS 股票 K 线图（{len(pass_codes)} 只）")
+                    print(f"{'='*60}")
+                    cmd = [
+                        PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py"),
+                        "--date", pick_date,
+                        "--codes", *pass_codes,
+                    ]
+                    subprocess.run(cmd, cwd=str(ROOT))
+                else:
+                    print(f"\n{'='*60}")
+                    print("[步骤] 5  导出 K 线图 — 已跳过（无 PASS 股票）")
+                    print(f"{'='*60}")
+
+    # ── 最后一步：打印推荐结果 ───────────────────────────────────────
     print(f"\n{'='*60}")
-    print("[步骤] 5/5  推荐购买的股票")
+    print("[步骤] 6  推荐购买的股票" if args.reviewer == "quant" else "[步骤] 5  推荐购买的股票")
     _print_recommendations()
 
 

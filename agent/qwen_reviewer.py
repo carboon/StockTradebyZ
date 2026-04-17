@@ -1,19 +1,19 @@
 """
-gemini_review.py
-~~~~~~~~~~~~~~~~
-使用 Google Gemini 对候选股票进行图表分析评分。
+qwen_reviewer.py
+~~~~~~~~~~~~~~~~~
+使用阿里云通义千问 VL 对候选股票进行图表分析评分。
 继承自 BaseReviewer 基础架构。
 
 用法：
-    python agent/gemini_review.py                                    # 批量分析候选列表
-    python agent/gemini_review.py --config config/gemini_review.yaml   # 指定配置文件
-    python agent/gemini_review.py --code 600519                       # 单股分析（茅台）
+    python agent/qwen_reviewer.py                                    # 批量分析候选列表
+    python agent/qwen_reviewer.py --config config/qwen_review.yaml   # 指定配置文件
+    python agent/qwen_reviewer.py --code 600519                      # 单股分析（茅台）
 
 配置：
-    默认读取 config/gemini_review.yaml。
+    默认读取 config/qwen_review.yaml。
 
 环境变量：
-    GEMINI_API_KEY  —— Google Gemini API Key（必填）
+    DASHSCOPE_API_KEY  —— 阿里云百炼 API Key（必填）
 
 输出：
     ./data/review/{pick_date}/{code}.json   每支股票的评分 JSON
@@ -21,14 +21,14 @@ gemini_review.py
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from google import genai
-from google.genai import types
+from openai import OpenAI
 import yaml
 
 from base_reviewer import BaseReviewer
@@ -37,7 +37,7 @@ from base_reviewer import BaseReviewer
 # 配置加载
 # ────────────────────────────────────────────────
 _ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_CONFIG_PATH = _ROOT / "config" / "gemini_review.yaml"
+_DEFAULT_CONFIG_PATH = _ROOT / "config" / "qwen_review.yaml"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     # 路径参数（相对路径默认基于项目根目录）
@@ -45,11 +45,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "kline_dir": "data/kline",
     "output_dir": "data/review",
     "prompt_path": "agent/prompt.md",
-    # Gemini 模型参数
-    "model": "gemini-3.1-pro-preview",
+    # 通义千问模型参数
+    "model": "qwen3-vl-plus",
     "request_delay": 5,
     "skip_existing": False,
     "suggest_min_score": 4.0,
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 }
 
 
@@ -75,6 +76,16 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     cfg["prompt_path"] = _resolve_cfg_path(cfg["prompt_path"])
 
     return cfg
+
+
+def _image_to_base64(path: Path) -> str:
+    """将图片文件转为 base64 编码（用于通义千问 VL）。"""
+    suffix = path.suffix.lower()
+    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+    mime_type = mime_map.get(suffix, "image/jpeg")
+    data = path.read_bytes()
+    base64_str = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime_type};base64,{base64_str}"
 
 
 def _find_latest_pick_date(kline_dir: Path) -> str | None:
@@ -104,29 +115,24 @@ def _find_chart_in_date(kline_dir: Path, pick_date: str, code: str) -> Path | No
     return None
 
 
-class GeminiReviewer(BaseReviewer):
+class QwenReviewer(BaseReviewer):
     def __init__(self, config):
         super().__init__(config)
 
-        api_key = os.environ.get("GEMINI_API_KEY", "")
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
         if not api_key:
-            print("[ERROR] 未找到环境变量 GEMINI_API_KEY，请先设置后重试。", file=sys.stderr)
+            print("[ERROR] 未找到环境变量 DASHSCOPE_API_KEY，请先设置后重试。", file=sys.stderr)
+            print("       获取 API Key: https://bailian.console.aliyun.com/", file=sys.stderr)
             sys.exit(1)
 
-        self.client = genai.Client(api_key=api_key)
-
-    @staticmethod
-    def image_to_part(path: Path) -> types.Part:
-        """将图片文件转为 Gemini Part 对象。"""
-        suffix = path.suffix.lower()
-        mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
-        mime_type = mime_map.get(suffix, "image/jpeg")
-        data = path.read_bytes()
-        return types.Part.from_bytes(data=data, mime_type=mime_type)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=self.config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        )
 
     def review_stock(self, code: str, day_chart: Path, prompt: str) -> dict:
         """
-        调用 Gemini API，对单支股票进行图表分析，返回解析后的 JSON 结果。
+        调用通义千问 VL API，对单支股票进行图表分析，返回解析后的 JSON 结果。
         """
         user_text = (
             f"股票代码：{code}\n\n"
@@ -134,24 +140,26 @@ class GeminiReviewer(BaseReviewer):
             "并严格按照要求输出 JSON。"
         )
 
-        parts: list[types.Part] = [
-            types.Part.from_text(text="【日线图】"),
-            self.image_to_part(day_chart),
-            types.Part.from_text(text=user_text),
-        ]
+        image_base64 = _image_to_base64(day_chart)
 
-        response = self.client.models.generate_content(
-            model=self.config.get("model", "gemini-3.1-pro-preview"),
-            contents=[types.Content(role="user", parts=parts)],
-            config=types.GenerateContentConfig(
-                system_instruction=prompt,
-                temperature=0.2,
-            ),
+        response = self.client.chat.completions.create(
+            model=self.config.get("model", "qwen3-vl-plus"),
+            messages=[
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {"type": "image_url", "image_url": {"url": image_base64}},
+                    ],
+                },
+            ],
+            temperature=0.2,
         )
 
-        response_text = response.text
+        response_text = response.choices[0].message.content
         if response_text is None:
-            raise RuntimeError(f"Gemini 返回空响应，无法解析 JSON（code={code}）")
+            raise RuntimeError(f"通义千问返回空响应，无法解析 JSON（code={code}）")
 
         result = self.extract_json(response_text)
         result["code"] = code  # 附加股票代码便于追溯
@@ -230,18 +238,18 @@ def _print_single_result(result: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Gemini 图表复评",
+        description="通义千问 VL 图表复评",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python agent/gemini_review.py                    # 批量分析候选列表
-  python agent/gemini_review.py --code 600519       # 单股分析
+  python agent/qwen_reviewer.py                    # 批量分析候选列表
+  python agent/qwen_reviewer.py --code 600519       # 单股分析
         """,
     )
     parser.add_argument(
         "--config",
         default=str(_DEFAULT_CONFIG_PATH),
-        help="配置文件路径（默认 config/gemini_review.yaml）",
+        help="配置文件路径（默认 config/qwen_review.yaml）",
     )
     parser.add_argument(
         "--code",
@@ -254,7 +262,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
-    reviewer = GeminiReviewer(config)
+    reviewer = QwenReviewer(config)
 
     # 单股分析模式
     if args.code:

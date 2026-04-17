@@ -2,12 +2,12 @@
 *.pyc
 *.pyo
 *.pyd
+*.jpg
 *.py,cover
 __pycache__/
 
 # Project folders
 .vscode/
-data/
 
 # Virtual environments
 .venv/
@@ -28,6 +28,7 @@ dist/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
+data/
 
 # Jupyter
 .ipynb_checkpoints/
