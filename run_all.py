@@ -20,14 +20,18 @@ run_all.py
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import subprocess
 import sys
 from datetime import date
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent
 PYTHON = sys.executable  # 与当前进程同一个 Python 解释器
+MIN_PYTHON = (3, 11)
 
 # 支持的 reviewer 配置
 REVIEWERS = {
@@ -62,14 +66,65 @@ REVIEWERS = {
 }
 
 
-def _is_data_fresh(raw_dir: Path) -> bool:
-    """检查 data/raw/ 下是否有今天修改过的 CSV 文件。"""
+def _detect_board(ts_code: str, symbol: str) -> str:
+    ts_code = str(ts_code).upper()
+    symbol = str(symbol).zfill(6)
+    if ts_code.endswith(".BJ") or symbol.startswith(("4", "8")):
+        return "bj"
+    if ts_code.endswith(".SZ") and symbol.startswith(("300", "301")):
+        return "gem"
+    if ts_code.endswith(".SH") and symbol.startswith("688"):
+        return "star"
+    return "main"
+
+
+def _load_expected_fetch_codes() -> set[str]:
+    """按当前 fetch 配置推导第 1 步应抓取的全部股票代码。"""
+    cfg_path = ROOT / "config" / "fetch_kline.yaml"
+    if not cfg_path.exists():
+        return set()
+
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    stocklist_path = Path(cfg.get("stocklist", "./pipeline/stocklist.csv"))
+    if not stocklist_path.is_absolute():
+        stocklist_path = ROOT / stocklist_path
+    if not stocklist_path.exists():
+        return set()
+
+    exclude_boards = {str(x).lower() for x in (cfg.get("exclude_boards") or [])}
+    codes: set[str] = set()
+    with open(stocklist_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            symbol = str(row.get("symbol", "")).zfill(6)
+            if not symbol or symbol == "000000":
+                continue
+            board = _detect_board(row.get("ts_code", ""), symbol)
+            if board in exclude_boards:
+                continue
+            codes.add(symbol)
+    return codes
+
+
+def _is_data_fresh(raw_dir: Path, expected_codes: set[str] | None = None) -> bool:
+    """检查 data/raw/ 是否已按当前配置完整抓取且均为今日数据。"""
     if not raw_dir.exists():
         return False
     today = date.today()
-    for f in raw_dir.glob("*.csv"):
-        mtime = date.fromtimestamp(f.stat().st_mtime)
-        if mtime == today:
+
+    if expected_codes:
+        for code in expected_codes:
+            csv_path = raw_dir / f"{code}.csv"
+            if not csv_path.exists():
+                return False
+            if date.fromtimestamp(csv_path.stat().st_mtime) != today:
+                return False
+        return True
+
+    for csv_path in raw_dir.glob("*.csv"):
+        if date.fromtimestamp(csv_path.stat().st_mtime) == today:
             return True
     return False
 
@@ -134,10 +189,26 @@ def _print_recommendations() -> None:
         score_str   = f"{score:.1f}" if isinstance(score, (int, float)) else str(score)
         print(f"{rank:>4}  {code:>8}  {score_str:>6}  {signal_type:>10}  {verdict:>6}  {comment}")
 
-    print(f"\n推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
+        print(f"\n推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
+
+
+def _check_python_version() -> None:
+    if sys.version_info >= MIN_PYTHON:
+        return
+    required = ".".join(str(x) for x in MIN_PYTHON)
+    current = sys.version.split()[0]
+    print(f"[ERROR] 当前 Python 版本过低：{current}")
+    print(f"        本工程依赖要求 Python >= {required}。")
+    print("        请改用 python3.11 或 python3.12 运行，例如：")
+    print("        /opt/homebrew/bin/python3.12 -m venv .venv")
+    print("        source .venv/bin/activate")
+    print("        python -m pip install -r requirements.txt")
+    print("        python run_all.py --reviewer quant")
+    sys.exit(1)
 
 
 def main() -> None:
+    _check_python_version()
     parser = argparse.ArgumentParser(description="AgentTrader 全流程自动运行脚本")
     parser.add_argument(
         "--reviewer",
@@ -182,7 +253,8 @@ def main() -> None:
     # ── 步骤 1：拉取 K 线数据 ─────────────────────────────────────────
     if start <= 1:
         raw_dir = ROOT / "data" / "raw"
-        if _is_data_fresh(raw_dir) and not args.skip_fetch:
+        expected_codes = _load_expected_fetch_codes()
+        if _is_data_fresh(raw_dir, expected_codes=expected_codes) and not args.skip_fetch:
             print(f"\n{'='*60}")
             print("[步骤] 1  拉取 K 线数据 — 已跳过（数据已是今天最新的）")
             print(f"{'='*60}")
