@@ -296,7 +296,7 @@ def run_preselect(
     g = cfg.get("global", {})
 
     _data_dir = str(_resolve_cfg_path(data_dir or g.get("data_dir", "./data/raw")))
-    top_m = int(g.get("top_m", 20))
+    top_m = int(g.get("top_m", 2000))
     n_turnover_days = int(g.get("n_turnover_days", 43))
     min_bars_buffer = int(g.get("min_bars_buffer", 10))
 

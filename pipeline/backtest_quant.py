@@ -263,7 +263,7 @@ def run_backtest(
     raw_data = load_raw_data(str(raw_dir))
 
     n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
-    top_m = int(global_cfg.get("top_m", 5000))
+    top_m = int(global_cfg.get("top_m", 2000))
     horizons = [int(v) for v in review_cfg.get("backtest", {}).get("holding_periods", [1, 3, 5, 10])]
     score_buckets = [float(v) for v in review_cfg.get("backtest", {}).get("score_buckets", [3.2, 3.5, 4.0])]
     disabled_strategies = {str(s).lower() for s in review_cfg.get("disabled_strategies", [])}
@@ -278,7 +278,9 @@ def run_backtest(
     logger.info("流动性池日期数: %d", len(pool_sets))
 
     b1_selector = _build_b1_selector(preselect_cfg)
-    brick_selector = _build_brick_selector(preselect_cfg)
+    brick_enabled = bool(preselect_cfg.get("brick", {}).get("enabled", True))
+    use_brick = brick_enabled and "brick" not in disabled_strategies
+    brick_selector = _build_brick_selector(preselect_cfg) if use_brick else None
 
     start_ts = pd.to_datetime(start_date) if start_date else None
     end_ts = pd.to_datetime(end_date) if end_date else None
@@ -286,14 +288,14 @@ def run_backtest(
 
     for code, base_df in tqdm(base_frames.items(), desc="滚动回测", ncols=90):
         b1_frame = b1_selector.prepare_df(base_df)
-        brick_frame = brick_selector.prepare_df(base_df)
+        brick_frame = brick_selector.prepare_df(base_df) if brick_selector is not None else None
 
         picked: dict[pd.Timestamp, str] = {}
         for dt in b1_selector.vec_picks_from_prepared(b1_frame, start=start_ts, end=end_ts):
             codes_today = pool_sets.get(dt)
             if codes_today and code in codes_today and "b1" not in disabled_strategies:
                 picked.setdefault(dt, "b1")
-        if "brick" not in disabled_strategies:
+        if brick_selector is not None and brick_frame is not None:
             for dt in brick_selector.vec_picks_from_prepared(brick_frame, start=start_ts, end=end_ts):
                 codes_today = pool_sets.get(dt)
                 if codes_today and code in codes_today:

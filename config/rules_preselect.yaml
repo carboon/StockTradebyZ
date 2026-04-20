@@ -6,7 +6,7 @@
 global:
   data_dir: "./data/raw"          # A股日线CSV目录
   output_dir: "./data/candidates" # 候选结果输出目录
-  top_m: 5000                     # 流动性池：取成交额最高的 top_m 只
+  top_m: 2000                     # 流动性池：取成交额最高的 top_m 只
   n_turnover_days: 43             # 滚动成交额窗口（日）
   min_bars_buffer: 10             # 额外的最小 bar 缓冲
 
@@ -22,7 +22,7 @@ b1:
 
 # ── 砖型图（BrickChart）策略参数 ──────────────────────────────────────
 brick:
-  enabled: true
+  enabled: false
 
   # 砖型图计算参数
   n: 8

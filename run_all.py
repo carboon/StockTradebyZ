@@ -10,11 +10,12 @@ run_all.py
   步骤 5  打印推荐购买的股票
 
 用法：
-    python run_all.py                           # 使用 GLM-4V-Flash（免费，默认）
+    python run_all.py                           # 使用 quant 程序化复核（默认）
+    python run_all.py --reviewer quant          # 使用量化评分（默认）
     python run_all.py --reviewer glm            # 使用智谱 GLM-4V-Flash（免费）
     python run_all.py --reviewer qwen           # 使用通义千问 VL
     python run_all.py --reviewer gemini         # 使用 Google Gemini
-    python run_all.py --skip-fetch              # 跳过行情下载（已有最新数据时）
+    python run_all.py --skip-fetch              # 跳过行情下载（已有历史数据时）
     python run_all.py --start-from 3            # 从第 3 步开始（跳过前两步）
 """
 from __future__ import annotations
@@ -24,7 +25,6 @@ import csv
 import json
 import subprocess
 import sys
-from datetime import date
 from pathlib import Path
 
 import yaml
@@ -108,25 +108,19 @@ def _load_expected_fetch_codes() -> set[str]:
     return codes
 
 
-def _is_data_fresh(raw_dir: Path, expected_codes: set[str] | None = None) -> bool:
-    """检查 data/raw/ 是否已按当前配置完整抓取且均为今日数据。"""
+def _has_all_expected_data(raw_dir: Path, expected_codes: set[str] | None = None) -> bool:
+    """检查 data/raw/ 是否已按当前配置完整抓取。"""
     if not raw_dir.exists():
         return False
-    today = date.today()
 
     if expected_codes:
         for code in expected_codes:
             csv_path = raw_dir / f"{code}.csv"
             if not csv_path.exists():
                 return False
-            if date.fromtimestamp(csv_path.stat().st_mtime) != today:
-                return False
         return True
 
-    for csv_path in raw_dir.glob("*.csv"):
-        if date.fromtimestamp(csv_path.stat().st_mtime) == today:
-            return True
-    return False
+    return any(raw_dir.glob("*.csv"))
 
 
 def _run(step_name: str, cmd: list[str]) -> None:
@@ -188,8 +182,7 @@ def _print_recommendations() -> None:
         comment     = r.get("comment",     "")
         score_str   = f"{score:.1f}" if isinstance(score, (int, float)) else str(score)
         print(f"{rank:>4}  {code:>8}  {score_str:>6}  {signal_type:>10}  {verdict:>6}  {comment}")
-
-        print(f"\n推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
+    print(f"\n推荐购买 {len(recommendations)} 只股票（详见 {suggestion_file}）")
 
 
 def _check_python_version() -> None:
@@ -213,8 +206,8 @@ def main() -> None:
     parser.add_argument(
         "--reviewer",
         choices=["glm", "qwen", "gemini", "quant"],
-        default="glm",
-        help="选择图表分析模型：glm（智谱GLM-4V-Flash，免费，默认）、qwen（通义千问VL）、gemini（Google Gemini）、quant（量化评分，无需API Key）",
+        default="quant",
+        help="选择图表分析模型：quant（量化评分，默认，无需 API Key）、glm（智谱GLM-4V-Flash）、qwen（通义千问VL）、gemini（Google Gemini）",
     )
     parser.add_argument(
         "--skip-fetch", action="store_true",
@@ -254,9 +247,9 @@ def main() -> None:
     if start <= 1:
         raw_dir = ROOT / "data" / "raw"
         expected_codes = _load_expected_fetch_codes()
-        if _is_data_fresh(raw_dir, expected_codes=expected_codes) and not args.skip_fetch:
+        if _has_all_expected_data(raw_dir, expected_codes=expected_codes) and not args.skip_fetch:
             print(f"\n{'='*60}")
-            print("[步骤] 1  拉取 K 线数据 — 已跳过（数据已是今天最新的）")
+            print("[步骤] 1  拉取 K 线数据 — 已跳过（数据已完整存在）")
             print(f"{'='*60}")
         elif args.skip_fetch:
             print(f"\n{'='*60}")
