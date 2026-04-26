@@ -28,7 +28,16 @@ dist/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
-data/
+
+# Frontend local artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+*.tsbuildinfo
 
 # Jupyter
 .ipynb_checkpoints/
@@ -36,10 +45,18 @@ data/
 # Logs and local runtime files
 *.log
 *.pid
+*.pid.lock
 
 # Local environment/config secrets
 .env
 .env.*
+
+# Local databases and runtime data
+data/
+file:test_db
+*.db
+*.db-shm
+*.db-wal
 
 # OS files
 .DS_Store
