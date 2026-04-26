@@ -191,6 +191,7 @@ def run_b1(
                     strategy="b1",
                     close=float(row["close"]),
                     turnover_n=float(row["turnover_n"]),
+                    extra={"kdj_j": float(row.get("J", 0))},  # 添加KDJ-J值
                 ))
         except Exception as exc:
             logger.debug("B1 skip %s: %s", code, exc)

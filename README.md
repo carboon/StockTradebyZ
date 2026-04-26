@@ -1,6 +1,26 @@
-# AgentTrader
+# StockTrader 2.0
 
-一个面向 A 股的本地量化选股与复核项目。当前代码已经明确收敛到一条主链路：
+一个面向 A 股的本地量化选股与复核项目，提供 Web 可视化界面。
+
+> 📘 **部署运行指南**: 请查看 [DEPLOYMENT.md](DEPLOYMENT.md) 获取详细的部署和运行说明。
+
+---
+
+## 快速开始
+
+```bash
+# 本地开发模式
+./start-dev.sh
+
+# Docker 部署模式
+./start-docker.sh up
+```
+
+访问 http://localhost:3000 查看可视化界面。
+
+---
+
+## 核心流程
 
 - 用 Tushare 拉取全市场日线数据到本地 CSV
 - 从流动性最强的股票池中做 B1 初选

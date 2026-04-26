@@ -51,6 +51,15 @@ def _resolve_path(*parts) -> Path:
     return p if p.is_absolute() else p
 
 
+def _load_b1_config(config_path: Optional[Path] = None) -> dict:
+    """加载统一的 B1 配置，默认读取 rules_preselect.yaml。"""
+    path = config_path or _resolve_path("config", "rules_preselect.yaml")
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
 # ────────────────────────────────────────────────
 # 步骤 1: 数据采集
 # ────────────────────────────────────────────────
@@ -191,7 +200,7 @@ def get_stock_data(code: str, force_refresh: bool = False) -> Optional[pd.DataFr
 # ────────────────────────────────────────────────
 
 def check_b1_strategy(df: pd.DataFrame, config_path: Optional[Path] = None) -> dict:
-    """运行简化版 B1 策略检查。
+    """运行统一版 B1 策略检查。
 
     Args:
         df: 股票日线数据
@@ -206,100 +215,92 @@ def check_b1_strategy(df: pd.DataFrame, config_path: Optional[Path] = None) -> d
             "ma_status": str
         }
     """
-    # 加载配置（如果存在）
-    default_config = {
-        "b1": {
-            "j_threshold": 80,
-            "j_q_threshold": 80,
-            "zx_m1": 7,
-            "zx_m2": 25,
-            "zx_m3": 77,
-            "zx_m4": 371,
-        }
-    }
+    cfg = _load_b1_config(config_path)
+    cfg_b1 = cfg.get("b1", {})
+    j_threshold = float(cfg_b1.get("j_threshold", 15.0))
+    j_q_threshold = float(cfg_b1.get("j_q_threshold", 0.10))
+    zx_m1 = int(cfg_b1.get("zx_m1", 14))
+    zx_m2 = int(cfg_b1.get("zx_m2", 28))
+    zx_m3 = int(cfg_b1.get("zx_m3", 57))
+    zx_m4 = int(cfg_b1.get("zx_m4", 114))
 
-    if config_path and config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-            default_config.update(cfg)
+    pipeline_dir = _resolve_path("pipeline")
+    if str(pipeline_dir) not in sys.path:
+        sys.path.insert(0, str(pipeline_dir))
 
-    cfg_b1 = default_config.get("b1", {})
+    from Selector import B1Selector
 
-    j_threshold = float(cfg_b1.get("j_threshold", 80))
-    j_q_threshold = float(cfg_b1.get("j_q_threshold", 80))
-
-    # 计算指标
     df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
 
-    # KDJ
-    period = 9
-    df["low_min"] = df["low"].rolling(window=period).min()
-    df["high_max"] = df["high"].rolling(window=period).max()
-    df["rsv"] = (df["close"] - df["low_min"]) / (df["high_max"] - df["low_min"]) * 100
-    df = df.dropna(subset=["rsv"])
-    df["k"] = df["rsv"].ewm(alpha=1/3, adjust=False).mean()
-    df["d"] = df["k"].ewm(alpha=1/3, adjust=False).mean()
-    df["j"] = 3 * df["k"] - 2 * df["d"]
-
-    # 知行均线
-    m1, m2, m3, m4 = [int(cfg_b1.get(f"zx_m{i}", 7)) for i in range(1, 5)]
-    df[f"ma{m1}"] = df["close"].rolling(window=m1).mean()
-    df[f"ma{m2}"] = df["close"].rolling(window=m2).mean()
-    df[f"ma{m3}"] = df["close"].rolling(window=m3).mean()
-    df[f"ma{m4}"] = df["close"].rolling(window=m4).mean()
-
-    # 最新数据
-    if len(df) < max(m4, period) + 10:
+    if len(df) < max(zx_m4, 30) + 10:
         return {
             "passed": False,
-            "reason": f"数据不足（需要至少 {max(m4, period) + 10} 条，当前 {len(df)} 条）",
+            "reason": f"数据不足（需要至少 {max(zx_m4, 30) + 10} 条，当前 {len(df)} 条）",
             "j_value": 0,
             "j_q_value": 0,
+            "k_value": 0,
+            "d_value": 0,
             "ma_status": "N/A",
         }
 
-    latest = df.iloc[-1]
-    j_value = latest["j"]
-    k_value = latest["k"]
-    d_value = latest["d"]
+    selector = B1Selector(
+        j_threshold=j_threshold,
+        j_q_threshold=j_q_threshold,
+        zx_m1=zx_m1,
+        zx_m2=zx_m2,
+        zx_m3=zx_m3,
+        zx_m4=zx_m4,
+    )
+    prepared = selector.prepare_df(df.set_index("date", drop=False))
+    latest = prepared.iloc[-1]
 
-    # 判断条件
+    j_value = float(latest["J"]) if pd.notna(latest.get("J")) else 0.0
+    k_value = float(latest["K"]) if pd.notna(latest.get("K")) else 0.0
+    d_value = float(latest["D"]) if pd.notna(latest.get("D")) else 0.0
+    j_q_value = float(
+        prepared["J"].expanding(min_periods=1).quantile(j_q_threshold).iloc[-1]
+    ) if "J" in prepared.columns and not prepared["J"].dropna().empty else 0.0
+
     conditions = []
-    ma_status = "中性"
+    ma_status = "多头排列" if bool(latest.get("wma_bull", False)) else "非多头排列"
 
-    # J 值判断
-    if j_value > j_threshold:
-        conditions.append(f"J值({j_value:.1f}) > {j_threshold}（超买）")
-    elif j_value < (100 - j_threshold):
-        conditions.append(f"J值({j_value:.1f}) < {100 - j_threshold}（超卖）")
+    kdj_ok = bool(selector._kdj_filter(prepared))
+    zx_ok = bool(selector._zx_filter(prepared))
+    wma_ok = bool(selector._wma_filter(prepared))
+    max_vol_ok = bool(selector._max_vol_filter(prepared))
 
-    # 金叉/死叉
-    if len(df) >= 2:
-        prev_k, prev_d = df.iloc[-2]["k"], df.iloc[-2]["d"]
-        if prev_k <= prev_d and k_value > d_value:
-            conditions.append("KDJ金叉")
-        elif prev_k >= prev_d and k_value < d_value:
-            conditions.append("KDJ死叉")
+    if kdj_ok:
+        conditions.append(f"KDJ低位通过（J={j_value:.1f}, Q{int(j_q_threshold * 100)}={j_q_value:.1f}）")
+    else:
+        conditions.append(f"KDJ未通过（J={j_value:.1f}, 阈值={j_threshold:.1f}, Q{int(j_q_threshold * 100)}={j_q_value:.1f}）")
 
-    # 均线排列
-    ma_vals = [latest[f"ma{m}"] for m in [m1, m2, m3, m4]]
-    if all(ma_vals[i] < ma_vals[i+1] for i in range(3)):
-        ma_status = "多头排列"
-        conditions.append("均线多头")
-    elif all(ma_vals[i] > ma_vals[i+1] for i in range(3)):
-        ma_status = "空头排列"
-        conditions.append("均线空头")
+    if zx_ok:
+        conditions.append("知行线通过")
+    else:
+        conditions.append("知行线未通过")
 
-    passed = len(conditions) > 0
+    if wma_ok:
+        conditions.append("周线多头排列通过")
+    else:
+        conditions.append("周线多头排列未通过")
+
+    if max_vol_ok:
+        conditions.append("量能形态通过")
+    else:
+        conditions.append("量能形态未通过")
+
+    passed = bool(latest.get("_vec_pick", False))
 
     return {
         "passed": passed,
-        "reason": "; ".join(conditions) if conditions else "无明显信号",
-        "j_value": float(j_value),
-        "j_q_value": float(j_q_threshold),
-        "k_value": float(k_value),
-        "d_value": float(d_value),
+        "reason": "; ".join(conditions),
+        "j_value": j_value,
+        "j_q_value": j_q_value,
+        "k_value": k_value,
+        "d_value": d_value,
         "ma_status": ma_status,
     }
 

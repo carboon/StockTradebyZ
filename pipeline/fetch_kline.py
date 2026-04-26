@@ -15,6 +15,7 @@ import pandas as pd
 import tushare as ts
 import yaml
 from tqdm import tqdm
+from backend.app.utils.tushare_rate_limit import acquire_tushare_slot, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS
 
 warnings.filterwarnings("ignore")
 
@@ -128,6 +129,7 @@ def _to_ts_code(code: str) -> str:
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     ts_code = _to_ts_code(code)
     try:
+        acquire_tushare_slot("pro_bar")
         df = ts.pro_bar(
             ts_code=ts_code,
             adj="qfq",
@@ -314,8 +316,8 @@ def main():
 
     board_desc = ",".join(sorted(include_boards)) if include_boards else (",".join(sorted(exclude_boards)) if exclude_boards else "无")
     logger.info(
-        "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 板块:%s",
-        len(codes), start, end, board_desc,
+        "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 板块:%s | 限速:%d次/%d秒",
+        len(codes), start, end, board_desc, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS,
     )
 
     # ---------- 多线程抓取（全量覆盖） ---------- #

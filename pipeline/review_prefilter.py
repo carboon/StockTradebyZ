@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import tushare as ts
+from backend.app.utils.tushare_rate_limit import acquire_tushare_slot
 
 _ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CACHE_DIR = _ROOT / "data" / "tushare_cache"
@@ -110,6 +111,7 @@ class TushareMetadataStore:
             frame = pd.read_csv(path)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
+            acquire_tushare_slot(rel_path)
             frame = fetcher()
             if frame is None:
                 frame = pd.DataFrame()

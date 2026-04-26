@@ -1,0 +1,728 @@
+"""
+Analysis Service
+~~~~~~~~~~~~~~~~
+股票分析服务，集成现有 Selector 和 quant_reviewer
+"""
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Dict, Any
+import pandas as pd
+import yaml
+
+# 添加项目根目录到 Python 路径
+ROOT = Path(__file__).parent.parent.parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.config import settings
+
+
+class AnalysisService:
+    """股票分析服务"""
+
+    def __init__(self):
+        self._selector = None
+        self._reviewer = None
+
+    def load_stock_data(self, code: str) -> Optional[pd.DataFrame]:
+        """加载股票数据"""
+        raw_dir = ROOT / settings.raw_data_dir
+        csv_path = raw_dir / f"{code}.csv"
+        if not csv_path.exists():
+            return None
+        df = pd.read_csv(csv_path)
+        df.columns = [c.lower() for c in df.columns]
+        df["date"] = pd.to_datetime(df["date"])
+        return df.sort_values("date").reset_index(drop=True)
+
+    def _build_b1_selector(self):
+        """构建与明日之星一致的 B1Selector 配置。"""
+        pipeline_dir = ROOT / "pipeline"
+        if str(pipeline_dir) not in sys.path:
+            sys.path.insert(0, str(pipeline_dir))
+
+        from Selector import B1Selector
+
+        config_file = ROOT / "config" / "rules_preselect.yaml"
+        cfg: dict[str, Any] = {}
+        if config_file.exists():
+            with open(config_file, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+
+        b1_cfg = cfg.get("b1", {})
+        return B1Selector(
+            j_threshold=float(b1_cfg.get("j_threshold", 15.0)),
+            j_q_threshold=float(b1_cfg.get("j_q_threshold", 0.10)),
+            zx_m1=int(b1_cfg.get("zx_m1", 14)),
+            zx_m2=int(b1_cfg.get("zx_m2", 28)),
+            zx_m3=int(b1_cfg.get("zx_m3", 57)),
+            zx_m4=int(b1_cfg.get("zx_m4", 114)),
+        )
+
+    def _normalize_pick_date(self, pick_date: Optional[str]) -> Optional[str]:
+        """将日期统一规范为 YYYY-MM-DD。"""
+        if not pick_date:
+            return None
+        pick_date = str(pick_date).strip()
+        if len(pick_date) == 8 and pick_date.isdigit():
+            return f"{pick_date[:4]}-{pick_date[4:6]}-{pick_date[6:]}"
+        return pick_date
+
+    def get_latest_candidate_date(self) -> Optional[str]:
+        """读取最新候选日期。"""
+        import json
+
+        latest_file = ROOT / settings.candidates_dir / "candidates_latest.json"
+        if not latest_file.exists():
+            return None
+        try:
+            with open(latest_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return self._normalize_pick_date(data.get("pick_date"))
+        except Exception:
+            return None
+
+    def get_latest_result_date(self) -> Optional[str]:
+        """读取最新分析结果日期。"""
+        review_dir = ROOT / settings.review_dir
+        if not review_dir.exists():
+            return None
+        date_dirs = [
+            d.name for d in review_dir.iterdir()
+            if d.is_dir() and (d / "suggestion.json").exists()
+        ]
+        return max(date_dirs) if date_dirs else None
+
+    def load_candidate_codes(self, pick_date: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+        """读取指定日期的候选代码；未指定则读取 latest。"""
+        import json
+
+        normalized_date = self._normalize_pick_date(pick_date)
+        candidates_dir = ROOT / settings.candidates_dir
+        if normalized_date:
+            candidate_file = candidates_dir / f"candidates_{normalized_date}.json"
+        else:
+            candidate_file = candidates_dir / "candidates_latest.json"
+
+        if not candidate_file.exists():
+            return normalized_date, []
+
+        try:
+            with open(candidate_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            file_pick_date = self._normalize_pick_date(data.get("pick_date")) or normalized_date
+            codes = [item.get("code", "") for item in data.get("candidates", []) if item.get("code")]
+            return file_pick_date, codes
+        except Exception:
+            return normalized_date, []
+
+    def check_b1_strategy(self, code: str) -> Dict[str, Any]:
+        """执行 B1 策略检查"""
+        df = self.load_stock_data(code)
+        if df is None or df.empty:
+            return {
+                "code": code,
+                "b1_passed": False,
+                "kdj_j": None,
+                "zx_long_pos": None,
+                "weekly_ma_aligned": None,
+                "volume_healthy": None,
+                "error": "数据不存在"
+            }
+
+        selector = self._build_b1_selector()
+        try:
+            # 使用 prepare_df 预计算所有指标
+            df_prepared = selector.prepare_df(df)
+
+            # 获取最后一行的数据
+            last_row = df_prepared.iloc[-1]
+
+            # 从 _vec_pick 列判断是否通过 B1 策略
+            b1_passed = bool(last_row.get("_vec_pick", False))
+
+            # 获取各项指标值
+            kdj_j = None
+            if "J" in last_row and pd.notna(last_row["J"]):
+                kdj_j = float(last_row["J"])
+
+            zx_long_pos = None
+            if "zxdq" in last_row and "zxdkx" in last_row:
+                zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"])
+
+            weekly_ma_aligned = None
+            if "wma_bull" in last_row and pd.notna(last_row["wma_bull"]):
+                weekly_ma_aligned = bool(last_row["wma_bull"])
+
+            # 量能健康判断（简单判断：最近几天成交量是否健康）
+            volume_healthy = None
+            vol_col = None
+            if "volume" in df_prepared.columns:
+                vol_col = "volume"
+            elif "vol" in df_prepared.columns:
+                vol_col = "vol"
+
+            if vol_col:
+                recent_vol = df_prepared[vol_col].tail(5).mean()
+                ma_vol = df_prepared[vol_col].tail(20).mean()
+                if pd.notna(ma_vol) and ma_vol > 0:
+                    volume_healthy = bool(recent_vol >= ma_vol * 0.5)
+
+            # 获取日期
+            check_date = None
+            if "date" in last_row:
+                date_val = last_row["date"]
+                if isinstance(date_val, pd.Timestamp):
+                    check_date = date_val.strftime("%Y-%m-%d")
+                else:
+                    check_date = str(date_val)
+
+            # 获取收盘价
+            close_price = None
+            if "close" in last_row and pd.notna(last_row["close"]):
+                close_price = float(last_row["close"])
+
+            return {
+                "code": code,
+                "b1_passed": b1_passed,
+                "kdj_j": kdj_j,
+                "kdj_low_rank": None,
+                "zx_long_pos": zx_long_pos,
+                "weekly_ma_aligned": weekly_ma_aligned,
+                "volume_healthy": volume_healthy,
+                "close_price": close_price,
+                "check_date": check_date,
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                "code": code,
+                "b1_passed": False,
+                "kdj_j": None,
+                "zx_long_pos": None,
+                "weekly_ma_aligned": None,
+                "volume_healthy": None,
+                "error": str(e)
+            }
+
+    def analyze_stock(self, code: str, reviewer: str = "quant") -> Dict[str, Any]:
+        """执行完整的单股分析"""
+        import json
+        from datetime import datetime
+
+        b1_result = self.check_b1_strategy(code)
+        result = {
+            "code": code,
+            **b1_result
+        }
+
+        # 执行评分
+        if reviewer == "quant":
+            score_result = self._quant_review(code)
+            result.update(score_result)
+        else:
+            # TODO: 调用 LLM 评分
+            result["score"] = None
+            result["verdict"] = "UNKNOWN"
+            result["comment"] = "LLM 评分待实现"
+
+        # 保存分析结果到文件（供历史记录读取）
+        if result.get("score") is not None:
+            try:
+                # 使用今天的日期作为文件夹
+                today = datetime.now().strftime("%Y-%m-%d")
+                review_dir = ROOT / settings.review_dir / today
+                review_dir.mkdir(parents=True, exist_ok=True)
+
+                # 尝试获取股票的收盘价（用于历史记录显示）
+                close_price = result.get("close_price")
+                if close_price is None:
+                    df = self.load_stock_data(code)
+                    if df is not None and not df.empty:
+                        close_price = float(df.iloc[-1]["close"])
+
+                stock_file = review_dir / f"{code}.json"
+                save_data = {
+                    "code": code,
+                    "total_score": result.get("score"),
+                    "verdict": result.get("verdict"),
+                    "signal_type": result.get("signal_type"),
+                    "comment": result.get("comment"),
+                    "trend_reasoning": result.get("trend_reasoning"),
+                    "position_reasoning": result.get("position_reasoning"),
+                    "volume_reasoning": result.get("volume_reasoning"),
+                    "abnormal_move_reasoning": result.get("abnormal_move_reasoning"),
+                    "scores": result.get("scores"),
+                    "b1_passed": result.get("b1_passed"),
+                    "kdj_j": result.get("kdj_j"),
+                    "close_price": close_price,  # 保存收盘价
+                    "analysis_date": today,
+                }
+
+                with open(stock_file, "w", encoding="utf-8") as f:
+                    json.dump(save_data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                # 保存失败不影响主流程
+                import traceback
+                traceback.print_exc()
+
+        return result
+
+    def _quant_review(self, code: str) -> Dict[str, Any]:
+        """量化评分"""
+        # 添加 agent 和 pipeline 目录到 Python 路径
+        agent_dir = ROOT / "agent"
+        pipeline_dir = ROOT / "pipeline"
+        if str(agent_dir) not in sys.path:
+            sys.path.insert(0, str(agent_dir))
+        if str(pipeline_dir) not in sys.path:
+            sys.path.insert(0, str(pipeline_dir))
+
+        from quant_reviewer import QuantReviewer, load_config
+
+        df = self.load_stock_data(code)
+        if df is None or df.empty:
+            return {
+                "score": 0,
+                "verdict": "FAIL",
+                "comment": "数据不存在"
+            }
+
+        try:
+            # 加载配置并创建 reviewer
+            config = load_config()
+            reviewer = QuantReviewer(config)
+
+            # 调用量化评分 - 使用 review_stock_df 避免重复加载数据
+            result = reviewer.review_stock_df(code, df)
+
+            return {
+                "score": result.get("total_score", 0),
+                "verdict": result.get("verdict", "FAIL"),
+                "comment": result.get("comment", ""),
+                "signal_type": result.get("signal_type", ""),
+                # 返回详细的评分信息
+                "scores": result.get("scores", {}),
+                "trend_reasoning": result.get("trend_reasoning", ""),
+                "position_reasoning": result.get("position_reasoning", ""),
+                "volume_reasoning": result.get("volume_reasoning", ""),
+                "abnormal_move_reasoning": result.get("abnormal_move_reasoning", ""),
+                "signal_reasoning": result.get("signal_reasoning", ""),
+            }
+        except FileNotFoundError as e:
+            return {
+                "score": 0,
+                "verdict": "FAIL",
+                "comment": f"配置文件或数据文件不存在: {str(e)}"
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                "score": 0,
+                "verdict": "FAIL",
+                "comment": f"评分失败: {str(e)}"
+            }
+
+    def get_candidates_history(self, limit: int = 30) -> list:
+        """获取候选历史"""
+        import json
+
+        candidates_dir = ROOT / settings.candidates_dir
+        review_dir = ROOT / settings.review_dir
+        history_by_date: dict[str, dict[str, Any]] = {}
+
+        # 读取所有历史文件
+        for file in sorted(candidates_dir.glob("candidates_*.json"), reverse=True)[:limit]:
+            if file.name == "candidates_latest.json":
+                continue
+            try:
+                with open(file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    pick_date = self._normalize_pick_date(data.get("pick_date", file.stem.split("_")[-1]))
+                    if not pick_date:
+                        continue
+                    pass_count = 0
+
+                    suggestion_file = review_dir / str(pick_date) / "suggestion.json"
+                    if suggestion_file.exists():
+                        try:
+                            with open(suggestion_file, "r", encoding="utf-8") as sf:
+                                suggestion_data = json.load(sf)
+                            recommendations = suggestion_data.get("recommendations", [])
+                            pass_count = sum(1 for item in recommendations if item.get("verdict") == "PASS")
+                        except Exception:
+                            pass_count = 0
+
+                    history_by_date[pick_date] = {
+                        "date": pick_date,
+                        "count": len(data.get("candidates", [])),
+                        "pass": pass_count,
+                        "file": str(file)
+                    }
+            except:
+                pass
+
+        history = sorted(history_by_date.values(), key=lambda item: item["date"], reverse=True)
+        return history[:limit]
+
+    def get_analysis_results(self, pick_date: Optional[str] = None) -> Dict[str, Any]:
+        """获取分析结果"""
+        import json
+        pick_date = self._normalize_pick_date(pick_date)
+
+        if not pick_date:
+            # 获取最新日期
+            pick_date = self.get_latest_candidate_date()
+
+        if not pick_date:
+            return {"pick_date": None, "results": [], "total": 0, "min_score_threshold": 4.0}
+
+        suggestion_file = ROOT / settings.review_dir / pick_date / "suggestion.json"
+        review_dir = ROOT / settings.review_dir / pick_date
+        _, candidate_codes_list = self.load_candidate_codes(pick_date)
+        candidate_codes = set(candidate_codes_list)
+
+        try:
+            detailed_results = []
+            if review_dir.exists() and candidate_codes:
+                for code in candidate_codes_list:
+                    stock_file = review_dir / f"{code}.json"
+                    if not stock_file.exists():
+                        continue
+                    with open(stock_file, "r", encoding="utf-8") as f:
+                        item = json.load(f)
+                    detailed_results.append({
+                        "code": item.get("code", code),
+                        "verdict": item.get("verdict"),
+                        "total_score": item.get("total_score", item.get("score")),
+                        "signal_type": item.get("signal_type"),
+                        "comment": item.get("comment"),
+                    })
+
+            if detailed_results:
+                return {
+                    "pick_date": pick_date,
+                    "results": detailed_results,
+                    "total": len(detailed_results),
+                    "min_score_threshold": settings.min_score_threshold,
+                }
+
+            if not suggestion_file.exists():
+                return {"pick_date": pick_date, "results": [], "total": 0, "min_score_threshold": 4.0}
+
+            with open(suggestion_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            recommendations = data.get("recommendations", [])
+            if candidate_codes:
+                recommendations = [
+                    item for item in recommendations
+                    if item.get("code") in candidate_codes
+                ]
+            return {
+                "pick_date": pick_date,
+                "results": recommendations,
+                "total": len(recommendations),
+                "min_score_threshold": data.get("min_score_threshold", 4.0)
+            }
+        except:
+            return {"pick_date": pick_date, "results": [], "total": 0, "min_score_threshold": 4.0}
+
+    def get_stock_history_checks(self, code: str, days: int = 30) -> list:
+        """
+        获取股票历史检查记录（优先从持久化文件读取）
+
+        注意：check_date 代表交易日日期，数据为该交易日收盘后的检查结果。
+        由于只能获取收盘后的数据，所以日期含义是交易日而非检查执行时间。
+
+        Args:
+            code: 股票代码
+            days: 返回最近N个交易日的数据，最多30天
+        """
+        import json
+        from datetime import datetime, timedelta
+
+        # 限制最多返回30天
+        days = min(days, 30)
+
+        # 优先尝试从持久化文件读取
+        history_dir = ROOT / settings.review_dir / "history"
+        stock_history_file = history_dir / f"{code}.json"
+
+        if stock_history_file.exists():
+            try:
+                with open(stock_history_file, "r") as f:
+                    data = json.load(f)
+                history = data.get("history", [])
+
+                # 限制返回30天数据
+                return history[:days]
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+
+        # 如果没有持久化数据，则实时计算（但不包含评分数据）
+        df = self.load_stock_data(code)
+        if df is None or df.empty:
+            return []
+
+        # 计算涨跌幅（如果不存在）
+        if "change_pct" not in df.columns:
+            df["change_pct"] = df["close"].pct_change() * 100
+
+        selector = self._build_b1_selector()
+
+        # 建立日期到股票数据的映射
+        date_to_price = {}  # {date_str: {close_price, change_pct}}
+        for _, row in df.iterrows():
+            date_str = row["date"].strftime("%Y-%m-%d")
+            change_pct = row.get("change_pct")
+            if pd.isna(change_pct):
+                change_pct = None
+            elif isinstance(change_pct, (int, float)):
+                change_pct = float(change_pct)
+            else:
+                change_pct = None
+
+            date_to_price[date_str] = {
+                "close_price": float(row["close"]) if pd.notna(row.get("close")) else None,
+                "change_pct": change_pct,
+            }
+
+        history = []
+
+        # 获取最近days个交易日的日期
+        recent_trading_days = df.tail(days).iloc[::-1]
+
+        for _, row in recent_trading_days.iterrows():
+            date_str = row["date"].strftime("%Y-%m-%d")
+            price_data = date_to_price.get(date_str, {})
+
+            # 计算B1指标
+            try:
+                # 找到该日期在股票数据中的位置
+                df_before = df[df["date"] <= date_str].copy()
+                if len(df_before) < 60:
+                    continue
+
+                # 准备数据并获取最后一行
+                df_prepared = selector.prepare_df(df_before)
+                last_row = df_prepared.iloc[-1]
+
+                history.append({
+                    "check_date": date_str,
+                    "close_price": price_data.get("close_price"),
+                    "change_pct": price_data.get("change_pct"),
+                    "kdj_j": float(last_row["J"]) if pd.notna(last_row.get("J")) else None,
+                    "kdj_low_rank": None,
+                    "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
+                    "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
+                    "volume_healthy": None,
+                    "b1_passed": bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False,
+                    "score": None,
+                    "verdict": None,
+                    "signal_type": None,
+                })
+            except Exception as e:
+                # 跳过计算失败的日期
+                import traceback
+                traceback.print_exc()
+                continue
+
+        return history
+
+    def generate_stock_history_checks(self, code: str, days: int = 30, clean: bool = True) -> dict:
+        """
+        重新刷新并持久化股票历史检查数据
+
+        为每个交易日生成收盘后的完整检查数据（包括B1检查、评分、信号）。
+        支持流式更新，每生成一条就写入文件。
+
+        Args:
+            code: 股票代码
+            days: 生成最近N个交易日的历史数据
+            clean: 是否先清理旧数据
+        """
+        import json
+        import os
+
+        df = self.load_stock_data(code)
+        if df is None or df.empty:
+            return {"success": False, "error": "数据不存在"}
+
+        # 计算涨跌幅（如果不存在）
+        if "change_pct" not in df.columns:
+            df["change_pct"] = df["close"].pct_change() * 100
+
+        selector = self._build_b1_selector()
+
+        # 创建历史数据存储目录
+        history_dir = ROOT / settings.review_dir / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+
+        stock_history_file = history_dir / f"{code}.json"
+
+        # 如果需要清理，先删除旧文件
+        if clean and stock_history_file.exists():
+            os.remove(stock_history_file)
+
+        # 获取最近days个交易日
+        recent_df = df.tail(days).copy()
+
+        # 初始化空数据文件（标记为生成中）
+        initial_data = {
+            "code": code,
+            "generating": True,
+            "total": len(recent_df),
+            "generated": 0,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "history": [],
+        }
+
+        with open(stock_history_file, "w", encoding="utf-8") as f:
+            json.dump(initial_data, f, ensure_ascii=False, indent=2)
+
+        generated_count = 0
+        history_records = []
+
+        # 遍历每个交易日，执行B1检查和评分
+        for idx, row in recent_df.iterrows():
+            check_date = row["date"].strftime("%Y-%m-%d")
+
+            # 获取该日期之前的数据
+            df_before = df[df["date"] <= row["date"]].copy()
+            if len(df_before) < 60:
+                continue
+
+            try:
+                # 准备数据并获取最后一行
+                df_prepared = selector.prepare_df(df_before)
+                last_row = df_prepared.iloc[-1]
+
+                # 计算涨跌幅
+                change_pct = row.get("change_pct")
+                if pd.isna(change_pct):
+                    change_pct = None
+                elif isinstance(change_pct, (int, float)):
+                    change_pct = float(change_pct)
+                else:
+                    change_pct = None
+
+                # 获取B1检查结果
+                b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
+                kdj_j = float(last_row["J"]) if pd.notna(last_row.get("J")) else None
+                zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
+                weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
+
+                # 计算评分和信号（基于该交易日收盘数据，传入check_date）
+                score_result = self._quant_review_for_date(code, df_before, check_date)
+
+                record = {
+                    "check_date": check_date,
+                    "close_price": float(row["close"]) if pd.notna(row.get("close")) else None,
+                    "change_pct": change_pct,
+                    "kdj_j": kdj_j,
+                    "kdj_low_rank": None,
+                    "zx_long_pos": zx_long_pos,
+                    "weekly_ma_aligned": weekly_ma_aligned,
+                    "volume_healthy": None,
+                    "b1_passed": b1_passed,
+                    "score": score_result.get("score"),
+                    "verdict": score_result.get("verdict"),
+                    "signal_type": score_result.get("signal_type"),
+                }
+                history_records.append(record)
+                generated_count += 1
+
+                # 每生成一条就更新文件
+                current_data = {
+                    "code": code,
+                    "generating": generated_count < len(recent_df),
+                    "total": len(recent_df),
+                    "generated": generated_count,
+                    "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "history": sorted(history_records, key=lambda x: x["check_date"], reverse=True),
+                }
+
+                with open(stock_history_file, "w", encoding="utf-8") as f:
+                    json.dump(current_data, f, ensure_ascii=False, indent=2)
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                continue
+
+        # 最终更新文件状态
+        final_data = {
+            "code": code,
+            "generating": False,
+            "total": len(recent_df),
+            "generated": generated_count,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "history": sorted(history_records, key=lambda x: x["check_date"], reverse=True),
+        }
+
+        with open(stock_history_file, "w", encoding="utf-8") as f:
+            json.dump(final_data, f, ensure_ascii=False, indent=2)
+
+        return {
+            "success": True,
+            "code": code,
+            "generated_count": generated_count,
+            "file": str(stock_history_file),
+        }
+
+    def _quant_review_for_date(self, code: str, df: pd.DataFrame, check_date: str = None) -> dict:
+        """针对特定日期的数据进行量化评分
+
+        注意：此方法用于历史数据生成，会绕过 prefilter 检查。
+
+        Args:
+            code: 股票代码
+            df: 股票数据DataFrame（该日期之前的所有数据）
+            check_date: 检查日期（YYYY-MM-DD格式），用于指定评分的截止日期
+        """
+        if df is None or df.empty:
+            return {
+                "score": None,
+                "verdict": "FAIL",
+                "signal_type": None,
+            }
+
+        try:
+            # 添加 agent 和 pipeline 目录到 Python 路径
+            agent_dir = ROOT / "agent"
+            pipeline_dir = ROOT / "pipeline"
+            if str(agent_dir) not in sys.path:
+                sys.path.insert(0, str(agent_dir))
+            if str(pipeline_dir) not in sys.path:
+                sys.path.insert(0, str(pipeline_dir))
+
+            from quant_reviewer import QuantReviewer, load_config, prepare_review_frame, review_prepared_frame
+
+            # 加载配置
+            config = load_config()
+
+            # 直接调用评分逻辑，绕过 prefilter
+            frame = prepare_review_frame(df, config)
+            result = review_prepared_frame(frame, config, code=code, asof_date=check_date, strategy=None)
+
+            return {
+                "score": result.get("total_score"),
+                "verdict": result.get("verdict", "FAIL"),
+                "signal_type": result.get("signal_type"),
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {
+                "score": None,
+                "verdict": "FAIL",
+                "signal_type": None,
+            }
+
+
+# 全局实例
+analysis_service = AnalysisService()
