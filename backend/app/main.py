@@ -17,9 +17,15 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).parent.parent.parent
 BACKEND = Path(__file__).parent.parent
 
-# 确保 PYTHONPATH 包含项目根目录
-if str(ROOT) not in os.environ.get("PYTHONPATH", ""):
-    os.environ.setdefault("PYTHONPATH", f"{ROOT}:{BACKEND}")
+# 确保 PYTHONPATH 包含项目根目录，使用平台相关分隔符兼容 Windows。
+pythonpath_entries = [
+    entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry
+]
+for required_path in (str(ROOT), str(BACKEND)):
+    if required_path not in pythonpath_entries:
+        pythonpath_entries.append(required_path)
+if pythonpath_entries:
+    os.environ["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
 from app.config import settings
 from sqlalchemy import text

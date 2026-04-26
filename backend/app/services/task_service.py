@@ -5,7 +5,7 @@ Task Service
 """
 import asyncio
 import json
-import subprocess
+import locale
 import os
 import sys
 from datetime import datetime
@@ -132,7 +132,7 @@ class TaskService:
             line = await process.stdout.readline()
             if not line:
                 break
-            line = line.decode().strip()
+            line = line.decode(locale.getpreferredencoding(False), errors="replace").strip()
 
             if line:
                 log_type = parse_log_type(line)

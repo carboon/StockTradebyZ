@@ -11,6 +11,11 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover
+    msvcrt = None
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
 STATE_DIR = ROOT / "data" / "run"
@@ -42,12 +47,16 @@ def acquire_tushare_slot(endpoint: str = "unknown") -> None:
         return
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.touch(exist_ok=True)
+    if not LOCK_FILE.exists():
+        LOCK_FILE.write_text("0", encoding="utf-8")
 
     while True:
         with LOCK_FILE.open("r+", encoding="utf-8") as lock_handle:
             if fcntl is not None:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
 
             try:
                 state = _load_state()
@@ -68,5 +77,8 @@ def acquire_tushare_slot(endpoint: str = "unknown") -> None:
             finally:
                 if fcntl is not None:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:
+                    lock_handle.seek(0)
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
 
         time.sleep(wait_seconds)

@@ -16,6 +16,12 @@
 ./start-docker.sh up
 ```
 
+Windows 本地运行请看 [WINDOWS_DEPLOYMENT.md](WINDOWS_DEPLOYMENT.md)，推荐直接执行：
+
+```powershell
+.\bootstrap-local.bat
+```
+
 访问 http://localhost:3000 查看可视化界面。
 
 ---

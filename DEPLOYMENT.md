@@ -178,6 +178,38 @@ VITE_API_BASE_URL=http://127.0.0.1:8000/api
 
 ---
 
+## 一点五、Windows 本地一键部署
+
+Windows 不复用 `*.sh` 脚本，改用 `PowerShell + Python CLI` 入口。
+
+推荐直接执行：
+
+```powershell
+.\bootstrap-local.bat
+```
+
+常用命令：
+
+```powershell
+.\install-local.bat
+.\preflight-local.bat
+.\init-data.bat
+.\start-local.bat
+.\status-local.bat
+.\stop-local.bat
+.\uninstall-local.bat
+```
+
+说明：
+
+- `*.bat` 会自动调用同名 `*.ps1`
+- `*.ps1` 再调用共享控制器 `tools/localctl.py`
+- 现有 macOS / Linux 的 `*.sh` 入口保持不变
+
+详细说明请看 [WINDOWS_DEPLOYMENT.md](WINDOWS_DEPLOYMENT.md)。
+
+---
+
 ## 二、本地开发模式
 
 ### 2.0 本地数据库说明
