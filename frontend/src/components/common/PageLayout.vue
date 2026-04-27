@@ -1,0 +1,308 @@
+<template>
+  <el-container class="page-layout">
+    <!-- 侧边栏 -->
+    <el-aside :width="sidebarWidth" class="sidebar">
+      <div class="sidebar-header">
+        <el-icon :size="28" color="#00B4D8">
+          <TrendCharts />
+        </el-icon>
+        <span class="app-title">StockTrader</span>
+      </div>
+
+      <el-menu
+        :default-active="activeMenu"
+        :collapse="isCollapsed"
+        router
+        class="sidebar-menu"
+      >
+        <el-menu-item
+          v-for="route in menuRoutes"
+          :key="route.path"
+          :index="route.path"
+        >
+          <el-icon>
+            <component :is="route.icon" />
+          </el-icon>
+          <template #title>{{ route.meta.title }}</template>
+        </el-menu-item>
+      </el-menu>
+    </el-aside>
+
+    <!-- 主内容区 -->
+    <el-container class="main-container">
+      <!-- 顶部栏 -->
+      <el-header class="app-header">
+        <div class="header-left">
+          <el-button
+            :icon="isCollapsed ? Expand : Fold"
+            text
+            @click="toggleSidebar"
+          />
+        </div>
+        <div class="header-right">
+          <div
+            class="tushare-badge"
+            :class="configStore.tushareReady ? 'is-ready' : 'is-pending'"
+            @click="router.push('/config')"
+          >
+            <span class="badge-dot" />
+            <span>{{ configStore.tushareReady ? 'Tushare 已就绪' : 'Tushare 待配置' }}</span>
+          </div>
+          <div
+            class="tushare-badge"
+            :class="configStore.dataInitialized ? 'is-ready' : 'is-pending'"
+            @click="router.push('/update')"
+          >
+            <span class="badge-dot" />
+            <span>{{ configStore.dataInitialized ? '初始化已完成' : '初始化未完成' }}</span>
+          </div>
+          <el-button text @click="router.push('/config')">
+            <el-icon><Setting /></el-icon>
+          </el-button>
+        </div>
+      </el-header>
+
+      <div v-if="!configStore.apiAvailable" class="status-banner">
+        <div class="status-banner__content">
+          <strong>后端服务暂不可用。</strong>
+          <span>{{ configStore.statusError || '请确认后端已启动，再重新检查。' }}</span>
+        </div>
+        <el-button type="danger" plain @click="router.push('/config')">
+          去查看
+        </el-button>
+      </div>
+      <div v-else-if="configStore.tushareStatus && !configStore.tushareReady" class="status-banner">
+        <div class="status-banner__content">
+          <strong>系统已启动，但行情数据源尚未就绪。</strong>
+          <span>{{ configStore.tushareStatus.message || '请先在配置页填写并验证 TUSHARE_TOKEN。' }}</span>
+        </div>
+        <el-button type="warning" plain @click="router.push('/config')">
+          去配置
+        </el-button>
+      </div>
+      <div
+        v-else-if="configStore.tushareReady && !configStore.dataInitialized"
+        class="status-banner status-banner--info"
+      >
+        <div class="status-banner__content">
+          <strong>数据源已就绪，但尚未完成首次初始化。</strong>
+          <span>{{ configStore.initializationMessage }}</span>
+        </div>
+        <el-button type="primary" plain @click="router.push('/update')">
+          去任务中心
+        </el-button>
+      </div>
+
+      <!-- 页面内容 -->
+      <el-main class="app-main">
+        <router-view v-slot="{ Component, route: currentRoute }">
+          <div class="page-shell">
+            <template v-if="currentRoute.meta.keepAlive">
+              <KeepAlive>
+                <component :is="Component" />
+              </KeepAlive>
+            </template>
+            <template v-else>
+              <component :is="Component" />
+            </template>
+          </div>
+        </router-view>
+      </el-main>
+    </el-container>
+  </el-container>
+</template>
+
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import {
+  TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document,
+} from '@element-plus/icons-vue'
+import { useConfigStore } from '@/store/config'
+
+const router = useRouter()
+const route = useRoute()
+const configStore = useConfigStore()
+
+const isCollapsed = ref(false)
+
+const sidebarWidth = computed(() => isCollapsed.value ? '64px' : '200px')
+
+const activeMenu = computed(() => route.path)
+
+const menuRoutes = [
+  { path: '/tomorrow-star', icon: Star, meta: { title: '明日之星', icon: 'Star' } },
+  { path: '/diagnosis', icon: Search, meta: { title: '单股诊断', icon: 'Search' } },
+  { path: '/watchlist', icon: View, meta: { title: '重点观察', icon: 'View' } },
+  { path: '/update', icon: Refresh, meta: { title: '任务中心', icon: 'Refresh' } },
+  { path: '/system-info', icon: Document, meta: { title: '系统说明', icon: 'Document' } },
+]
+
+function toggleSidebar() {
+  isCollapsed.value = !isCollapsed.value
+}
+</script>
+
+<style scoped lang="scss">
+.page-layout {
+  width: 100%;
+  height: 100vh;
+}
+
+.sidebar {
+  background-color: #1e293b;
+  transition: width 0.3s;
+
+  .sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 20px;
+    color: white;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+
+    .app-title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+  }
+
+  .sidebar-menu {
+    border: none;
+    background-color: transparent;
+
+    :deep(.el-menu-item) {
+      color: rgba(255, 255, 255, 0.7);
+
+      &:hover,
+      &.is-active {
+        background-color: rgba(0, 180, 216, 0.2);
+        color: #00B4D8;
+      }
+    }
+  }
+}
+
+.main-container {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: white;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0 20px;
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+.tushare-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  .badge-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+  }
+
+  &.is-ready {
+    color: #166534;
+    background: #dcfce7;
+
+    .badge-dot {
+      background: #16a34a;
+    }
+  }
+
+  &.is-pending {
+    color: #9a3412;
+    background: #ffedd5;
+
+    .badge-dot {
+      background: #f97316;
+    }
+  }
+}
+
+.status-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  background: linear-gradient(90deg, #fff7ed 0%, #fffbeb 100%);
+  border-bottom: 1px solid #fed7aa;
+
+  .status-banner__content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #9a3412;
+    font-size: 13px;
+  }
+
+  &.status-banner--info {
+    background: linear-gradient(90deg, #eff6ff 0%, #ecfeff 100%);
+    border-bottom: 1px solid #bfdbfe;
+
+    .status-banner__content {
+      color: #1d4ed8;
+    }
+  }
+}
+
+.app-main {
+  background-color: #f8fafb;
+  padding: 24px;
+  overflow-y: auto;
+
+  .page-shell {
+    width: 100%;
+    max-width: 1360px;
+    margin: 0 auto;
+  }
+
+  :deep(.page-shell > *) {
+    width: 100%;
+    box-sizing: border-box;
+  }
+}
+
+@media (max-width: 960px) {
+  .app-header {
+    padding: 0 16px;
+
+    .header-right {
+      gap: 6px;
+    }
+  }
+
+  .status-banner {
+    padding: 12px 16px;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .app-main {
+    padding: 16px;
+
+    .page-shell {
+      max-width: none;
+    }
+  }
+}
+</style>

@@ -1,0 +1,317 @@
+// 通用类型定义
+
+export interface StockInfo {
+  code: string
+  name?: string
+  market?: string
+  industry?: string
+  exists?: boolean
+}
+
+export interface Candidate {
+  id: number
+  pick_date: string
+  code: string
+  name?: string
+  strategy?: string
+  close_price?: number
+  turnover?: number
+  b1_passed?: boolean
+  kdj_j?: number
+}
+
+export interface AnalysisResult {
+  id: number
+  pick_date: string
+  code: string
+  reviewer?: string
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  total_score?: number
+  signal_type?: string
+  comment?: string
+}
+
+export interface B1Check {
+  check_date: string
+  close_price?: number
+  change_pct?: number
+  kdj_j?: number
+  kdj_low_rank?: number
+  zx_long_pos?: boolean
+  weekly_ma_aligned?: boolean
+  volume_healthy?: boolean
+  b1_passed?: boolean
+  score?: number
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  signal_type?: string
+  notes?: string
+}
+
+export interface WatchlistItem {
+  id: number
+  code: string
+  name?: string
+  add_reason?: string
+  entry_price?: number
+  position_ratio?: number
+  priority: number
+  is_active: boolean
+  added_at: string
+}
+
+export interface WatchlistAnalysis {
+  id: number
+  watchlist_id: number
+  analysis_date: string
+  close_price?: number
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  score?: number
+  trend_outlook?: 'bullish' | 'bearish' | 'neutral'
+  buy_action?: 'buy' | 'wait' | 'avoid'
+  hold_action?: 'hold' | 'hold_cautious' | 'trim' | 'add_on_pullback'
+  risk_level?: 'low' | 'medium' | 'high'
+  buy_recommendation?: string
+  hold_recommendation?: string
+  risk_recommendation?: string
+  support_level?: number
+  resistance_level?: number
+  recommendation?: string
+}
+
+export interface Task {
+  id: number
+  task_type: string
+  trigger_source: 'manual' | 'auto' | 'system' | string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  task_stage?: string
+  progress: number
+  params_json?: Record<string, any>
+  result_json?: Record<string, any>
+  error_message?: string
+  summary?: string
+  started_at?: string
+  completed_at?: string
+  created_at: string
+}
+
+export interface DataStatus {
+  raw_data: { exists: boolean; count: number; latest_date?: number | string }
+  candidates: { exists: boolean; count: number; latest_date?: string }
+  analysis: { exists: boolean; count: number; latest_date?: string }
+  kline: { exists: boolean; count: number; latest_date?: string | null }
+}
+
+// K线数据
+export interface KLineDataPoint {
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  ma5?: number
+  ma10?: number
+  ma20?: number
+  ma60?: number
+}
+
+export interface KLineData {
+  code: string
+  name?: string
+  daily: KLineDataPoint[]
+  weekly?: KLineDataPoint[]
+}
+
+export interface ConfigItem {
+  key: string
+  value: string
+  description?: string | null
+}
+
+export interface ConfigResponse {
+  configs: ConfigItem[]
+}
+
+export interface TushareVerifyResponse {
+  valid: boolean
+  message: string
+}
+
+export interface SaveEnvResponse {
+  status: string
+  message: string
+}
+
+export interface TushareStatusResponse {
+  configured: boolean
+  available?: boolean
+  message?: string
+  token_prefix?: string
+  data_status?: DataStatus
+  error?: string
+}
+
+export interface TomorrowStarHistoryItem {
+  date: string
+  count?: number
+  pass?: number
+}
+
+export interface TomorrowStarDatesResponse {
+  dates: string[]
+  history: TomorrowStarHistoryItem[]
+}
+
+export interface FreshnessResponse {
+  latest_trade_date?: string | null
+  local_latest_date?: string | null
+  latest_candidate_date?: string | null
+  latest_result_date?: string | null
+  needs_update: boolean
+  freshness_version?: string
+  running_task_id?: number | null
+  running_task_status?: Task['status'] | null
+}
+
+export interface CandidatesResponse {
+  pick_date?: string | null
+  candidates: Candidate[]
+  total: number
+}
+
+export interface AnalysisResultsResponse {
+  pick_date?: string | null
+  results: AnalysisResult[]
+  total: number
+  min_score_threshold: number
+}
+
+export interface DiagnosisHistoryResponse {
+  code: string
+  name?: string
+  history: B1Check[]
+  total: number
+}
+
+export interface DiagnosisHistoryStatusResponse {
+  exists: boolean
+  generating: boolean
+  count: number
+  total?: number
+  generated_at?: string
+}
+
+export interface DiagnosisAnalysisDetails {
+  kdj_j?: number
+  zx_long_pos?: boolean
+  weekly_ma_aligned?: boolean
+  volume_healthy?: boolean
+  scores?: Record<string, number>
+  trend_reasoning?: string
+  position_reasoning?: string
+  volume_reasoning?: string
+  abnormal_move_reasoning?: string
+  signal_type?: string
+  signal_reasoning?: string
+  comment?: string
+}
+
+export interface DiagnosisAnalyzeResponse {
+  code: string
+  name?: string
+  current_price?: number
+  b1_passed?: boolean
+  score?: number
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  analysis: DiagnosisAnalysisDetails
+  kline_data?: {
+    dates: string[]
+    open: number[]
+    high: number[]
+    low: number[]
+    close: number[]
+    volume: number[]
+  } | null
+}
+
+export interface WatchlistResponse {
+  items: WatchlistItem[]
+  total: number
+}
+
+export interface WatchlistAnalysisResponse {
+  code: string
+  analyses: WatchlistAnalysis[]
+  total: number
+}
+
+export interface WatchlistAnalyzeResponse {
+  status: string
+  code: string
+  analysis: WatchlistAnalysis
+}
+
+export interface WatchlistChartResponse {
+  code: string
+  kline: KLineData
+  latest_analysis: WatchlistAnalysis | null
+}
+
+export interface TaskResponse {
+  task: Task
+  ws_url: string
+}
+
+export interface TaskListResponse {
+  tasks: Task[]
+  total: number
+}
+
+export interface TaskLogItem {
+  id: number
+  task_id: number
+  log_time: string
+  level: string
+  stage?: string | null
+  message: string
+}
+
+export interface TaskLogListResponse {
+  task_id: number
+  logs: TaskLogItem[]
+  total: number
+}
+
+export interface TaskOverviewCard {
+  key: string
+  label: string
+  value: string
+  status: string
+  meta?: string | null
+}
+
+export interface TaskAlertItem {
+  level: string
+  title: string
+  message: string
+}
+
+export interface TaskOverviewResponse {
+  cards: TaskOverviewCard[]
+  alerts: TaskAlertItem[]
+}
+
+export interface TaskRunningResponse {
+  tasks: Task[]
+  total: number
+}
+
+export interface TaskEnvironmentSection {
+  key: string
+  label: string
+  items: Record<string, any>
+}
+
+export interface TaskEnvironmentResponse {
+  sections: TaskEnvironmentSection[]
+}

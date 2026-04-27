@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+*.egg-info/
+dist/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# 数据
+data/*
+!data/.gitkeep
+data/db/*.db
+data/db/*.db-*
+
+# 环境
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志
+*.log
+data/logs/
+
+# 临时文件
+*.tmp
+.DS_Store
+
+# Git
+.git/
+.gitignore

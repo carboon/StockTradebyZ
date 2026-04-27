@@ -1,0 +1,47 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app:/app/backend
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# 复制项目文件
+COPY pipeline/ /app/pipeline/
+COPY agent/ /app/agent/
+COPY config/ /app/config/
+COPY dashboard/ /app/dashboard/
+COPY requirements.txt /app/
+
+# 安装 Python 依赖
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 复制后端代码
+COPY backend/requirements.txt /app/backend/
+RUN pip install --no-cache-dir -r backend/requirements.txt
+
+COPY backend/app /app/backend/app
+
+# 创建数据目录
+RUN mkdir -p /app/data/raw /app/data/candidates /app/data/review /app/data/kline /app/data/db /app/data/logs
+
+# 暴露端口
+EXPOSE 8000
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# 启动命令
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
