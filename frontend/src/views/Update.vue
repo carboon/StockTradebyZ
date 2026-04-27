@@ -1388,8 +1388,7 @@ function buildWebSocketUrl(path: string) {
   }
 
   .connectivity-card,
-  .diagnostics-card,
-  .next-actions-card {
+  .diagnostics-card {
     border-radius: 14px;
   }
 
@@ -1457,40 +1456,6 @@ function buildWebSocketUrl(path: string) {
 
   .diagnostic-item__action {
     margin-top: 6px;
-    font-size: 13px;
-  }
-
-  .next-actions-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-  }
-
-  .next-action-card {
-    padding: 16px;
-    border: 1px solid #dbeafe;
-    border-radius: 12px;
-    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-    text-align: left;
-    cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-  }
-
-  .next-action-card:hover {
-    transform: translateY(-1px);
-    border-color: #60a5fa;
-    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.08);
-  }
-
-  .next-action-card__title {
-    margin-bottom: 8px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-  }
-
-  .next-action-card__desc {
-    color: var(--color-text-secondary);
-    line-height: 1.7;
     font-size: 13px;
   }
 
@@ -1950,10 +1915,6 @@ function buildWebSocketUrl(path: string) {
     .connectivity-card__row {
       flex-direction: column;
       align-items: flex-start;
-    }
-
-    .next-actions-grid {
-      grid-template-columns: 1fr;
     }
 
     .health-summary {
