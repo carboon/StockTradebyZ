@@ -163,9 +163,10 @@ def install_with_npm_fallback(npm_bin: str) -> str:
     return ""
 
 
-def write_frontend_env(env_values: dict[str, str] | None = None) -> str:
+def write_frontend_env(env_values: dict[str, str] | None = None, actual_backend_port: int = None) -> str:
     env_values = env_values or load_env_file(ENV_FILE)
-    backend_port = env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT))
+    # 如果提供了实际使用的后端端口，则使用它；否则使用配置中的端口
+    backend_port = str(actual_backend_port) if actual_backend_port is not None else env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT))
     backend_host = env_values.get("BACKEND_HOST", "127.0.0.1")
     api_base_url = env_values.get("VITE_API_BASE_URL", "").strip()
 
@@ -273,11 +274,26 @@ def pid_listening_on_port(port: int) -> list[int]:
 
 
 def is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """检查端口是否被占用（尝试绑定）"""
     try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', port))
+            return False  # 可以绑定，说明端口未被占用
     except OSError:
-        return False
+        return True  # 无法绑定，说明端口已被占用
+
+
+def find_available_port(start_port: int, max_attempts: int = 100) -> int:
+    """查找可用的端口，从start_port开始尝试"""
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('0.0.0.0', port))
+                return port
+        except OSError:
+            continue
+    fail(f"无法找到可用端口（已尝试 {max_attempts} 个端口）")
+    return start_port
 
 
 def http_ok(url: str) -> bool:
@@ -418,7 +434,38 @@ def start(skip_preflight: bool = False) -> None:
     frontend_port = int(env_values.get("FRONTEND_PORT", str(DEFAULT_FRONTEND_PORT)))
     backend_host = env_values.get("BACKEND_HOST", "0.0.0.0")
     frontend_host = env_values.get("FRONTEND_HOST", "0.0.0.0")
-    write_frontend_env(env_values)
+    
+    # 检查并自动分配可用端口
+    original_backend_port = backend_port
+    original_frontend_port = frontend_port
+    
+    if is_port_open(backend_port):
+        log(f"[WARN] 后端端口 {backend_port} 已被占用，正在查找可用端口...")
+        backend_port = find_available_port(backend_port + 1)
+        log(f"[OK] 后端使用新端口: {backend_port}")
+    
+    if is_port_open(frontend_port):
+        log(f"[WARN] 前端端口 {frontend_port} 已被占用，正在查找可用端口...")
+        frontend_port = find_available_port(frontend_port + 1)
+        log(f"[OK] 前端使用新端口: {frontend_port}")
+    
+    # 如果端口发生变化，更新.env文件
+    if backend_port != original_backend_port or frontend_port != original_frontend_port:
+        env_content = ENV_FILE.read_text(encoding="utf-8")
+        if backend_port != original_backend_port:
+            env_content = env_content.replace(
+                f"BACKEND_PORT={original_backend_port}",
+                f"BACKEND_PORT={backend_port}"
+            )
+        if frontend_port != original_frontend_port:
+            env_content = env_content.replace(
+                f"FRONTEND_PORT={original_frontend_port}",
+                f"FRONTEND_PORT={frontend_port}"
+            )
+        ENV_FILE.write_text(env_content, encoding="utf-8")
+        log(f"[INFO] 已更新 .env 文件中的端口配置")
+    
+    write_frontend_env(env_values, actual_backend_port=backend_port)
 
     backend_pid = read_pid(BACKEND_PID_FILE)
     if backend_pid and process_exists(backend_pid):
