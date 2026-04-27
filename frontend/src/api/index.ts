@@ -87,6 +87,12 @@ export const apiStock = {
   // 获取 K线数据
   getKline: (code: string, days: number = 120, includeWeekly: boolean = true) =>
     api.post<{ code: string; days: number; include_weekly: boolean }, KLineData>('/v1/stock/kline', { code, days, include_weekly: includeWeekly }),
+
+  // 获取数据同步状态
+  getSyncStatus: () => api.get<never, any>('/v1/stock/sync/status'),
+
+  // 手动触发数据同步
+  triggerSync: () => api.post<null, any>('/v1/stock/sync/trigger'),
 }
 
 export const apiAnalysis = {

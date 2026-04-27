@@ -3,13 +3,20 @@ SQLAlchemy Database Models
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 数据库表模型定义
 """
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+# 北京时间时区 (UTC+8)
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def beijing_now() -> datetime:
+    """获取当前北京时间"""
+    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
 
 class Config(Base):
@@ -20,7 +27,7 @@ class Config(Base):
     key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now, onupdate=beijing_now)
 
 
 class Stock(Base):
@@ -31,8 +38,8 @@ class Stock(Base):
     name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     market: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # SH/SZ
     industry: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now, onupdate=beijing_now)
 
 
 class Candidate(Base):
@@ -47,7 +54,7 @@ class Candidate(Base):
     turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     kdj_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
 
 
 class AnalysisResult(Base):
@@ -63,7 +70,7 @@ class AnalysisResult(Base):
     signal_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
 
 
 class DailyB1Check(Base):
@@ -83,7 +90,7 @@ class DailyB1Check(Base):
     b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
 
 
 class Watchlist(Base):
@@ -97,7 +104,7 @@ class Watchlist(Base):
     position_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
 
 
 class WatchlistAnalysis(Base):
@@ -121,7 +128,7 @@ class WatchlistAnalysis(Base):
     resistance_level: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     recommendation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
 
 
 class Task(Base):
@@ -138,9 +145,9 @@ class Task(Base):
     result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=beijing_now)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)
 
 
 class TaskLog(Base):
@@ -149,7 +156,7 @@ class TaskLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[int] = mapped_column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
-    log_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    log_time: Mapped[datetime] = mapped_column(DateTime, default=beijing_now, index=True)
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
     stage: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -167,4 +174,4 @@ class DataUpdateLog(Base):
     status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=beijing_now)

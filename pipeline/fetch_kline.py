@@ -242,6 +242,43 @@ def fetch_one(
     else:
         logger.error("%s 三次抓取均失败，已跳过！", code)       
 
+def fetch_one_incremental(code: str, start_date: str, end_date: str, out_dir: Path):
+    """增量更新单只股票数据：读取本地最新日期，只下载缺失部分并合并。"""
+    csv_path = out_dir / f"{code}.csv"
+    existing_df = None
+    
+    # 1. 确定起始日期
+    if csv_path.exists():
+        try:
+            existing_df = pd.read_csv(csv_path)
+            existing_df["date"] = pd.to_datetime(existing_df["date"])
+            latest_local = existing_df["date"].max()
+            # 如果本地最新日期 >= 请求的结束日期，则无需更新
+            if latest_local >= pd.to_datetime(end_date):
+                return
+            start_dt = max(pd.to_datetime(start_date), latest_local + pd.Timedelta(days=1))
+            start_date = start_dt.strftime("%Y%m%d")
+        except Exception as e:
+            logger.warning(f"{code} 读取现有数据失败: {e}，将尝试全量覆盖")
+            existing_df = None
+
+    # 2. 获取新数据
+    new_df = _get_kline_tushare(code, start_date, end_date)
+    if new_df.empty:
+        return
+
+    # 3. 合并数据
+    if existing_df is not None:
+        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        combined_df = combined_df.drop_duplicates(subset=["date"], keep="last")
+        combined_df = combined_df.sort_values("date").reset_index(drop=True)
+    else:
+        combined_df = new_df
+
+    # 4. 验证并保存
+    combined_df = validate(combined_df)
+    combined_df.to_csv(csv_path, index=False)       
+
 
 
 # --------------------------- 配置加载 --------------------------- #

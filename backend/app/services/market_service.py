@@ -1,11 +1,13 @@
 """
 Market Service
 ~~~~~~~~~~~~~~~
-市场数据服务：获取最新交易日，判断数据是否需要更新
+市场数据服务：获取最新交易日，判断数据是否需要更新，管理同步状态
 """
 import json
 import os
 import pickle
+import time
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -16,6 +18,7 @@ from app.utils.tushare_rate_limit import acquire_tushare_slot
 ROOT = Path(__file__).parent.parent.parent.parent
 CACHE_DIR = ROOT / "data" / "cache"
 MARKET_CACHE_FILE = ROOT / "data" / ".market_cache.json"
+UPDATE_STATUS_FILE = ROOT / "data" / ".update_status.json"
 PREPARED_CACHE_PREFIX = "prepared_data"
 
 
@@ -30,6 +33,7 @@ class MarketService:
             self.token = os.environ.get("TUSHARE_TOKEN", "") or settings.tushare_token
         self._pro = None
         self._cache = self._load_cache()
+        self._ensure_status_file()
 
     @property
     def pro(self):
@@ -58,6 +62,32 @@ class MarketService:
         with open(MARKET_CACHE_FILE, "w") as f:
             json.dump(self._cache, f)
 
+    def _ensure_status_file(self):
+        """确保更新状态文件存在"""
+        if not UPDATE_STATUS_FILE.exists():
+            UPDATE_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._save_status({
+                "last_check_time": 0, 
+                "last_trade_date": None, 
+                "is_updating": False,
+                "update_type": None, # 'full' or 'incremental'
+                "progress": {"current": 0, "total": 0},
+                "message": ""
+            })
+
+    def _load_status(self) -> dict:
+        """加载更新状态"""
+        try:
+            with open(UPDATE_STATUS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {"last_check_time": 0, "last_trade_date": None, "is_updating": False}
+
+    def _save_status(self, status: dict):
+        """保存更新状态"""
+        with open(UPDATE_STATUS_FILE, "w") as f:
+            json.dump(status, f)
+
     def get_latest_trade_date(self) -> Optional[str]:
         """获取最新交易日
 
@@ -65,6 +95,18 @@ class MarketService:
             最新交易日字符串 (YYYY-MM-DD)，如果获取失败返回 None
         """
         try:
+            # 每次调用时重新检查 Token，确保使用最新的配置
+            from app.config import settings
+            current_token = os.environ.get("TUSHARE_TOKEN", "") or settings.tushare_token
+            if not current_token or current_token == "your_tushare_token_here":
+                print("Warning: TUSHARE_TOKEN not configured")
+                return None
+            
+            # 如果当前实例的 token 与配置不一致，重新初始化 pro 客户端
+            if self.token != current_token:
+                self.token = current_token
+                self._pro = None  # 重置 pro 客户端
+
             # 获取最近的交易日日历
             today = datetime.now().strftime("%Y%m%d")
             start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
@@ -115,11 +157,86 @@ class MarketService:
 
         return False, latest_date
 
-    def update_cache(self, latest_date: str):
-        """更新缓存"""
-        self._cache["latest_trade_date"] = latest_date
-        self._cache["updated_at"] = datetime.now().isoformat()
-        self._save_cache()
+    def get_network_time_beijing(self) -> datetime:
+        """
+        获取北京时间（网络时间），解决本地系统时间不准的问题。
+        优先使用 Tushare 服务器响应头，备选阿里云 NTP。
+        """
+        try:
+            # 方法1: 尝试从 Tushare 官网获取时间
+            resp = requests.head("https://tushare.pro", timeout=2)
+            date_str = resp.headers.get('Date')
+            if date_str:
+                from email.utils import parsedate_to_datetime
+                utc_dt = parsedate_to_datetime(date_str)
+                return utc_dt + timedelta(hours=8)
+        except:
+            pass
+        
+        # 方法2: 备选阿里云时间接口
+        try:
+            resp = requests.get("http://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp", timeout=2)
+            ts = int(resp.json()['data']['t']) / 1000
+            return datetime.fromtimestamp(ts)
+        except:
+            # 极端情况下回退到本地时间
+            print("Warning: Failed to fetch network time, using local system time.")
+            return datetime.now()
+
+    def get_sync_status(self) -> dict:
+        """获取当前数据同步状态供前端展示"""
+        status = self._load_status()
+        # 直接从 Tushare 获取最新交易日，不依赖缓存
+        remote_date = self.get_latest_trade_date()
+        
+        # 计算进度百分比
+        progress_pct = 0
+        if status.get("is_updating") and status.get("progress", {}).get("total", 0) > 0:
+            current = status["progress"].get("current", 0)
+            total = status["progress"].get("total", 0)
+            progress_pct = int((current / total) * 100)
+
+        return {
+            "local_last_date": status.get("last_trade_date"),
+            "remote_latest_date": remote_date,
+            "is_synced": status.get("last_trade_date") == remote_date and not status.get("is_updating"),
+            "is_updating": status.get("is_updating", False),
+            "update_type": status.get("update_type"), # 'full', 'incremental', or None
+            "progress_pct": progress_pct,
+            "progress_detail": status.get("progress", {}),
+            "message": status.get("message", ""),
+            "server_time": self.get_network_time_beijing().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+    def check_and_trigger_update(self) -> dict:
+        """
+        前端调用此接口。它不会立即执行更新，而是判断是否需要提交后台任务。
+        """
+        status = self._load_status()
+        now_beijing = self.get_network_time_beijing()
+        
+        # 1. 如果正在更新中，直接返回忙碌状态
+        if status.get("is_updating"):
+            return {"action": "wait", "message": "后台数据更新进行中..."}
+
+        # 2. 频率限制：如果距离上次检查不到 5 分钟，直接返回缓存结果
+        if now_beijing.timestamp() - status.get("last_check_time", 0) < 300:
+            return {
+                "action": "none", 
+                "local_date": status.get("last_trade_date"),
+                "message": "数据状态已缓存"
+            }
+
+        # 3. 提交后台异步任务去执行真正的逻辑
+        from app.services.task_service import trigger_data_sync_task
+        trigger_data_sync_task()
+        
+        # 更新检查时间
+        status["last_check_time"] = now_beijing.timestamp()
+        status["is_updating"] = True
+        self._save_status(status)
+        
+        return {"action": "started", "message": "已启动后台数据同步"}
 
     def get_local_latest_date(self) -> Optional[str]:
         """获取本地数据最新日期

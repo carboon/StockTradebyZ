@@ -1,19 +1,23 @@
 """
 Task Service
 ~~~~~~~~~~~~
-后台任务服务，集成 run_all.py
+后台任务服务，集成 run_all.py 及智能数据同步逻辑
 """
 import asyncio
 import json
 import locale
 import os
 import sys
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 
 ROOT = Path(__file__).parent.parent.parent.parent
+
+# 北京时间时区 (UTC+8)
+from app.models import beijing_now
 
 
 class TaskService:
@@ -60,7 +64,7 @@ class TaskService:
             return
 
         task.status = "running"
-        task.started_at = datetime.utcnow()
+        task.started_at = beijing_now()
         task.progress = 0
         task.task_stage = "starting"
         db.commit()
@@ -78,7 +82,7 @@ class TaskService:
             task.status = "completed"
             task.progress = 100
             task.task_stage = "completed"
-            task.completed_at = datetime.utcnow()
+            task.completed_at = beijing_now()
             self._record_task_log(db, task, "任务执行完成", "success")
             await self._publish_ops_task_event(task, "task_completed")
 
@@ -86,7 +90,7 @@ class TaskService:
             task.status = "failed"
             task.error_message = str(e)
             task.task_stage = "failed"
-            task.completed_at = datetime.utcnow()
+            task.completed_at = beijing_now()
             self._record_task_log(db, task, f"任务执行失败: {str(e)}", "error")
             await self._publish_ops_task_event(task, "task_failed")
 
@@ -297,3 +301,113 @@ class TaskService:
             message=message,
         )
         db.add(log)
+
+
+def trigger_data_sync_task():
+    """对外暴露的触发接口：启动后台线程执行智能同步"""
+    thread = threading.Thread(target=_run_smart_sync, daemon=True)
+    thread.start()
+
+def _run_smart_sync():
+    """后台线程执行的智能同步逻辑"""
+    from app.services.market_service import market_service
+    from app.services.tushare_service import TushareService
+    from pipeline.fetch_kline import fetch_one_incremental, load_codes_from_stocklist
+    
+    ts_service = TushareService()
+    ms = market_service
+    raw_dir = ROOT / "data" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # 1. 获取网络时间和远程最新交易日
+        now_beijing = ms.get_network_time_beijing()
+        remote_date_str = ms.get_latest_trade_date() # 格式 YYYY-MM-DD
+        
+        if not remote_date_str:
+            print("[Sync Task] Failed to get remote trade date.")
+            return
+
+        remote_date_yyyymmdd = remote_date_str.replace("-", "")
+        local_status = ms._load_status()
+        local_date_str = local_status.get("last_trade_date")
+        
+        stocklist_path = ROOT / "pipeline" / "stocklist.csv"
+        codes = load_codes_from_stocklist(stocklist_path) if stocklist_path.exists() else []
+        total_stocks = len(codes)
+        
+        print(f"[Sync Task] Network Time: {now_beijing}, Remote: {remote_date_str}, Local: {local_date_str}")
+
+        # 辅助函数：更新进度
+        def update_progress(current, total, msg):
+            status = ms._load_status()
+            status["progress"] = {"current": current, "total": total}
+            status["message"] = msg
+            ms._save_status(status)
+
+        # 2. 逻辑分支
+        if not codes:
+            print("[Sync Task] No stocks found in stocklist.csv")
+            return
+
+        if not local_date_str:
+            print("[Sync Task] No local data. Starting FULL update...")
+            update_progress(0, total_stocks * 2, "正在全量初始化数据 (1/2)...")
+            # 简化全量：只拉取最近一年
+            for i, code in enumerate(codes):
+                fetch_one_incremental(code, "20230101", remote_date_yyyymmdd, raw_dir)
+                if i % 50 == 0: update_progress(i, total_stocks, f"全量初始化中... ({i}/{total_stocks})")
+            update_progress(total_stocks, total_stocks, "全量初始化完成")
+            
+        elif local_date_str < remote_date_str:
+            print(f"[Sync Task] Data missing. Incremental update...")
+            update_progress(0, total_stocks, "正在补齐缺失的历史数据...")
+            start_dt = datetime.strptime(local_date_str, "%Y-%m-%d") + timedelta(days=1)
+            end_dt = datetime.strptime(remote_date_str, "%Y-%m-%d")
+            
+            current_dt = start_dt
+            day_count = 0
+            while current_dt <= end_dt:
+                date_str = current_dt.strftime("%Y%m%d")
+                day_count += 1
+                update_progress(day_count - 1, (end_dt - start_dt).days + 1, f"正在补齐 {date_str} 的数据...")
+                for code in codes:
+                    fetch_one_incremental(code, date_str, date_str, raw_dir)
+                current_dt += timedelta(days=1)
+                
+        elif now_beijing.hour >= 16:
+            print("[Sync Task] After 16:00, checking today's data...")
+            sample_df = ts_service.get_daily_data("000001.SZ", remote_date_yyyymmdd, remote_date_yyyymmdd)
+            
+            if sample_df is not None and not sample_df.empty:
+                print("[Sync Task] Today's data available. Updating...")
+                update_progress(0, total_stocks, "正在更新今日最新行情...")
+                for i, code in enumerate(codes):
+                    fetch_one_incremental(code, remote_date_yyyymmdd, remote_date_yyyymmdd, raw_dir)
+                    if i % 100 == 0: update_progress(i, total_stocks, f"更新今日数据中... ({i}/{total_stocks})")
+                update_progress(total_stocks, total_stocks, "今日数据更新完成")
+            else:
+                print("[Sync Task] Today's data not yet published.")
+                update_progress(0, 0, "今日数据尚未发布，无需更新")
+                
+        else:
+            print("[Sync Task] Before 16:00, no update needed.")
+            update_progress(0, 0, "当前未到数据更新时间 (16:00后)")
+
+        # 3. 更新最终状态
+        status = ms._load_status()
+        status["is_updating"] = False
+        status["last_trade_date"] = remote_date_str
+        status["update_type"] = None
+        status["message"] = "数据已是最新"
+        ms._save_status(status)
+        print("[Sync Task] Completed successfully.")
+
+    except Exception as e:
+        print(f"[Sync Task] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        status = ms._load_status()
+        status["is_updating"] = False
+        status["message"] = f"更新失败: {str(e)}"
+        ms._save_status(status)

@@ -18,6 +18,7 @@ from app.schemas import StockResponse, KLineDataRequest, KLineResponse, KLineDat
 from app.config import settings
 from app.services.analysis_service import analysis_service
 from app.services.tushare_service import TushareService
+from app.services.market_service import market_service
 
 router = APIRouter()
 
@@ -181,3 +182,16 @@ async def get_kline_data(request: KLineDataRequest) -> KLineResponse:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"加载K线数据失败: {str(e)}")
+
+
+@router.get("/sync/status")
+async def get_sync_status():
+    """获取数据同步状态（供前端展示）"""
+    return market_service.get_sync_status()
+
+
+@router.post("/sync/trigger")
+async def trigger_sync():
+    """手动触发数据同步"""
+    result = market_service.check_and_trigger_update()
+    return result

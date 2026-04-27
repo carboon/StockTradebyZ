@@ -462,10 +462,53 @@ def start(skip_preflight: bool = False) -> None:
                 f"FRONTEND_PORT={original_frontend_port}",
                 f"FRONTEND_PORT={frontend_port}"
             )
+        
+        # 自动更新 CORS_ORIGINS，添加新端口
+        cors_line_prefix = "CORS_ORIGINS="
+        for line in env_content.splitlines():
+            if line.startswith(cors_line_prefix):
+                old_cors_line = line
+                # 解析现有的 CORS 配置
+                cors_values = line[len(cors_line_prefix):].strip()
+                cors_list = [v.strip() for v in cors_values.split(',') if v.strip()]
+                
+                # 添加新端口（如果不存在）
+                new_origins = [
+                    f"http://localhost:{frontend_port}",
+                    f"http://127.0.0.1:{frontend_port}"
+                ]
+                for origin in new_origins:
+                    if origin not in cors_list:
+                        cors_list.append(origin)
+                
+                # 生成新的 CORS 行
+                new_cors_line = cors_line_prefix + ','.join(cors_list)
+                env_content = env_content.replace(old_cors_line, new_cors_line)
+                break
+        
         ENV_FILE.write_text(env_content, encoding="utf-8")
-        log(f"[INFO] 已更新 .env 文件中的端口配置")
+        log(f"[INFO] 已更新 .env 文件中的端口配置和 CORS 白名单")
     
-    write_frontend_env(env_values, actual_backend_port=backend_port)
+    # 更新前端环境变量文件（必须在启动前端之前）
+    api_base_url = write_frontend_env(env_values, actual_backend_port=backend_port)
+    
+    # 检查前端是否需要重启：如果前端已在运行但 .env.local 中的 API URL 不匹配当前后端端口
+    frontend_needs_restart = False
+    frontend_pid = read_pid(FRONTEND_PID_FILE)
+    if frontend_pid and process_exists(frontend_pid):
+        # 读取 .env.local 中的 API URL
+        if FRONTEND_ENV_FILE.exists():
+            current_api_url = FRONTEND_ENV_FILE.read_text(encoding="utf-8").strip()
+            expected_api_url = f"VITE_API_BASE_URL=http://{('127.0.0.1' if backend_host == '0.0.0.0' else backend_host)}:{backend_port}/api"
+            if current_api_url != expected_api_url:
+                log(f"[WARN] 前端 API 配置不匹配，需要重启前端...")
+                log(f"       当前: {current_api_url}")
+                log(f"       期望: {expected_api_url}")
+                stop_pid(frontend_pid, "前端")
+                if FRONTEND_PID_FILE.exists():
+                    FRONTEND_PID_FILE.unlink()
+                frontend_needs_restart = True
+                log(f"[OK] 旧前端进程已停止")
 
     backend_pid = read_pid(BACKEND_PID_FILE)
     if backend_pid and process_exists(backend_pid):
@@ -483,10 +526,9 @@ def start(skip_preflight: bool = False) -> None:
 
     wait_backend_ready(backend_port)
 
-    frontend_pid = read_pid(FRONTEND_PID_FILE)
-    if frontend_pid and process_exists(frontend_pid):
-        log(f"前端已在运行，PID={frontend_pid}")
-    else:
+    # 检查前端是否需要重启（因为后端端口变化）
+    if frontend_needs_restart:
+        log(f"[INFO] 正在重启前端以应用新的后端端口配置...")
         npm_bin = require_command(["npm.cmd", "npm"], "npm")
         env = merged_runtime_env()
         pid = start_process(
@@ -496,7 +538,22 @@ def start(skip_preflight: bool = False) -> None:
             ROOT / "frontend",
             env,
         )
-        log(f"前端已启动，PID={pid}，日志: {LOG_DIR / 'frontend.log'}")
+        log(f"前端已重启，PID={pid}，日志: {LOG_DIR / 'frontend.log'}")
+    else:
+        frontend_pid = read_pid(FRONTEND_PID_FILE)
+        if frontend_pid and process_exists(frontend_pid):
+            log(f"前端已在运行，PID={frontend_pid}")
+        else:
+            npm_bin = require_command(["npm.cmd", "npm"], "npm")
+            env = merged_runtime_env()
+            pid = start_process(
+                [npm_bin, "run", "dev", "--", "--host", frontend_host, "--port", str(frontend_port)],
+                FRONTEND_PID_FILE,
+                LOG_DIR / "frontend.log",
+                ROOT / "frontend",
+                env,
+            )
+            log(f"前端已启动，PID={pid}，日志: {LOG_DIR / 'frontend.log'}")
 
     log("")
     log("服务已启动：")
