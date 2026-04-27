@@ -46,6 +46,22 @@
             <div class="overview-value">3 档</div>
             <p>输出 PASS / WATCH / FAIL，不只看总分。</p>
           </el-card>
+
+          <el-card class="overview-card coming-soon">
+            <template #default>
+              <div class="coming-soon-content">
+                <el-tooltip content="待开发" placement="top">
+                  <div class="overview-label">LLM 评分</div>
+                </el-tooltip>
+                <div class="overview-value">
+                  <el-tooltip content="待开发" placement="top">
+                    <span>—</span>
+                  </el-tooltip>
+                </div>
+                <p>基于大语言模型的智能分析与评分。</p>
+              </div>
+            </template>
+          </el-card>
         </div>
       </div>
 
@@ -293,6 +309,32 @@ const activeTab = ref('usage')
       margin: 0;
       color: var(--color-text-secondary);
       line-height: 1.7;
+    }
+
+    &.coming-soon {
+      opacity: 0.6;
+      position: relative;
+      cursor: not-allowed;
+      user-select: none;
+
+      .coming-soon-content {
+        pointer-events: none;
+      }
+
+      .overview-label,
+      .overview-value {
+        color: #9ca3af;
+      }
+
+      p {
+        color: #9ca3af;
+      }
+
+      // Enable tooltips only
+      :deep(.el-tooltip__trigger) {
+        pointer-events: auto !important;
+        cursor: help;
+      }
     }
   }
 

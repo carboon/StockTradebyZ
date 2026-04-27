@@ -51,7 +51,7 @@
         </el-form-item>
 
         <!-- LLM 配置 -->
-        <el-divider content-position="left">LLM API 配置 (可选)</el-divider>
+        <el-divider content-position="left" class="llm-divider">LLM API 配置 (待完善)</el-divider>
 
         <el-form-item label="GLM API Key">
           <el-input
@@ -60,8 +60,9 @@
             show-password
             placeholder="智谱 GLM-4V-Flash (免费)"
             style="width: 400px"
+            disabled
           />
-          <div class="form-tip">
+          <div class="form-tip form-tip-disabled">
             获取地址: <a href="https://open.bigmodel.cn/usercenter/apikeys" target="_blank">https://open.bigmodel.cn</a>
           </div>
         </el-form-item>
@@ -73,8 +74,9 @@
             show-password
             placeholder="阿里云通义千问 VL"
             style="width: 400px"
+            disabled
           />
-          <div class="form-tip">
+          <div class="form-tip form-tip-disabled">
             获取地址: <a href="https://dashscope.console.aliyun.com/apiKey" target="_blank">阿里云控制台</a>
           </div>
         </el-form-item>
@@ -86,8 +88,9 @@
             show-password
             placeholder="Google Gemini"
             style="width: 400px"
+            disabled
           />
-          <div class="form-tip">
+          <div class="form-tip form-tip-disabled">
             获取地址: <a href="https://ai.google.dev/" target="_blank">https://ai.google.dev/</a>
           </div>
         </el-form-item>
@@ -98,9 +101,9 @@
         <el-form-item label="默认评分器">
           <el-radio-group v-model="configs.default_reviewer">
             <el-radio value="quant">量化评分</el-radio>
-            <el-radio value="glm">GLM</el-radio>
-            <el-radio value="qwen">通义千问</el-radio>
-            <el-radio value="gemini">Gemini</el-radio>
+            <el-radio value="glm" disabled>GLM</el-radio>
+            <el-radio value="qwen" disabled>通义千问</el-radio>
+            <el-radio value="gemini" disabled>Gemini</el-radio>
           </el-radio-group>
         </el-form-item>
 
@@ -113,6 +116,13 @@
             :precision="1"
           />
           <span class="form-tip">分数 >= 此值的股票将被推荐</span>
+          <el-tooltip
+            effect="dark"
+            placement="top"
+            content="来自对目标股票的趋势结构、价格位置、量价行为、历史异动，四个维度进行的经验评价，详见单股诊断。"
+          >
+            <el-icon class="question-icon"><InfoFilled /></el-icon>
+          </el-tooltip>
         </el-form-item>
 
         <!-- 保存按钮 -->
@@ -133,6 +143,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { InfoFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/store/config'
 import { apiTasks } from '@/api'
@@ -321,6 +332,35 @@ async function saveConfigs(startInitialization: boolean) {
   :deep(.el-divider__text) {
     font-weight: 500;
     color: var(--color-text-primary);
+  }
+
+  .llm-divider {
+    :deep(.el-divider__text) {
+      color: #999;
+    }
+    :deep(.el-divider__line) {
+      border-color: #e0e0e0;
+    }
+  }
+
+  .form-tip-disabled {
+    color: #999;
+    opacity: 0.6;
+
+    a {
+      color: #999;
+    }
+  }
+
+  .question-icon {
+    margin-left: 8px;
+    font-size: 16px;
+    color: var(--color-text-light);
+    cursor: help;
+
+    &:hover {
+      color: var(--color-primary);
+    }
   }
 }
 </style>

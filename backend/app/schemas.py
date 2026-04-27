@@ -65,7 +65,9 @@ class CandidateItem(BaseModel):
     code: str
     name: Optional[str] = None
     strategy: Optional[str] = None
+    open_price: Optional[float] = None
     close_price: Optional[float] = None
+    change_pct: Optional[float] = None
     turnover: Optional[float] = None
     b1_passed: Optional[bool] = None
     kdj_j: Optional[float] = None

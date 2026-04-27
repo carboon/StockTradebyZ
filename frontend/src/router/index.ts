@@ -15,7 +15,7 @@ const routes: RouteRecordRaw[] = [
     path: '/update',
     name: 'Update',
     component: () => import('@/views/Update.vue'),
-    meta: { title: '任务中心', icon: 'Refresh' },
+    meta: { title: '运维管理', icon: 'Refresh' },
   },
   {
     path: '/tomorrow-star',

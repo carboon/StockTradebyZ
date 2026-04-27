@@ -86,6 +86,83 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
     )
 
 
+@router.post("/start-incremental")
+async def start_incremental_update(
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """启动增量数据更新
+
+    Args:
+        end_date: 结束日期 (YYYY-MM-DD)，默认为今天
+    """
+    from app.services.market_service import market_service, MarketService
+
+    # 检查是否已有更新在运行
+    update_state = MarketService.get_update_state()
+    if update_state["running"]:
+        return {
+            "success": False,
+            "message": "已有更新任务正在运行",
+            "running": True,
+            "state": update_state,
+        }
+
+    # 开始更新
+    if not MarketService.start_update():
+        return {
+            "success": False,
+            "message": "无法启动更新任务",
+            "running": False,
+        }
+
+    async def run_incremental_update():
+        try:
+            # 定义进度回调
+            def progress_cb(current, total, code, status):
+                MarketService.update_progress(current, total, code, status)
+
+            result = market_service.incremental_update(
+                end_date=end_date,
+                progress_callback=progress_cb,
+            )
+
+            MarketService.finish_update()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            MarketService.finish_update()
+
+    # 在后台运行
+    import asyncio
+    asyncio.create_task(run_incremental_update())
+
+    return {
+        "success": True,
+        "message": "增量更新已启动",
+        "running": False,
+    }
+
+
+@router.get("/incremental-status")
+async def get_incremental_status() -> dict:
+    """获取增量更新状态"""
+    from app.services.market_service import MarketService
+
+    state = MarketService.get_update_state()
+    return {
+        "running": state["running"],
+        "progress": state["progress"],
+        "total": state["total"],
+        "current_code": state["current_code"],
+        "updated_count": state["updated_count"],
+        "skipped_count": state["skipped_count"],
+        "failed_count": state["failed_count"],
+        "started_at": state["started_at"],
+        "message": state["message"],
+    }
+
+
 @router.get("/overview", response_model=TaskOverviewResponse)
 async def get_task_overview(db: Session = Depends(get_db)) -> TaskOverviewResponse:
     import time
@@ -314,18 +391,23 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db)) -> dict:
     task_service = TaskService(db)
     success = await task_service.cancel_task(task_id)
 
-    if success:
-        # 更新数据库状态
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
+    # 无论进程是否在运行，都尝试更新数据库状态
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task:
+        if task.status in ["running", "pending"]:
             task.status = "cancelled"
             task.task_stage = "cancelled"
             db.add(TaskLog(task_id=task.id, level="warning", stage="cancelled", message="任务已取消"))
             db.commit()
             _overview_cache["expires_at"] = 0.0
+            return {"status": "ok", "message": "任务已取消"}
+        else:
+            return {"status": "error", "message": f"任务状态为 {task.status}，无需取消"}
+
+    if success:
         return {"status": "ok", "message": "任务已取消"}
     else:
-        return {"status": "error", "message": "任务无法取消"}
+        return {"status": "error", "message": "任务不存在或无法取消"}
 
 
 @router.delete("/clear")

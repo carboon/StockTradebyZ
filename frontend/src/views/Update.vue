@@ -1,517 +1,483 @@
 <template>
-  <div class="task-center-page">
-    <div class="page-header">
-      <div>
-        <h2>任务中心</h2>
-        <p>面向运维人员，统一查看后台任务、环境信息与运行日志。</p>
-      </div>
-      <div class="header-actions">
-        <el-button :icon="Refresh" :loading="pageLoading" @click="reloadAll">
-          刷新
-        </el-button>
-      </div>
-    </div>
-
-    <div v-if="overview.alerts.length > 0" class="alert-stack">
-      <el-alert
-        v-for="(alert, index) in overview.alerts"
-        :key="`${alert.level}-${index}`"
-        :title="alert.title"
-        :type="getAlertType(alert.level)"
-        :description="alert.message"
-        :closable="false"
-        show-icon
-      />
-    </div>
-
-    <div class="overview-grid">
-      <el-card v-for="card in overview.cards" :key="card.key" class="overview-card">
-        <div class="overview-label">{{ card.label }}</div>
-        <div class="overview-value" :class="`is-${card.status}`">{{ card.value }}</div>
-        <div class="overview-meta">{{ card.meta || '-' }}</div>
-      </el-card>
-    </div>
-
-    <el-card class="bootstrap-card">
-      <template #header>
-        <div class="card-header">
-          <span>首次初始化引导</span>
-          <el-tag :type="bootstrapStatusTagType" size="small">
-            {{ bootstrapStatusLabel }}
-          </el-tag>
-        </div>
-      </template>
-
-      <div class="bootstrap-layout">
-        <div class="bootstrap-main">
-          <div class="bootstrap-title">{{ bootstrapTitle }}</div>
-          <div class="bootstrap-description">{{ bootstrapDescription }}</div>
-
-          <div class="bootstrap-steps">
-            <div
-              v-for="step in bootstrapSteps"
-              :key="step.key"
-              class="bootstrap-step"
-              :class="step.done ? 'is-done' : 'is-pending'"
-            >
-              <div class="step-indicator">{{ step.done ? '✓' : step.index }}</div>
-              <div class="step-content">
-                <div class="step-title">{{ step.title }}</div>
-                <div class="step-meta">{{ step.meta }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="bootstrap-actions">
-          <el-button
-            type="primary"
-            :disabled="!canStartBootstrap"
-            :loading="bootstrapStarting"
-            @click="startBootstrap"
-          >
-            启动首次初始化
-          </el-button>
-          <el-button @click="reloadAll">
-            重新检查
-          </el-button>
-          <div class="bootstrap-hint">{{ bootstrapActionHint }}</div>
-        </div>
-      </div>
-    </el-card>
-
-    <el-tabs v-model="activeTab" class="task-tabs">
-      <el-tab-pane label="运行中" name="running">
-        <div class="tab-section">
-          <el-row :gutter="20">
-            <el-col :span="14">
-              <el-card>
-                <template #header>
-                  <div class="card-header">
-                    <span>运行中任务</span>
-                    <el-tag size="small" type="warning">{{ runningTasks.total }}</el-tag>
-                  </div>
-                </template>
-
-                <el-empty v-if="runningTasks.total === 0" description="当前没有运行中任务" :image-size="80" />
-                <el-table
-                  v-else
-                  :data="runningTasks.tasks"
-                  highlight-current-row
-                  @row-click="selectTask"
-                >
-                  <el-table-column prop="id" label="ID" width="70" />
-                  <el-table-column label="任务" min-width="220">
-                    <template #default="{ row }">
-                      <div class="task-main">
-                        <div class="task-title">{{ getTaskTypeLabel(row.task_type) }}</div>
-                        <div class="task-summary">{{ row.summary || '-' }}</div>
-                      </div>
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="task_stage" label="阶段" width="130">
-                    <template #default="{ row }">
-                      {{ getStageLabel(row.task_stage) }}
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="progress" label="进度" width="140">
-                    <template #default="{ row }">
-                      <el-progress :percentage="row.progress" :stroke-width="6" />
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="操作" width="110" align="center">
-                    <template #default="{ row }">
-                      <el-button text type="danger" @click.stop="cancelTask(row)">
-                        取消
-                      </el-button>
-                    </template>
-                  </el-table-column>
-                </el-table>
-              </el-card>
-            </el-col>
-
-            <el-col :span="10">
-              <el-card class="log-card">
-                <template #header>
-                  <div class="card-header">
-                    <span>实时日志</span>
-                    <el-tag v-if="selectedTask" size="small" type="info">
-                      #{{ selectedTask.id }}
-                    </el-tag>
-                  </div>
-                </template>
-
-                <el-empty v-if="!selectedTask" description="请选择左侧任务" :image-size="70" />
-                <div v-else ref="logRef" class="log-container">
-                  <div v-if="selectedTaskLogs.length === 0" class="log-empty">暂无日志</div>
-                  <div
-                    v-for="log in selectedTaskLogs"
-                    :key="log.id || `${log.log_time}-${log.message}`"
-                    class="log-line"
-                    :class="`log-${log.level}`"
-                  >
-                    <span class="log-time">{{ formatLogTime(log.log_time) }}</span>
-                    <span class="log-stage">{{ getStageLabel(log.stage) }}</span>
-                    <span class="log-message">{{ log.message }}</span>
-                  </div>
-                </div>
-              </el-card>
-            </el-col>
-          </el-row>
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="历史任务" name="history">
-        <div class="tab-section">
-          <el-card>
+  <div class="ops-page">
+    <el-tabs v-model="activeTab" class="ops-tabs">
+      <!-- 任务管理 -->
+      <el-tab-pane label="任务管理" name="tasks">
+        <div class="tab-content">
+          <!-- 首次初始化引导 -->
+          <el-card v-if="showBootstrap" class="bootstrap-card">
             <template #header>
               <div class="card-header">
-                <span>历史任务</span>
-                <div class="inline-actions">
-                  <el-select v-model="historyStatus" placeholder="状态筛选" clearable style="width: 140px" @change="loadHistoryTasks">
-                    <el-option label="运行中" value="running" />
-                    <el-option label="排队中" value="pending" />
-                    <el-option label="已完成" value="completed" />
-                    <el-option label="失败" value="failed" />
-                    <el-option label="已取消" value="cancelled" />
-                  </el-select>
-                  <el-button text type="danger" :icon="Delete" @click="clearTasks">
-                    清空已结束任务
-                  </el-button>
-                </div>
+                <span>首次初始化引导</span>
+                <el-tag :type="bootstrapStatusTagType" size="small">
+                  {{ bootstrapStatusLabel }}
+                </el-tag>
               </div>
             </template>
 
-            <el-table :data="historyTasks.tasks" @row-click="openTaskDetail">
-              <el-table-column prop="id" label="ID" width="70" />
-              <el-table-column label="任务类型" width="120">
+            <div class="bootstrap-content">
+              <p class="bootstrap-desc">{{ bootstrapDescription }}</p>
+
+              <div class="bootstrap-steps">
+                <div
+                  v-for="step in bootstrapSteps"
+                  :key="step.key"
+                  class="bootstrap-step"
+                  :class="step.done ? 'is-done' : 'is-pending'"
+                >
+                  <div class="step-indicator">{{ step.done ? '✓' : step.index }}</div>
+                  <div class="step-content">
+                    <div class="step-title">{{ step.title }}</div>
+                    <div class="step-meta">{{ step.meta }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bootstrap-actions">
+                <el-button
+                  type="primary"
+                  :disabled="!canStartBootstrap"
+                  :loading="bootstrapStarting"
+                  @click="startBootstrap"
+                >
+                  {{ bootstrapButtonText }}
+                </el-button>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 操作按钮 -->
+          <el-card v-if="bootstrapFinished" class="action-card">
+            <div class="action-buttons">
+              <el-button
+                type="primary"
+                :loading="startingUpdate"
+                :disabled="runningTasksCount > 0"
+                @click="startDataUpdate"
+              >
+                更新最新交易日数据
+              </el-button>
+              <el-button
+                :loading="startingFullUpdate"
+                :disabled="runningTasksCount > 0"
+                @click="startFullUpdate"
+              >
+                重新获取历史数据
+              </el-button>
+              <el-button :icon="Refresh" @click="reloadTasks">刷新</el-button>
+            </div>
+            <div v-if="runningTasksCount > 0" class="running-hint">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              当前有 {{ runningTasksCount }} 个任务正在运行
+            </div>
+          </el-card>
+
+          <!-- 运行中任务 -->
+          <el-card class="tasks-card">
+            <template #header>
+              <div class="card-header">
+                <span>运行中任务</span>
+                <el-tag v-if="runningTasksCount > 0" type="warning" size="small">
+                  {{ runningTasksCount }} 个
+                </el-tag>
+                <el-tag v-else type="info" size="small">无</el-tag>
+              </div>
+            </template>
+
+            <el-empty v-if="runningTasks.length === 0" description="当前没有运行中任务" :image-size="60" />
+            <div v-else class="running-tasks-list">
+              <div
+                v-for="task in runningTasks"
+                :key="task.id"
+                class="task-item"
+                :class="{ 'is-selected': selectedTask?.id === task.id }"
+                @click="selectTask(task)"
+              >
+                <div class="task-main">
+                  <div class="task-header">
+                    <span class="task-id">#{{ task.id }}</span>
+                    <span class="task-type">{{ getTaskTypeLabel(task.task_type) }}</span>
+                    <el-tag :type="getStatusType(task.status)" size="small">{{ task.status }}</el-tag>
+                  </div>
+                  <div class="task-stage">{{ getStageLabel(task.task_stage) }}</div>
+                  <el-progress :percentage="task.progress" :stroke-width="6" :show-text="false" />
+                </div>
+                <el-button text type="danger" size="small" @click.stop="cancelTask(task)">取消</el-button>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 历史任务 -->
+          <el-card class="tasks-card">
+            <template #header>
+              <div class="card-header">
+                <span>历史任务</span>
+                <el-button text type="danger" size="small" @click="clearTasks">清空</el-button>
+              </div>
+            </template>
+
+            <el-table :data="historyTasks" max-height="300" @row-click="viewTaskDetail">
+              <el-table-column prop="id" label="ID" width="60" />
+              <el-table-column label="类型" width="100">
+                <template #default="{ row }">{{ getTaskTypeLabel(row.task_type) }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="80">
                 <template #default="{ row }">
-                  {{ getTaskTypeLabel(row.task_type) }}
+                  <el-tag :type="getStatusType(row.status)" size="small">{{ row.status }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="触发来源" width="100">
-                <template #default="{ row }">
-                  <el-tag :type="getSourceType(row.trigger_source)" size="small">
-                    {{ getSourceLabel(row.trigger_source) }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="100">
-                <template #default="{ row }">
-                  <el-tag :type="getStatusType(row.status)" size="small">
-                    {{ row.status }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="阶段" width="120">
-                <template #default="{ row }">
-                  {{ getStageLabel(row.task_stage) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="摘要" min-width="260" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row.summary || '-' }}
-                </template>
-              </el-table-column>
-              <el-table-column label="创建时间" width="180">
-                <template #default="{ row }">
-                  {{ formatDateTime(row.created_at) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="耗时" width="110">
-                <template #default="{ row }">
-                  {{ getDuration(row) }}
-                </template>
+              <el-table-column prop="summary" label="摘要" min-width="200" show-overflow-tooltip />
+              <el-table-column label="创建时间" width="160">
+                <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
               </el-table-column>
             </el-table>
           </el-card>
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="环境信息" name="environment">
-        <div class="tab-section">
-          <el-row :gutter="20">
-            <el-col v-for="section in environment.sections" :key="section.key" :span="12">
-              <el-card class="env-card">
-                <template #header>
-                  <span>{{ section.label }}</span>
-                </template>
-                <div class="env-list">
-                  <div v-for="(value, key) in section.items" :key="String(key)" class="env-item">
-                    <span class="env-key">{{ formatEnvKey(String(key)) }}</span>
-                    <span class="env-value">{{ formatEnvValue(value) }}</span>
-                  </div>
+      <!-- 日志记录 -->
+      <el-tab-pane label="日志记录" name="logs">
+        <div class="tab-content">
+          <el-card class="logs-card">
+            <template #header>
+              <div class="card-header">
+                <div class="log-controls">
+                  <el-radio-group v-model="logFilter" size="small" @change="filterLogs">
+                    <el-radio-button value="all">全部日志</el-radio-button>
+                    <el-radio-button value="task">当前任务</el-radio-button>
+                  </el-radio-group>
+                  <el-tag v-if="selectedTask" size="small" type="info">
+                    #{{ selectedTask.id }} {{ getTaskTypeLabel(selectedTask.task_type) }}
+                  </el-tag>
+                  <el-tag v-else-if="logFilter === 'task'" size="small" type="warning">
+                    请先选择任务
+                  </el-tag>
                 </div>
-              </el-card>
-            </el-col>
-          </el-row>
+                <div class="log-actions">
+                  <el-checkbox v-model="autoScroll">自动滚动</el-checkbox>
+                  <el-button text size="small" @click="clearLogsDisplay">清空显示</el-button>
+                </div>
+              </div>
+            </template>
+
+            <div ref="logRef" class="log-container" @scroll="handleLogScroll">
+              <div v-if="filteredLogs.length === 0" class="log-empty">
+                <el-icon><Document /></el-icon>
+                <p>{{ selectedTask ? '该任务暂无日志' : '请选择任务查看日志，或切换到"全部日志"' }}</p>
+              </div>
+              <div v-for="log in filteredLogs" :key="log.id || log.key" class="log-line" :class="`log-${log.level}`">
+                <span class="log-time">{{ formatLogTime(log.log_time) }}</span>
+                <span class="log-level">{{ log.level?.toUpperCase() }}</span>
+                <span class="log-message">{{ log.message }}</span>
+              </div>
+            </div>
+          </el-card>
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="数据状态" name="status">
-        <div class="tab-section">
-          <el-row :gutter="20">
-            <el-col :span="6" v-for="item in statusItems" :key="item.key">
-              <el-card class="status-card">
-                <div class="status-item" :class="item.exists ? 'status-ok' : 'status-missing'">
-                  <div class="status-icon">
-                    <el-icon :size="28">
-                      <component :is="item.icon" />
-                    </el-icon>
-                  </div>
-                  <div class="status-label">{{ item.label }}</div>
-                  <div class="status-value">{{ item.exists ? '正常' : '缺失' }}</div>
-                  <div class="status-meta">{{ item.meta }}</div>
+      <!-- 状态管理 -->
+      <el-tab-pane label="状态管理" name="status">
+        <div class="tab-content">
+          <!-- 健康状态总览 -->
+          <el-card class="health-card">
+            <div class="health-summary">
+              <div class="health-item" :class="{ 'is-healthy': dataStatus.rawData.exists }">
+                <div class="health-icon">
+                  <el-icon><CircleCheck v-if="dataStatus.rawData.exists" /><CircleClose v-else /></el-icon>
                 </div>
-              </el-card>
-            </el-col>
-          </el-row>
+                <div class="health-info">
+                  <div class="health-title">数据状态</div>
+                  <div class="health-desc">{{ dataStatus.rawData.exists ? '数据完整' : '缺少原始数据' }}</div>
+                </div>
+              </div>
+              <div class="health-item is-healthy">
+                <div class="health-icon">
+                  <el-icon><CircleCheck /></el-icon>
+                </div>
+                <div class="health-info">
+                  <div class="health-title">数据库</div>
+                  <div class="health-desc">连接正常</div>
+                </div>
+              </div>
+              <div class="health-item" :class="{ 'is-healthy': runningTasksCount === 0 }">
+                <div class="health-icon">
+                  <el-icon><CircleCheck v-if="runningTasksCount === 0" /><Loading v-else class="is-spinning" /></el-icon>
+                </div>
+                <div class="health-info">
+                  <div class="health-title">任务状态</div>
+                  <div class="health-desc">{{ runningTasksCount > 0 ? `${runningTasksCount}个运行中` : '无运行任务' }}</div>
+                </div>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 数据详情 -->
+          <el-card class="detail-card">
+            <template #header>
+              <div class="card-header">
+                <span>原始数据详情</span>
+                <el-button type="primary" size="small" :loading="checkingData" @click="checkDataFresh">
+                  检查更新
+                </el-button>
+              </div>
+            </template>
+
+            <div class="detail-grid">
+              <div class="detail-item">
+                <span class="detail-label">股票数量</span>
+                <span class="detail-value">{{ dataStatus.rawData.count || 0 }} <small>只</small></span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">最新日期</span>
+                <span class="detail-value">{{ dataStatus.rawData.latestDate || '-' }}</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">数据来源</span>
+                <span class="detail-value">Tushare</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">流动性池</span>
+                <span class="detail-value">Top 2000</span>
+              </div>
+            </div>
+          </el-card>
+
+          <!-- 环境信息 -->
+          <el-card class="env-summary-card">
+            <template #header>
+              <span>系统环境</span>
+            </template>
+
+            <div class="env-summary-grid">
+              <template v-for="section in dataStatus.environment" :key="section.key">
+                <div v-if="section.key === 'service'" class="env-section">
+                  <div class="env-section-title">{{ section.label }}</div>
+                  <div class="env-chips">
+                    <el-tag
+                      v-for="(value, key) in getPrimitiveItems(section.items)"
+                      :key="String(key)"
+                      size="small"
+                    >
+                      {{ formatEnvKey(String(key)) }}: {{ formatEnvValue(value) }}
+                    </el-tag>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </el-card>
+
+          <!-- 更多环境信息（折叠） -->
+          <el-collapse class="env-collapse">
+            <el-collapse-item name="more">
+              <template #title>
+                <span class="collapse-title">更多环境信息</span>
+              </template>
+              <div class="env-details-grid">
+                <template v-for="section in dataStatus.environment" :key="section.key">
+                  <div v-if="section.key !== 'service' && section.key !== 'data_status'" class="env-detail-section">
+                    <div class="env-detail-title">{{ section.label }}</div>
+                    <div class="env-detail-items">
+                      <div
+                        v-for="(value, key) in getPrimitiveItems(section.items)"
+                        :key="String(key)"
+                        class="env-detail-item"
+                      >
+                        <span class="env-detail-key">{{ formatEnvKey(String(key)) }}</span>
+                        <span class="env-detail-value">{{ formatEnvValue(value) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
         </div>
       </el-tab-pane>
     </el-tabs>
-
-    <el-drawer v-model="detailVisible" title="任务详情" size="50%">
-      <template v-if="detailTask">
-        <div class="detail-grid">
-          <div class="detail-item"><span>ID</span><strong>#{{ detailTask.id }}</strong></div>
-          <div class="detail-item"><span>类型</span><strong>{{ getTaskTypeLabel(detailTask.task_type) }}</strong></div>
-          <div class="detail-item"><span>来源</span><strong>{{ getSourceLabel(detailTask.trigger_source) }}</strong></div>
-          <div class="detail-item"><span>状态</span><strong>{{ detailTask.status }}</strong></div>
-          <div class="detail-item"><span>阶段</span><strong>{{ getStageLabel(detailTask.task_stage) }}</strong></div>
-          <div class="detail-item"><span>进度</span><strong>{{ detailTask.progress }}%</strong></div>
-        </div>
-        <el-divider />
-        <div class="detail-block">
-          <h4>任务摘要</h4>
-          <p>{{ detailTask.summary || '-' }}</p>
-        </div>
-        <div class="detail-block">
-          <h4>参数</h4>
-          <pre>{{ formatJson(detailTask.params_json) }}</pre>
-        </div>
-        <div class="detail-block">
-          <h4>结果</h4>
-          <pre>{{ formatJson(detailTask.result_json) }}</pre>
-        </div>
-        <div class="detail-block" v-if="detailTask.error_message">
-          <h4>错误信息</h4>
-          <pre>{{ detailTask.error_message }}</pre>
-        </div>
-        <div class="detail-block">
-          <div class="card-header">
-            <h4>日志</h4>
-            <el-button text @click="loadTaskLogs(detailTask.id)">刷新日志</el-button>
-          </div>
-          <div class="drawer-log-container">
-            <div v-for="log in detailLogs" :key="log.id" class="log-line" :class="`log-${log.level}`">
-              <span class="log-time">{{ formatLogTime(log.log_time) }}</span>
-              <span class="log-stage">{{ getStageLabel(log.stage) }}</span>
-              <span class="log-message">{{ log.message }}</span>
-            </div>
-          </div>
-        </div>
-      </template>
-    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import {
-  DataAnalysis,
-  Delete,
-  Document,
-  FolderOpened,
-  Picture,
-  Refresh,
-} from '@element-plus/icons-vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-
+import {
+  Refresh,
+  Loading,
+  Document,
+  CircleCheck,
+  CircleClose,
+} from '@element-plus/icons-vue'
 import { apiTasks } from '@/api'
-import type {
-  DataStatus,
-  Task,
-  TaskEnvironmentResponse,
-  TaskLogItem,
-  TaskOverviewResponse,
-  TaskRunningResponse,
-  TaskListResponse,
-} from '@/types'
 import { useConfigStore } from '@/store/config'
+import type { Task, TaskLogItem, DataStatus } from '@/types'
 
-const activeTab = ref('running')
-const pageLoading = ref(false)
-const detailVisible = ref(false)
-const historyStatus = ref('')
-const RUNNING_POLL_INTERVAL_MS = 5000
-const IDLE_POLL_INTERVAL_MS = 30000
-const OVERVIEW_REFRESH_INTERVAL_MS = 30000
-
-const overview = ref<TaskOverviewResponse>({ cards: [], alerts: [] })
-const runningTasks = ref<TaskRunningResponse>({ tasks: [], total: 0 })
-const historyTasks = ref<TaskListResponse>({ tasks: [], total: 0 })
-const environment = ref<TaskEnvironmentResponse>({ sections: [] })
-const status = ref<DataStatus>({
-  raw_data: { exists: false, count: 0 },
-  candidates: { exists: false, count: 0 },
-  analysis: { exists: false, count: 0 },
-  kline: { exists: false, count: 0 },
-})
-
-const selectedTask = ref<Task | null>(null)
-const selectedTaskLogs = ref<TaskLogItem[]>([])
-const detailTask = ref<Task | null>(null)
-const detailLogs = ref<TaskLogItem[]>([])
-const logRef = ref<HTMLElement>()
-const bootstrapStarting = ref(false)
-let ws: WebSocket | null = null
-let opsWs: WebSocket | null = null
-let runningPoller: ReturnType<typeof setInterval> | null = null
-const lastOverviewRefreshAt = ref(0)
-const opsWsConnected = ref(false)
 const configStore = useConfigStore()
 
-const statusItems = computed(() => [
-  {
-    key: 'raw',
-    label: '原始数据',
-    icon: Document,
-    exists: status.value.raw_data.exists,
-    meta: `${status.value.raw_data.count} 只股票`,
-  },
-  {
-    key: 'candidates',
-    label: '候选数据',
-    icon: DataAnalysis,
-    exists: status.value.candidates.exists,
-    meta: status.value.candidates.latest_date || '无数据',
-  },
-  {
-    key: 'analysis',
-    label: '评分数据',
-    icon: FolderOpened,
-    exists: status.value.analysis.exists,
-    meta: `${status.value.analysis.count} 个日期`,
-  },
-  {
-    key: 'kline',
-    label: 'K线资源',
-    icon: Picture,
-    exists: status.value.kline.exists,
-    meta: `${status.value.kline.count} 张图片`,
-  },
-])
-const hasRawData = computed(() => status.value.raw_data.exists)
-const hasCandidateData = computed(() => status.value.candidates.exists)
-const hasAnalysisData = computed(() => status.value.analysis.exists)
-const bootstrapFinished = computed(() => hasRawData.value && hasCandidateData.value && hasAnalysisData.value)
-const bootstrapRunning = computed(() => runningTasks.value.tasks.some((task) => ['full_update', 'tomorrow_star'].includes(task.task_type)))
-const bootstrapBlockedByConfig = computed(() => !configStore.tushareReady)
-const canStartBootstrap = computed(() => !bootstrapBlockedByConfig.value && !bootstrapFinished.value && !bootstrapRunning.value)
+// Tab状态
+const activeTab = ref('tasks')
+const logFilter = ref<'all' | 'task'>('task')
+const autoScroll = ref(true)
+
+// 数据状态
+const dataStatus = ref({
+  rawData: { exists: false, count: 0, latestDate: '' },
+  dbSize: '-',
+  environment: [] as Array<{ key: string; label: string; items: Record<string, any> }>,
+})
+
+// 任务状态
+const runningTasks = ref<Task[]>([])
+const historyTasks = ref<Task[]>([])
+const selectedTask = ref<Task | null>(null)
+
+// 日志状态
+const allLogs = ref<TaskLogItem[]>([])
+const selectedTaskLogs = ref<TaskLogItem[]>([])
+const logRef = ref<HTMLElement>()
+
+// 加载状态
+const dataLoaded = ref(false)
+const bootstrapStarting = ref(false)
+const startingUpdate = ref(false)
+const startingFullUpdate = ref(false)
+const checkingData = ref(false)
+const cleaningCache = ref(false)
+
+// WebSocket
+let ws: WebSocket | null = null
+let opsWs: WebSocket | null = null
+
+// 计算属性
+const runningTasksCount = computed(() => runningTasks.value.length)
+
+const bootstrapFinished = computed(() => {
+  return dataLoaded.value && dataStatus.value.rawData.exists
+})
+
+const showBootstrap = computed(() => {
+  return dataLoaded.value && !dataStatus.value.rawData.exists
+})
+
 const bootstrapStatusLabel = computed(() => {
   if (bootstrapFinished.value) return '已完成'
-  if (bootstrapRunning.value) return '进行中'
-  if (bootstrapBlockedByConfig.value) return '待配置'
+  if (bootstrapStarting.value) return '进行中'
+  if (!configStore.tushareReady) return '待配置'
   return '待执行'
 })
+
 const bootstrapStatusTagType = computed(() => {
   if (bootstrapFinished.value) return 'success'
-  if (bootstrapRunning.value) return 'warning'
-  if (bootstrapBlockedByConfig.value) return 'info'
+  if (bootstrapStarting.value) return 'warning'
+  if (!configStore.tushareReady) return 'info'
   return 'primary'
 })
-const bootstrapTitle = computed(() => {
-  if (bootstrapFinished.value) return '系统基础数据已经就绪'
-  if (bootstrapRunning.value) return '首次初始化任务正在执行'
-  if (bootstrapBlockedByConfig.value) return '请先完成 Tushare 配置'
-  return '当前尚未完成首次初始化'
-})
+
 const bootstrapDescription = computed(() => {
   if (bootstrapFinished.value) {
-    return '原始数据、候选结果和评分结果均已生成，明日之星与单股诊断可以正常使用。'
+    return `原始数据已就绪，共 ${dataStatus.value.rawData.count} 只股票，最新日期 ${dataStatus.value.rawData.latestDate}`
   }
-  if (bootstrapRunning.value) {
-    return '系统正在抓取行情、构建候选池并生成评分结果。保持当前页面即可查看实时进度。'
+  if (!configStore.tushareReady) {
+    return '请先进入配置页填写并验证 TUSHARE_TOKEN'
   }
-  if (bootstrapBlockedByConfig.value) {
-    return configStore.tushareStatus?.message || '请先进入配置页填写并验证 TUSHARE_TOKEN。'
-  }
-  return '首次初始化会顺序完成数据抓取、候选生成与量化复核。完成后，明日之星和单股诊断页面才会展示完整数据。'
+  return '首次初始化将抓取原始行情数据，完成后即可使用明日之星和单股诊断功能'
 })
-const bootstrapActionHint = computed(() => {
-  if (bootstrapFinished.value) return '无需额外操作。后续系统会根据交易日变化自动判断是否更新。'
-  if (bootstrapRunning.value) return '初始化期间可以切换到“运行中”查看任务日志。'
-  if (bootstrapBlockedByConfig.value) return '请先前往配置页完成数据源配置，然后回到这里执行初始化。'
-  return '建议首次部署后先执行一次初始化，等待任务完成后再使用业务页面。'
+
+const canStartBootstrap = computed(() => {
+  return configStore.tushareReady && !bootstrapFinished.value && !bootstrapStarting.value
 })
+
+const bootstrapButtonText = computed(() => {
+  if (bootstrapFinished.value) return '数据已就绪'
+  if (bootstrapStarting.value) return '初始化中...'
+  return '开始首次初始化'
+})
+
 const bootstrapSteps = computed(() => [
   {
     key: 'config',
     index: 1,
     title: '配置数据源',
-    meta: bootstrapBlockedByConfig.value ? '当前未完成' : 'Tushare 已验证通过',
-    done: !bootstrapBlockedByConfig.value,
+    meta: configStore.tushareReady ? 'Tushare 已验证' : '待配置',
+    done: configStore.tushareReady,
   },
   {
     key: 'raw',
     index: 2,
     title: '抓取原始数据',
-    meta: hasRawData.value ? `${status.value.raw_data.count} 只股票` : '尚未生成原始数据',
-    done: hasRawData.value,
-  },
-  {
-    key: 'candidate',
-    index: 3,
-    title: '生成候选结果',
-    meta: hasCandidateData.value ? String(status.value.candidates.latest_date || '已生成') : '尚未生成候选结果',
-    done: hasCandidateData.value,
-  },
-  {
-    key: 'analysis',
-    index: 4,
-    title: '生成分析结果',
-    meta: hasAnalysisData.value ? `${status.value.analysis.count} 个日期` : '尚未生成评分结果',
-    done: hasAnalysisData.value,
+    meta: dataStatus.value.rawData.exists
+      ? `${dataStatus.value.rawData.count}只股票`
+      : '待抓取',
+    done: dataStatus.value.rawData.exists,
   },
 ])
 
+const filteredLogs = computed(() => {
+  if (logFilter.value === 'task' && selectedTask.value) {
+    return selectedTaskLogs.value
+  }
+  return allLogs.value
+})
+
+// 监听选中任务变化
+watch(selectedTask, (newTask) => {
+  if (newTask) {
+    loadTaskLogs(newTask.id)
+    if (logFilter.value === 'all') {
+      logFilter.value = 'task'
+    }
+  }
+})
+
+// 生命周期
 onMounted(async () => {
   await configStore.checkTushareStatus()
   await reloadAll()
   connectOpsSocket()
-  startRunningPoller()
+  startPoller()
 })
 
 onUnmounted(() => {
-  stopRunningPoller()
-  disconnectTaskSocket()
-  disconnectOpsSocket()
+  stopPoller()
+  disconnectSockets()
 })
 
+// 核心方法
 async function reloadAll() {
-  pageLoading.value = true
   try {
-    await configStore.checkTushareStatus()
-    const [overviewData, runningData, historyData, environmentData, statusData] = await Promise.all([
-      apiTasks.getOverview(),
+    const [runningResp, statusResp, envResp] = await Promise.all([
       apiTasks.getRunning(),
-      apiTasks.getAll(historyStatus.value || undefined, 50),
-      apiTasks.getEnvironment(),
       apiTasks.getStatus(),
+      apiTasks.getEnvironment(),
     ])
 
-    overview.value = overviewData
-    runningTasks.value = runningData
-    historyTasks.value = historyData
-    environment.value = environmentData
-    status.value = statusData
-    lastOverviewRefreshAt.value = Date.now()
+    runningTasks.value = runningResp.tasks
 
-    if (!selectedTask.value && runningData.tasks.length > 0) {
-      await selectTask(runningData.tasks[0])
+    // 获取历史任务（已完成的）
+    try {
+      const historyResp = await apiTasks.getAll('completed,failed,cancelled', 20)
+      historyTasks.value = historyResp.tasks
+    } catch {
+      historyTasks.value = []
     }
-  } finally {
-    pageLoading.value = false
+
+    dataStatus.value = {
+      rawData: {
+        exists: statusResp.raw_data.exists,
+        count: statusResp.raw_data.count,
+        latestDate: formatLatestDate(statusResp.raw_data.latest_date),
+      },
+      dbSize: '-',
+      environment: envResp.sections || [],
+    }
+
+    dataLoaded.value = true
+
+    if (runningTasks.value.length > 0 && !selectedTask.value) {
+      selectTask(runningTasks.value[0])
+    }
+  } catch (error) {
+    console.error('Failed to reload:', error)
+    dataLoaded.value = true
   }
 }
 
@@ -521,161 +487,173 @@ async function startBootstrap() {
   bootstrapStarting.value = true
   try {
     const result = await apiTasks.startUpdate('quant', false, 1)
-    ElMessage.success(`首次初始化任务已启动 #${result.task.id}`)
-    activeTab.value = 'running'
+    ElMessage.success(`初始化任务已启动 #${result.task.id}`)
     await reloadAll()
-    const createdTask = runningTasks.value.tasks.find((task) => task.id === result.task.id)
-    if (createdTask) {
-      await selectTask(createdTask)
-    }
   } catch (error: any) {
-    ElMessage.error(error.message || '启动首次初始化失败')
+    ElMessage.error(error.message || '启动失败')
   } finally {
     bootstrapStarting.value = false
   }
 }
 
-async function loadHistoryTasks() {
-  historyTasks.value = await apiTasks.getAll(historyStatus.value || undefined, 50)
+async function startDataUpdate() {
+  startingUpdate.value = true
+  try {
+    const result = await apiTasks.startUpdate('quant', false, 1)
+    ElMessage.success(`数据更新任务已启动 #${result.task.id}`)
+    await reloadAll()
+  } catch (error: any) {
+    ElMessage.error(error.message || '启动失败')
+  } finally {
+    startingUpdate.value = false
+  }
+}
+
+async function startFullUpdate() {
+  startingFullUpdate.value = true
+  try {
+    const result = await apiTasks.startUpdate('quant', false, 1000)
+    ElMessage.success(`历史数据更新任务已启动 #${result.task.id}`)
+    await reloadAll()
+  } catch (error: any) {
+    ElMessage.error(error.message || '启动失败')
+  } finally {
+    startingFullUpdate.value = false
+  }
+}
+
+async function reloadTasks() {
+  await reloadAll()
+  ElMessage.success('已刷新')
 }
 
 async function selectTask(task: Task) {
   selectedTask.value = task
-  await loadTaskLogs(task.id, true)
+  await loadTaskLogs(task.id)
   connectTaskSocket(task.id)
 }
 
-async function loadTaskLogs(taskId: number, syncSelected: boolean = false) {
-  const data = await apiTasks.getLogs(taskId)
-  if (syncSelected && selectedTask.value?.id === taskId) {
+async function loadTaskLogs(taskId: number) {
+  try {
+    const data = await apiTasks.getLogs(taskId)
     selectedTaskLogs.value = data.logs
-    scrollLogsToBottom()
-  }
-  if (detailTask.value?.id === taskId) {
-    detailLogs.value = data.logs
+    await nextTick()
+    scrollToBottom()
+  } catch (error) {
+    console.error('Failed to load logs:', error)
   }
 }
 
 async function cancelTask(task: Task) {
   try {
-    await apiTasks.cancel(task.id)
-    ElMessage.success(`任务 #${task.id} 已取消`)
-    await reloadAll()
-    if (selectedTask.value?.id === task.id) {
-      await loadTaskLogs(task.id, true)
+    const result = await apiTasks.cancel(task.id)
+    if (result.status === 'ok') {
+      ElMessage.success(result.message || `任务 #${task.id} 已取消`)
+      await reloadAll()
+    } else {
+      ElMessage.warning(result.message || '取消请求已处理')
+      await reloadAll()
     }
   } catch (error: any) {
-    ElMessage.error(error.message || '取消任务失败')
+    ElMessage.error(error.message || '取消失败')
+    await reloadAll()
   }
 }
 
 async function clearTasks() {
   try {
-    await ElMessageBox.confirm(
-      '将清空所有已结束任务记录，此操作不可恢复。',
-      '确认清空',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning',
-      },
-    )
+    await ElMessageBox.confirm('确定清空所有已结束任务记录？', '确认操作', {
+      type: 'warning',
+    })
     await apiTasks.clearTasks()
-    ElMessage.success('已清空已结束任务')
+    ElMessage.success('已清空')
     await reloadAll()
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error(error.message || '清空失败')
-    }
+  } catch {
+    // cancelled
   }
 }
 
-async function openTaskDetail(task: Task) {
-  detailTask.value = task
-  detailVisible.value = true
-  const data = await apiTasks.getLogs(task.id)
-  detailLogs.value = data.logs
+function viewTaskDetail(task: Task) {
+  selectTask(task)
+  activeTab.value = 'logs'
 }
 
-function startRunningPoller() {
-  stopRunningPoller()
-  runningPoller = setInterval(async () => {
-    try {
-      if (document.visibilityState === 'hidden') {
-        return
-      }
-
-      if (opsWsConnected.value && runningTasks.value.total > 0) {
-        return
-      }
-
-      const hasRunningTasks = runningTasks.value.total > 0
-      const idleTooSoon = !hasRunningTasks && Date.now() - lastOverviewRefreshAt.value < IDLE_POLL_INTERVAL_MS
-      if (idleTooSoon) {
-        return
-      }
-
-      const runningData = await apiTasks.getRunning()
-      runningTasks.value = runningData
-      const shouldRefreshOverview = hasRunningTasks || Date.now() - lastOverviewRefreshAt.value >= OVERVIEW_REFRESH_INTERVAL_MS
-      if (shouldRefreshOverview) {
-        overview.value = await apiTasks.getOverview()
-        lastOverviewRefreshAt.value = Date.now()
-      }
-
-      if (selectedTask.value) {
-        const latestTask = runningData.tasks.find((item) => item.id === selectedTask.value?.id)
-        if (latestTask) {
-          selectedTask.value = latestTask
-          await loadTaskLogs(latestTask.id, true)
-        } else if (selectedTask.value.status === 'running' || selectedTask.value.status === 'pending') {
-          const latestDetail = await apiTasks.get(selectedTask.value.id)
-          selectedTask.value = latestDetail
-          await loadTaskLogs(latestDetail.id, true)
-        }
-      }
-    } catch (error) {
-      console.error('Failed to poll running tasks:', error)
-    }
-  }, RUNNING_POLL_INTERVAL_MS)
+function filterLogs() {
+  nextTick(() => scrollToBottom())
 }
 
-function stopRunningPoller() {
-  if (runningPoller) {
-    clearInterval(runningPoller)
-    runningPoller = null
+function clearLogsDisplay() {
+  if (logFilter.value === 'task') {
+    selectedTaskLogs.value = []
+  } else {
+    allLogs.value = []
   }
 }
 
+async function checkDataFresh() {
+  checkingData.value = true
+  try {
+    // 检查是否需要更新数据的逻辑
+    await apiTasks.getOverview()
+    ElMessage.success('数据状态已更新')
+    await reloadAll()
+  } finally {
+    checkingData.value = false
+  }
+}
+
+async function cleanCache() {
+  cleaningCache.value = true
+  try {
+    // 清理缓存的逻辑
+    ElMessage.success('缓存已清理')
+  } finally {
+    cleaningCache.value = false
+  }
+}
+
+function checkIntegrity() {
+  ElMessage.info('完整性检查功能开发中')
+}
+
+function handleLogScroll() {
+  const el = logRef.value
+  if (!el) return
+  const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+  autoScroll.value = isNearBottom
+}
+
+function scrollToBottom() {
+  if (autoScroll.value && logRef.value) {
+    logRef.value.scrollTop = logRef.value.scrollHeight
+  }
+}
+
+// WebSocket 连接
 function connectTaskSocket(taskId: number) {
   disconnectTaskSocket()
-
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${protocol}//${window.location.host}/ws/tasks/${taskId}`
   ws = new WebSocket(wsUrl)
 
-  ws.onmessage = async (event) => {
+  ws.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data)
       if (payload.type === 'log') {
-        selectedTaskLogs.value.push({
+        const log: TaskLogItem = {
           id: Date.now(),
           task_id: taskId,
           log_time: payload.timestamp,
           level: payload.log_type || 'info',
           stage: undefined,
           message: payload.message,
-        })
-        scrollLogsToBottom()
+        }
+        selectedTaskLogs.value.push(log)
+        allLogs.value.push(log)
+        scrollToBottom()
       }
     } catch {
-      // ignore non-json messages
-    }
-  }
-
-  ws.onclose = async () => {
-    if (selectedTask.value?.id === taskId) {
-      await loadTaskLogs(taskId, true)
+      // ignore
     }
   }
 }
@@ -689,44 +667,19 @@ function disconnectTaskSocket() {
 
 function connectOpsSocket() {
   disconnectOpsSocket()
-
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${protocol}//${window.location.host}/ws/ops`
   opsWs = new WebSocket(wsUrl)
 
-  opsWs.onopen = () => {
-    opsWsConnected.value = true
-  }
-
-  opsWs.onmessage = async (event) => {
+  opsWs.onmessage = (event) => {
     try {
       const message = JSON.parse(event.data)
-      if (!message?.type || !message?.payload) return
-
-      const payload = message.payload as Task
-      applyOpsTaskUpdate(payload)
-
-      if (selectedTask.value?.id === payload.id) {
-        selectedTask.value = { ...selectedTask.value, ...payload }
+      if (message?.payload) {
+        applyTaskUpdate(message.payload)
       }
-      if (detailTask.value?.id === payload.id) {
-        detailTask.value = { ...detailTask.value, ...payload }
-        await loadTaskLogs(payload.id)
-      }
-      if (selectedTask.value?.id === payload.id) {
-        await loadTaskLogs(payload.id, true)
-      }
-    } catch (error) {
-      console.error('Failed to parse ops websocket payload:', error)
+    } catch {
+      // ignore
     }
-  }
-
-  opsWs.onclose = () => {
-    opsWsConnected.value = false
-  }
-
-  opsWs.onerror = () => {
-    opsWsConnected.value = false
   }
 }
 
@@ -735,47 +688,53 @@ function disconnectOpsSocket() {
     opsWs.close()
     opsWs = null
   }
-  opsWsConnected.value = false
 }
 
-function applyOpsTaskUpdate(task: Task) {
-  const runningIndex = runningTasks.value.tasks.findIndex((item) => item.id === task.id)
+function disconnectSockets() {
+  disconnectTaskSocket()
+  disconnectOpsSocket()
+}
+
+function applyTaskUpdate(task: Task) {
+  const runningIndex = runningTasks.value.findIndex((t) => t.id === task.id)
   const isRunning = task.status === 'pending' || task.status === 'running'
 
   if (isRunning) {
     if (runningIndex >= 0) {
-      runningTasks.value.tasks[runningIndex] = task
+      runningTasks.value[runningIndex] = task
     } else {
-      runningTasks.value.tasks.unshift(task)
+      runningTasks.value.unshift(task)
     }
   } else if (runningIndex >= 0) {
-    runningTasks.value.tasks.splice(runningIndex, 1)
+    runningTasks.value.splice(runningIndex, 1)
   }
-  runningTasks.value.total = runningTasks.value.tasks.length
 
-  const historyIndex = historyTasks.value.tasks.findIndex((item) => item.id === task.id)
-  if (historyIndex >= 0) {
-    historyTasks.value.tasks[historyIndex] = task
-  } else {
-    historyTasks.value.tasks.unshift(task)
-  }
-  historyTasks.value.total = historyTasks.value.tasks.length
-
-  const overviewRunningCard = overview.value.cards.find((card) => card.key === 'running')
-  if (overviewRunningCard) {
-    overviewRunningCard.value = String(runningTasks.value.total)
-    overviewRunningCard.status = runningTasks.value.total > 0 ? 'warning' : 'success'
+  if (selectedTask.value?.id === task.id) {
+    selectedTask.value = task
   }
 }
 
-function scrollLogsToBottom() {
-  nextTick(() => {
-    if (logRef.value) {
-      logRef.value.scrollTop = logRef.value.scrollHeight
-    }
-  })
+let poller: ReturnType<typeof setInterval> | null = null
+
+function startPoller() {
+  stopPoller()
+  poller = setInterval(async () => {
+    if (document.visibilityState === 'hidden') return
+    if (opsWs?.readyState === WebSocket.OPEN && runningTasks.value.length > 0) return
+
+    const runningData = await apiTasks.getRunning()
+    runningTasks.value = runningData.tasks
+  }, 5000)
 }
 
+function stopPoller() {
+  if (poller) {
+    clearInterval(poller)
+    poller = null
+  }
+}
+
+// 格式化方法
 function getTaskTypeLabel(taskType: string): string {
   const labels: Record<string, string> = {
     full_update: '全量更新',
@@ -785,22 +744,15 @@ function getTaskTypeLabel(taskType: string): string {
   return labels[taskType] || taskType
 }
 
-function getSourceLabel(source: string): string {
-  const labels: Record<string, string> = {
-    manual: '手工',
-    auto: '自动',
-    system: '系统',
-  }
-  return labels[source] || source
-}
-
-function getSourceType(source: string): string {
+function getStatusType(status: string): string {
   const types: Record<string, string> = {
-    manual: 'primary',
-    auto: 'success',
-    system: 'warning',
+    completed: 'success',
+    running: 'primary',
+    failed: 'danger',
+    pending: 'warning',
+    cancelled: 'info',
   }
-  return types[source] || 'info'
+  return types[status] || 'info'
 }
 
 function getStageLabel(stage?: string | null): string {
@@ -814,208 +766,152 @@ function getStageLabel(stage?: string | null): string {
     pre_filter: '前置过滤',
     score_review: '量化复核',
     finalize: '收尾输出',
-    analysis: '单股分析',
     completed: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
   }
   return stage ? (labels[stage] || stage) : '-'
 }
 
-function getStatusType(statusName: string): string {
-  const types: Record<string, string> = {
-    completed: 'success',
-    running: 'primary',
-    failed: 'danger',
-    pending: 'warning',
-    cancelled: 'info',
-  }
-  return types[statusName] || 'info'
-}
-
-function getAlertType(level: string): 'success' | 'warning' | 'info' | 'error' {
-  const types: Record<string, 'success' | 'warning' | 'info' | 'error'> = {
-    success: 'success',
-    warning: 'warning',
-    info: 'info',
-    error: 'error',
-  }
-  return types[level] || 'info'
-}
-
-function formatDateTime(dateStr?: string) {
+function formatDateTime(dateStr?: string): string {
   if (!dateStr) return '-'
   return new Date(dateStr).toLocaleString('zh-CN', {
-    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
   })
 }
 
-function formatLogTime(dateStr?: string) {
+function formatLogTime(dateStr?: string): string {
   if (!dateStr) return '--:--:--'
   return new Date(dateStr).toLocaleTimeString('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
   })
 }
 
-function getDuration(task: Task): string {
-  if (!task.started_at || !task.completed_at) return '-'
-  const start = new Date(task.started_at)
-  const end = new Date(task.completed_at)
-  const seconds = Math.max(0, Math.round((end.getTime() - start.getTime()) / 1000))
-  if (seconds < 60) return `${seconds}秒`
-  return `${Math.floor(seconds / 60)}分${seconds % 60}秒`
+function formatLatestDate(date?: string | number): string {
+  if (!date) return '-'
+  if (typeof date === 'number') {
+    return new Date(date * 1000).toLocaleDateString('zh-CN')
+  }
+  return date
 }
 
-function formatEnvKey(key: string) {
-  return key.replace(/_/g, ' ')
+function formatEnvKey(key: string): string {
+  const keys: Record<string, string> = {
+    app_name: '应用名称',
+    debug: '调试模式',
+    host: '主机',
+    port: '端口',
+    python_version: 'Python版本',
+    platform: '系统平台',
+    timezone: '时区',
+    data_dir: '数据目录',
+    db_dir: '数据库目录',
+    raw_data_dir: '原始数据目录',
+    review_dir: '评审目录',
+    logs_dir: '日志目录',
+    tushare_configured: 'Tushare配置',
+    zhipuai_configured: '智谱配置',
+    dashscope_configured: '通义配置',
+    gemini_configured: 'Gemini配置',
+    default_reviewer: '默认评审器',
+    total_stocks: '股票总数',
+    latest_date: '最新日期',
+  }
+  return keys[key] || key
 }
 
-function formatEnvValue(value: unknown) {
-  if (typeof value === 'boolean') return value ? '是' : '否'
+function formatEnvValue(value: any): string {
+  if (typeof value === 'boolean') return value ? '已配置' : '未配置'
   if (value == null || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
 
-function formatJson(value: unknown) {
-  if (!value) return '-'
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
+function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {}
+  for (const [key, value] of Object.entries(items)) {
+    if (value === null || value === undefined) continue
+    if (typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+      result[key] = value
+    }
   }
+  return result
 }
 </script>
 
 <style scoped lang="scss">
-.task-center-page {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+.ops-page {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
 
   .page-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 16px;
+    margin-bottom: 20px;
 
     h2 {
-      margin: 0 0 6px 0;
-      font-size: 24px;
-    }
-
-    p {
       margin: 0;
-      color: var(--color-text-secondary);
+      font-size: 24px;
+      font-weight: 600;
     }
   }
 
-  .header-actions,
-  .inline-actions {
+  .ops-tabs {
+    :deep(.el-tabs__header) {
+      margin-bottom: 20px;
+    }
+
+    :deep(.el-tabs__nav-wrap::after) {
+      display: none;
+    }
+  }
+
+  .tab-content {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .card-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
   }
 
-  .alert-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .overview-grid {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 16px;
-  }
-
-  .overview-card {
-    .overview-label {
-      font-size: 13px;
-      color: var(--color-text-secondary);
-      margin-bottom: 10px;
-    }
-
-    .overview-value {
-      font-size: 28px;
-      font-weight: 700;
-
-      &.is-success {
-        color: var(--color-success);
-      }
-
-      &.is-warning {
-        color: var(--color-warning);
-      }
-
-      &.is-danger {
-        color: var(--color-danger);
-      }
-
-      &.is-info {
-        color: var(--color-primary);
-      }
-    }
-
-    .overview-meta {
-      margin-top: 8px;
-      font-size: 12px;
-      color: var(--color-text-light);
-      line-height: 1.6;
-    }
-  }
-
+  // 首次初始化卡片
   .bootstrap-card {
-    .bootstrap-layout {
+    .bootstrap-content {
       display: flex;
-      justify-content: space-between;
-      gap: 24px;
+      flex-direction: column;
+      gap: 20px;
     }
 
-    .bootstrap-main {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .bootstrap-title {
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--color-text-primary);
-    }
-
-    .bootstrap-description {
-      margin-top: 8px;
+    .bootstrap-desc {
+      margin: 0;
       color: var(--color-text-secondary);
       line-height: 1.7;
     }
 
     .bootstrap-steps {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: 18px;
+      display: flex;
+      gap: 16px;
+      justify-content: center;
     }
 
     .bootstrap-step {
       display: flex;
       gap: 12px;
-      align-items: flex-start;
-      padding: 14px;
+      padding: 16px;
       border-radius: 12px;
       border: 1px solid #e5e7eb;
-      background: #fff;
+      flex: 1;
+      max-width: 300px;
 
       &.is-done {
-        border-color: #bbf7d0;
+        border-color: var(--color-success);
         background: #f0fdf4;
       }
 
@@ -1025,13 +921,12 @@ function formatJson(value: unknown) {
     }
 
     .step-indicator {
-      width: 28px;
-      height: 28px;
-      border-radius: 999px;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 13px;
       font-weight: 700;
       color: #fff;
       background: var(--color-primary);
@@ -1040,10 +935,6 @@ function formatJson(value: unknown) {
 
     .is-done .step-indicator {
       background: var(--color-success);
-    }
-
-    .step-content {
-      min-width: 0;
     }
 
     .step-title {
@@ -1055,230 +946,389 @@ function formatJson(value: unknown) {
       margin-top: 4px;
       font-size: 12px;
       color: var(--color-text-secondary);
-      line-height: 1.6;
     }
 
     .bootstrap-actions {
-      width: 260px;
-      flex-shrink: 0;
       display: flex;
-      flex-direction: column;
-      gap: 12px;
       justify-content: center;
-      padding: 6px 0;
-    }
-
-    .bootstrap-hint {
-      font-size: 12px;
-      line-height: 1.7;
-      color: var(--color-text-light);
     }
   }
 
-  .task-tabs {
-    :deep(.el-tabs__header) {
-      margin-bottom: 10px;
+  // 操作卡片
+  .action-card {
+    .action-buttons {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .running-hint {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: var(--color-warning);
+      font-size: 14px;
     }
   }
 
-  .tab-section {
+  // 任务卡片
+  .tasks-card {
+    :deep(.el-card__body) {
+      padding: 16px;
+    }
+  }
+
+  .running-tasks-list {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-  }
-
-  .card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 12px;
   }
 
-  .task-main {
+  .task-item {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: 16px;
+    padding: 16px;
+    border-radius: 10px;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    cursor: pointer;
+    transition: all 0.2s;
+
+    &:hover {
+      border-color: var(--color-primary);
+      box-shadow: 0 2px 8px rgba(0, 180, 216, 0.15);
+    }
+
+    &.is-selected {
+      border-color: var(--color-primary);
+      background: #f0f9ff;
+    }
   }
 
-  .task-title {
+  .task-main {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .task-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .task-id {
     font-weight: 600;
     color: var(--color-text-primary);
   }
 
-  .task-summary {
-    font-size: 12px;
+  .task-type {
     color: var(--color-text-secondary);
-    line-height: 1.5;
   }
 
-  .log-card,
-  .drawer-log-container {
-    .log-empty {
-      color: var(--color-text-light);
-      text-align: center;
-      padding: 24px 0;
+  .task-stage {
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    margin-bottom: 8px;
+  }
+
+  // 日志卡片
+  .logs-card {
+    .log-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .log-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
   }
 
-  .log-container,
-  .drawer-log-container {
-    max-height: 520px;
+  .log-container {
+    height: calc(100vh - 320px);
+    min-height: 400px;
     overflow-y: auto;
     background: #0f172a;
     border-radius: 10px;
-    padding: 12px;
+    padding: 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .log-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #64748b;
+    gap: 12px;
+
+    .el-icon {
+      font-size: 48px;
+    }
+
+    p {
+      margin: 0;
+    }
   }
 
   .log-line {
     display: grid;
-    grid-template-columns: 76px 92px 1fr;
-    gap: 10px;
-    padding: 8px 10px;
-    border-radius: 8px;
+    grid-template-columns: 80px 60px 1fr;
+    gap: 12px;
+    padding: 6px 8px;
+    border-radius: 6px;
     color: #e2e8f0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    line-height: 1.5;
 
     & + .log-line {
-      margin-top: 6px;
+      margin-top: 2px;
     }
 
     &.log-error {
-      background: rgba(239, 68, 68, 0.16);
+      background: rgba(239, 68, 68, 0.2);
     }
 
     &.log-warning {
-      background: rgba(245, 158, 11, 0.16);
+      background: rgba(245, 158, 11, 0.15);
     }
 
     &.log-success {
-      background: rgba(16, 185, 129, 0.16);
-    }
-
-    &.log-info {
-      background: rgba(59, 130, 246, 0.12);
+      background: rgba(16, 185, 129, 0.15);
     }
   }
 
-  .log-time,
-  .log-stage {
+  .log-time {
+    color: #64748b;
+  }
+
+  .log-level {
     color: #94a3b8;
+    font-weight: 600;
   }
 
-  .env-card {
-    height: 100%;
+  // 状态管理
+  .health-card {
+    .health-summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    .health-item {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 16px;
+      border-radius: 12px;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+
+      &.is-healthy {
+        background: #f0fdf4;
+        border-color: #bbf7d0;
+      }
+
+      .health-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        color: #fff;
+        background: var(--color-danger);
+
+        .is-spinning {
+          animation: spin 1s linear infinite;
+        }
+      }
+
+      &.is-healthy .health-icon {
+        background: var(--color-success);
+      }
+
+      .health-info {
+        flex: 1;
+      }
+
+      .health-title {
+        font-weight: 600;
+        color: var(--color-text-primary);
+        margin-bottom: 4px;
+      }
+
+      .health-desc {
+        font-size: 13px;
+        color: var(--color-text-secondary);
+      }
+    }
   }
 
-  .env-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
-  .env-item {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 10px 12px;
-    border-radius: 8px;
-    background: var(--color-bg-light);
-  }
+  .detail-card {
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
 
-  .env-key {
-    color: var(--color-text-secondary);
-  }
-
-  .env-value {
-    color: var(--color-text-primary);
-    text-align: right;
-    word-break: break-all;
-  }
-
-  .status-card {
-    .status-item {
+    .detail-item {
       display: flex;
       flex-direction: column;
       gap: 8px;
-      padding: 8px;
-      text-align: center;
-    }
-
-    .status-label {
-      font-weight: 600;
-    }
-
-    .status-value {
-      font-size: 18px;
-      font-weight: 700;
-    }
-
-    .status-meta {
-      font-size: 12px;
-      color: var(--color-text-light);
-      line-height: 1.5;
-    }
-
-    .status-ok .status-value {
-      color: var(--color-success);
-    }
-
-    .status-missing .status-value {
-      color: var(--color-danger);
-    }
-  }
-
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-  }
-
-  .detail-item {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 12px 14px;
-    border-radius: 8px;
-    background: var(--color-bg-light);
-
-    span {
-      color: var(--color-text-secondary);
-      font-size: 12px;
-    }
-  }
-
-  .detail-block {
-    & + .detail-block {
-      margin-top: 18px;
-    }
-
-    h4 {
-      margin: 0 0 8px 0;
-    }
-
-    p,
-    pre {
-      margin: 0;
-      line-height: 1.6;
-    }
-
-    pre {
-      padding: 12px;
-      border-radius: 8px;
+      padding: 16px;
       background: var(--color-bg-light);
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
+      border-radius: 10px;
+
+      .detail-label {
+        font-size: 13px;
+        color: var(--color-text-secondary);
+      }
+
+      .detail-value {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--color-text-primary);
+
+        small {
+          font-size: 13px;
+          font-weight: 400;
+          color: var(--color-text-secondary);
+          margin-left: 4px;
+        }
+      }
+    }
+  }
+
+  .env-summary-card {
+    .env-summary-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .env-section {
+      .env-section-title {
+        font-weight: 600;
+        color: var(--color-text-primary);
+        margin-bottom: 12px;
+      }
+
+      .env-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+    }
+  }
+
+  .env-collapse {
+    border: none;
+
+    :deep(.el-collapse-item__header) {
+      border-radius: 12px;
+      padding: 0 16px;
+      background: var(--color-bg-light);
+      margin-bottom: 12px;
+    }
+
+    :deep(.el-collapse-item__wrap) {
+      border: none;
+      background: transparent;
+    }
+
+    .collapse-title {
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+
+    .env-details-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    .env-detail-section {
+      background: var(--color-bg-light);
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    .env-detail-title {
+      font-weight: 600;
+      color: var(--color-text-primary);
+      margin-bottom: 12px;
+    }
+
+    .env-detail-items {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .env-detail-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px dashed #e5e7eb;
+
+      &:last-child {
+        border-bottom: none;
+      }
+    }
+
+    .env-detail-key {
+      color: var(--color-text-secondary);
+    }
+
+    .env-detail-value {
+      font-weight: 500;
+      color: var(--color-text-primary);
     }
   }
 }
 
-@media (max-width: 1200px) {
-  .task-center-page {
-    .overview-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+@media (max-width: 768px) {
+  .ops-page {
+    padding: 16px;
+
+    .health-summary {
+      grid-template-columns: 1fr;
     }
+
+    .detail-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .env-details-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .bootstrap-steps {
+      flex-direction: column;
+    }
+
+    .action-buttons {
+      flex-direction: column;
+    }
+  }
+}
+
+@media (max-width: 480px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

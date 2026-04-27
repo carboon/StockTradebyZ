@@ -23,8 +23,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -121,6 +123,77 @@ def _has_all_expected_data(raw_dir: Path, expected_codes: set[str] | None = None
         return True
 
     return any(raw_dir.glob("*.csv"))
+
+
+def _load_env_var(name: str) -> str:
+    """优先读取环境变量，缺失时回退到项目根目录 .env。"""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return ""
+
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            if key.strip() != name:
+                continue
+            return raw.strip().strip("'\"")
+    except Exception:
+        return ""
+
+    return ""
+
+
+def _get_local_latest_date(raw_dir: Path) -> str | None:
+    """扫描 data/raw/ 中 CSV 的最新日期。"""
+    latest_date: str | None = None
+    for csv_path in raw_dir.glob("*.csv"):
+        try:
+            with open(csv_path, encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            if not rows:
+                continue
+            date_value = str(rows[-1].get("date", "")).strip()
+            if len(date_value) >= 10:
+                date_value = date_value[:10]
+            if date_value and (latest_date is None or date_value > latest_date):
+                latest_date = date_value
+        except Exception:
+            continue
+    return latest_date
+
+
+def _get_latest_trade_date() -> str | None:
+    """读取最新交易日；失败时返回 None。"""
+    token = _load_env_var("TUSHARE_TOKEN")
+    if not token:
+        return None
+
+    try:
+        import tushare as ts
+
+        pro = ts.pro_api(token)
+        today = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+        df = pro.trade_cal(exchange="SSE", start_date=start_date, end_date=today)
+        if df is None or df.empty:
+            return None
+
+        trade_days = df[df["is_open"] == 1].sort_values("cal_date", ascending=False)
+        if trade_days.empty:
+            return None
+
+        latest = str(trade_days.iloc[0]["cal_date"])
+        return f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+    except Exception as exc:
+        print(f"[WARN] 获取最新交易日失败，将继续执行抓取避免使用旧数据: {exc}")
+        return None
 
 
 def _run(step_name: str, cmd: list[str]) -> None:
@@ -247,15 +320,27 @@ def main() -> None:
     if start <= 1:
         raw_dir = ROOT / "data" / "raw"
         expected_codes = _load_expected_fetch_codes()
-        if _has_all_expected_data(raw_dir, expected_codes=expected_codes) and not args.skip_fetch:
+        has_complete_data = _has_all_expected_data(raw_dir, expected_codes=expected_codes)
+        local_latest_date = _get_local_latest_date(raw_dir) if has_complete_data else None
+        latest_trade_date = _get_latest_trade_date() if has_complete_data and not args.skip_fetch else None
+
+        if has_complete_data and not args.skip_fetch and latest_trade_date and local_latest_date == latest_trade_date:
             print(f"\n{'='*60}")
-            print("[步骤] 1  拉取 K 线数据 — 已跳过（数据已完整存在）")
+            print(f"[步骤] 1  拉取 K 线数据 — 已跳过（数据完整且已是最新交易日 {latest_trade_date}）")
             print(f"{'='*60}")
         elif args.skip_fetch:
             print(f"\n{'='*60}")
             print("[步骤] 1  拉取 K 线数据 — 已跳过（--skip-fetch）")
             print(f"{'='*60}")
         else:
+            if has_complete_data:
+                if latest_trade_date and local_latest_date and local_latest_date < latest_trade_date:
+                    print(
+                        f"[INFO] 本地数据最新日期为 {local_latest_date}，"
+                        f"落后于最新交易日 {latest_trade_date}，将执行步骤 1。"
+                    )
+                else:
+                    print("[INFO] 数据文件虽已存在，但无法确认已是最新交易日，将执行步骤 1。")
             _run(
                 "1  拉取 K 线数据（fetch_kline）",
                 [PYTHON, "-m", "pipeline.fetch_kline"],

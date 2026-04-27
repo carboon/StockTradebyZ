@@ -37,6 +37,9 @@ import { ElMessage } from 'element-plus'
 
 // Mock API 模块
 vi.mock('@/api/index', () => ({
+  apiConfig: {
+    getTushareStatus: vi.fn()
+  },
   apiAnalysis: {
     getFreshness: vi.fn(),
     getDates: vi.fn(),
@@ -50,6 +53,7 @@ vi.mock('@/api/index', () => ({
 }))
 
 // 导入 mock 函数
+import { apiConfig } from '@/api/index'
 import { apiAnalysis } from '@/api/index'
 import { apiTasks } from '@/api/index'
 
@@ -155,11 +159,22 @@ describe('TomorrowStar.vue 组件测试', () => {
     // 重置所有 mocks
     vi.clearAllMocks()
     mockPush.mockClear()
+    window.sessionStorage.clear()
 
     // 创建新的 Pinia 实例
     pinia = createPinia()
     setActivePinia(pinia)
 
+    vi.mocked(apiConfig.getTushareStatus).mockResolvedValue({
+      configured: true,
+      available: true,
+      data_status: {
+        raw_data: { exists: true, count: 1, latest_date: '2024-01-15' },
+        candidates: { exists: true, count: 1, latest_date: '2024-01-15' },
+        analysis: { exists: true, count: 1, latest_date: '2024-01-15' },
+        kline: { exists: false, count: 0, latest_date: null }
+      }
+    } as any)
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-15',
       local_latest_date: '2024-01-15',
@@ -229,6 +244,55 @@ describe('TomorrowStar.vue 组件测试', () => {
 
       // 验证初始选中的日期是最新的
       expect(wrapper.vm.selectedDate).toBe('2024-01-15')
+    })
+
+    it('选择历史日期后，右侧候选和分析结果应该切换到对应日期', async () => {
+      vi.mocked(apiAnalysis.getDates).mockResolvedValue({
+        dates: mockDates,
+        history: mockHistory
+      } as any)
+      vi.mocked(apiAnalysis.getCandidates)
+        .mockResolvedValueOnce({
+          pick_date: '2024-01-15',
+          candidates: mockCandidates
+        } as any)
+        .mockResolvedValueOnce({
+          pick_date: '2024-01-14',
+          candidates: [{
+            code: '300001',
+            close_price: 20.5,
+            kdj_j: 12.5,
+            strategy: 'b1',
+            b1_passed: true
+          }]
+        } as any)
+      vi.mocked(apiAnalysis.getResults)
+        .mockResolvedValueOnce({ results: mockResults } as any)
+        .mockResolvedValueOnce({
+          results: [{
+            code: '300001',
+            verdict: 'WATCH',
+            total_score: 3.9,
+            signal_type: '观察',
+            comment: '历史结果'
+          }]
+        } as any)
+
+      wrapper = mount(TomorrowStar, createMountOptions())
+
+      await nextTick()
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      await wrapper.vm.selectDate({ date: '2024-01-14', count: 2, pass: 1 })
+      await nextTick()
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      expect(wrapper.vm.selectedDate).toBe('2024-01-14')
+      expect(apiAnalysis.getCandidates).toHaveBeenLastCalledWith('2024-01-14')
+      expect(apiAnalysis.getResults).toHaveBeenLastCalledWith('2024-01-14')
+      expect(wrapper.vm.dataDate).toBe('2024-01-14')
+      expect(wrapper.vm.candidates[0].code).toBe('300001')
+      expect(wrapper.vm.analysisResults[0].code).toBe('300001')
     })
 
     it('空日期列表时应该显示空状态', async () => {

@@ -67,6 +67,31 @@ def _default_log_path() -> Path:
     today = dt.date.today().strftime("%Y-%m-%d")
     return _DEFAULT_LOG_DIR / f"fetch_{today}.log"
 
+
+def _load_env_var(name: str) -> str:
+    """优先读取环境变量，缺失时回退到项目根目录 .env。"""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+
+    env_path = _PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return ""
+
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            if key.strip() != name:
+                continue
+            return raw.strip().strip("'\"")
+    except Exception:
+        return ""
+
+    return ""
+
 def setup_logging(log_path: Optional[Path] = None) -> None:
     """初始化日志：同时输出到 stdout 和指定文件。"""
     if log_path is None:
@@ -240,7 +265,190 @@ def fetch_one(
                 logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
                 time.sleep(silent_seconds)
     else:
-        logger.error("%s 三次抓取均失败，已跳过！", code)       
+        logger.error("%s 三次抓取均失败，已跳过！", code)
+
+
+# --------------------------- 增量更新 --------------------------- #
+def _get_latest_date_from_csv(csv_path: Path) -> Optional[str]:
+    """获取 CSV 文件中的最新日期"""
+    try:
+        df = pd.read_csv(csv_path)
+        if "date" in df.columns and not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            latest = df["date"].max()
+            return latest.strftime("%Y%m%d")
+    except Exception as e:
+        logger.debug(f"读取 {csv_path} 失败: {e}")
+    return None
+
+
+def fetch_one_incremental(
+    code: str,
+    end: str,
+    out_dir: Path,
+    progress_callback: Optional[callable] = None,
+) -> dict:
+    """增量更新单只股票
+
+    Args:
+        code: 股票代码
+        end: 结束日期 (YYYYMMDD)
+        out_dir: 输出目录
+        progress_callback: 进度回调函数 callback(current, total, code)
+
+    Returns:
+        dict: 包含更新结果信息
+    """
+    csv_path = out_dir / f"{code}.csv"
+    result = {
+        "code": code,
+        "success": False,
+        "updated": False,
+        "new_count": 0,
+        "error": None,
+    }
+
+    # 检查现有文件
+    latest_date = _get_latest_date_from_csv(csv_path)
+
+    if latest_date:
+        # 从最新日期的下一天开始抓取
+        import datetime
+        latest_dt = datetime.datetime.strptime(latest_date, "%Y%m%d")
+        next_day = latest_dt + datetime.timedelta(days=1)
+        start = next_day.strftime("%Y%m%d")
+    else:
+        # 文件不存在，使用默认起始日期
+        start = "20190101"
+
+    # 如果起始日期已经大于结束日期，无需更新
+    if start >= end:
+        result["success"] = True
+        result["updated"] = False
+        return result
+
+    for attempt in range(1, 4):
+        try:
+            new_df = _get_kline_tushare(code, start, end)
+
+            if new_df.empty:
+                # 可能是停牌或无新数据
+                result["success"] = True
+                result["updated"] = False
+                break
+
+            new_df = validate(new_df)
+
+            if latest_date and csv_path.exists():
+                # 合并旧数据
+                old_df = pd.read_csv(csv_path)
+                old_df["date"] = pd.to_datetime(old_df["date"])
+                combined_df = pd.concat([old_df, new_df], ignore_index=True)
+                combined_df = combined_df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
+                result["new_count"] = len(new_df)
+            else:
+                combined_df = new_df
+                result["new_count"] = len(new_df)
+
+            combined_df.to_csv(csv_path, index=False)
+            result["success"] = True
+            result["updated"] = True
+            break
+        except Exception as e:
+            if _looks_like_ip_ban(e):
+                logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
+                _cool_sleep(COOLDOWN_SECS)
+            else:
+                silent_seconds = 30 * attempt
+                logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
+                time.sleep(silent_seconds)
+    else:
+        result["error"] = "三次抓取均失败"
+
+    return result
+
+
+def incremental_update(
+    codes: List[str],
+    end: Optional[str] = None,
+    out_dir: Optional[Path] = None,
+    config_path: Optional[Path] = None,
+    progress_callback: Optional[callable] = None,
+) -> dict:
+    """增量更新多只股票
+
+    Args:
+        codes: 股票代码列表
+        end: 结束日期 (YYYYMMDD)，默认为今天
+        out_dir: 输出目录
+        config_path: 配置文件路径
+        progress_callback: 进度回调函数 callback(current, total, code, status)
+
+    Returns:
+        dict: 更新结果汇总
+    """
+    # 加载配置
+    cfg_path = config_path or _CONFIG_PATH
+    cfg = _load_config(cfg_path) if cfg_path.exists() else {}
+
+    # 参数默认值
+    if end is None:
+        end = dt.date.today().strftime("%Y%m%d")
+    if out_dir is None:
+        out_dir = _resolve_cfg_path(cfg.get("out", "./data/raw"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 确保 Tushare 已初始化
+    global pro
+    if pro is None:
+        ts_token = _load_env_var("TUSHARE_TOKEN") or _load_env_var("TS_TOKEN")
+        if not ts_token:
+            raise ValueError("未找到 TUSHARE_TOKEN")
+        pro = ts.pro_api(ts_token)
+
+    workers = int(cfg.get("workers", 8))
+    results = {
+        "total": len(codes),
+        "success": 0,
+        "failed": 0,
+        "updated": 0,
+        "skipped": 0,
+        "details": [],
+    }
+
+    def update_with_progress(code: str, index: int):
+        result = fetch_one_incremental(code, end, out_dir)
+        result["index"] = index
+        results["details"].append(result)
+
+        if result["success"]:
+            results["success"] += 1
+            if result["updated"]:
+                results["updated"] += 1
+            else:
+                results["skipped"] += 1
+        else:
+            results["failed"] += 1
+
+        # 回调进度
+        if progress_callback:
+            status = "updated" if result["updated"] else ("skipped" if result["success"] else "failed")
+            progress_callback(index + 1, len(codes), code, status)
+
+        return result
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(update_with_progress, code, i): code
+            for i, code in enumerate(codes)
+        }
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"增量更新异常: {e}")
+
+    return results
 
 
 
@@ -266,6 +474,7 @@ def main():
                         choices=["main", "gem", "star", "bj"],
                         help="指定抓取板块：main=主板, gem=创业板, star=科创板, bj=北交所（覆盖配置文件）")
     parser.add_argument("--log", default=None, help="日志文件路径")
+    parser.add_argument("--incremental", action="store_true", help="增量更新模式（只更新新数据）")
     args = parser.parse_args()
 
     # ---------- 读取 YAML 配置 ---------- #
@@ -290,12 +499,11 @@ def main():
     # ---------- Tushare Token ---------- #
     os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
     os.environ["no_proxy"] = os.environ["NO_PROXY"]
-    ts_token = os.environ.get("TUSHARE_TOKEN")
+    ts_token = _load_env_var("TUSHARE_TOKEN") or _load_env_var("TS_TOKEN")
     if not ts_token:
-        raise ValueError("请先设置环境变量 TUSHARE_TOKEN，例如：export TUSHARE_TOKEN=你的token")
-    ts.set_token(ts_token)
+        raise ValueError("未找到 TUSHARE_TOKEN，请在环境变量或项目根目录 .env 中配置")
     global pro
-    pro = ts.pro_api()
+    pro = ts.pro_api(ts_token)
 
     # ---------- 日期解析 ---------- #
     raw_start = str(cfg.get("start", "20190101"))
@@ -315,6 +523,27 @@ def main():
         sys.exit(1)
 
     board_desc = ",".join(sorted(include_boards)) if include_boards else (",".join(sorted(exclude_boards)) if exclude_boards else "无")
+
+    # ---------- 增量更新模式 ---------- #
+    if args.incremental:
+        logger.info(
+            "开始增量更新 %d 支股票 | 数据源:Tushare(日线,qfq) | 结束日期:%s | 板块:%s | 限速:%d次/%d秒",
+            len(codes), end, board_desc, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS,
+        )
+
+        def progress_cb(current, total, code, status):
+            logger.info(f"进度: {current}/{total} | {code} | {status}")
+
+        results = incremental_update(codes, end=end, out_dir=out_dir, config_path=cfg_path, progress_callback=progress_cb)
+
+        logger.info(
+            "增量更新完成 | 成功:%d | 更新:%d | 跳过:%d | 失败:%d | 数据目录: %s",
+            results["success"], results["updated"], results["skipped"], results["failed"],
+            out_dir.resolve()
+        )
+        return
+
+    # ---------- 全量抓取模式 ---------- #
     logger.info(
         "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 板块:%s | 限速:%d次/%d秒",
         len(codes), start, end, board_desc, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS,

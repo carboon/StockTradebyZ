@@ -1,7 +1,15 @@
 <template>
   <div class="watchlist-page">
-    <div class="watchlist-layout">
-      <el-card class="list-card top-card">
+    <!-- 加载状态 -->
+    <div v-if="isLoading && watchlist.length === 0" class="loading-container">
+      <el-skeleton :rows="3" animated />
+      <div class="loading-text">加载中...</div>
+    </div>
+
+    <!-- 上方区域：左侧列表 + 右侧详情 -->
+    <template v-else>
+    <div class="top-section">
+      <el-card class="list-card">
           <template #header>
             <div class="card-header">
               <span>我的观察</span>
@@ -21,23 +29,26 @@
             @row-click="selectStock"
             highlight-current-row
             class="watchlist-table"
-            height="420"
+            height="100%"
           >
           <el-table-column prop="code" label="代码" width="80" />
           <el-table-column prop="name" label="名称" />
-            <el-table-column label="操作" width="140" align="center">
+            <el-table-column label="操作" width="120" align="center">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button
                     text
                     type="primary"
+                    size="small"
                     @click.stop="openEditDialog(row)"
                   >
                     编辑
                   </el-button>
+                  <el-divider direction="vertical" />
                   <el-button
                     text
                     type="danger"
+                    size="small"
                     :icon="Delete"
                     @click.stop="removeStock(row)"
                   >
@@ -49,24 +60,23 @@
           </el-table>
       </el-card>
 
-      <template v-if="selectedStock">
-        <el-card class="detail-card top-card">
-            <template #header>
+      <el-card v-if="selectedStock" class="detail-card">
+        <template #header>
               <div class="card-header">
-                <span>{{ selectedStock.code }} {{ selectedStock.name || '' }}</span>
+                <span class="stock-title">{{ selectedStock.code }} {{ selectedStock.name || '' }}</span>
                 <div class="header-actions">
                   <el-button size="small" @click="goToDiagnosis(selectedStock.code)">
                     单股诊断
                   </el-button>
-                  <el-button size="small" @click="analyzeNow" :loading="analyzing">
-                    立即分析
-                  </el-button>
+                  <el-tag type="primary" effect="plain" size="small" class="analyzing-tag" :class="{ visible: analyzing }">
+                    分析中...
+                  </el-tag>
                 </div>
               </div>
             </template>
 
             <!-- K线图 -->
-            <div ref="chartRef" class="chart-container" />
+            <div ref="chartRef" v-loading="loadingChart" class="chart-container" element-loading-text="加载中..." />
 
             <!-- 趋势分析 -->
             <el-divider />
@@ -165,9 +175,12 @@
               </el-row>
             </div>
 
-        </el-card>
+      </el-card>
+      <el-empty v-else class="detail-empty" description="请从左侧选择股票" />
+    </div>
 
-        <el-card class="history-card">
+    <!-- 下方区域：历史分析记录 -->
+    <el-card v-if="selectedStock" class="history-card">
           <template #header>
             <div class="card-header">
               <span>历史分析记录</span>
@@ -247,10 +260,6 @@
             </el-table-column>
           </el-table>
         </el-card>
-      </template>
-
-      <el-empty v-else class="detail-empty" description="请从左侧选择股票" :image-size="120" />
-    </div>
 
     <!-- 添加对话框 -->
     <el-dialog v-model="showAddDialog" title="添加到观察列表" width="400px">
@@ -320,6 +329,7 @@
         <el-button type="primary" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
+    </template>
   </div>
 </template>
 
@@ -356,8 +366,18 @@ const addForm = ref({ code: '', reason: '', entryPrice: '', positionRatio: '' })
 const editForm = ref({ id: 0, code: '', reason: '', entryPrice: '', positionRatio: '' })
 const analyzing = ref(false)
 
+// 缓存优化
+const chartDataCache = new Map<string, KLineData>()
+const analysisCache = new Map<number, WatchlistAnalysis[]>()
+const loadingChart = ref(false)
+const loadingAnalysis = ref(false)
+
 const chartRef = ref<HTMLElement>()
 let chartInstance: ECharts | null = null
+
+// 加载状态
+const isLoading = ref(false)
+const isDataReady = ref(false)
 
 const trendData = ref({
   outlook: 'neutral',
@@ -389,17 +409,16 @@ const historyRows = computed(() => {
 })
 
 onMounted(async () => {
-  restoreWatchlistState()
-  await loadWatchlist()
   window.addEventListener('resize', handleResize)
+  await ensureDataLoaded()
 })
 
 onActivated(async () => {
   chartInstance?.resize()
 
-  if (watchlist.value.length === 0) {
-    await loadWatchlist()
-  } else if (!selectedStock.value) {
+  // 确保数据已加载，然后再恢复选中状态
+  await ensureDataLoaded()
+  if (!selectedStock.value && watchlist.value.length > 0) {
     await restoreSelectedStock()
   }
 })
@@ -415,6 +434,34 @@ function handleResize() {
   chartInstance?.resize()
 }
 
+// 确保数据已加载（避免重复加载）
+let loadPromise: Promise<void> | null = null
+
+async function ensureDataLoaded() {
+  if (isDataReady.value && watchlist.value.length > 0) {
+    return
+  }
+
+  // 如果正在加载，等待已有请求完成
+  if (loadPromise) {
+    return loadPromise
+  }
+
+  // 发起新加载
+  loadPromise = (async () => {
+    isLoading.value = true
+    try {
+      await loadWatchlist()
+      isDataReady.value = true
+    } finally {
+      isLoading.value = false
+      loadPromise = null
+    }
+  })()
+
+  return loadPromise
+}
+
 async function loadWatchlist() {
   try {
     const data = await apiWatchlist.getAll()
@@ -425,16 +472,32 @@ async function loadWatchlist() {
   }
 }
 
-function selectStock(row: WatchlistItem) {
+async function selectStock(row: WatchlistItem) {
   selectedStock.value = row
   persistWatchlistState()
-  loadChart(row.code)
-  loadAnalysis(row.id)
+
+  // 并行加载K线和分析数据
+  await Promise.all([
+    loadChart(row.code),
+    loadAnalysis(row.id)
+  ])
+
+  // 自动触发分析
+  await analyzeNow()
 }
 
 async function loadChart(code: string) {
+  if (loadingChart.value) return
+  loadingChart.value = true
+
   try {
-    const data = await apiStock.getKline(code, 120)
+    // 使用缓存
+    let data = chartDataCache.get(code)
+    if (!data) {
+      data = await apiStock.getKline(code, 120)
+      chartDataCache.set(code, data)
+    }
+
     await nextTick()
     renderChart(data)
 
@@ -451,17 +514,31 @@ async function loadChart(code: string) {
     }
     persistWatchlistState()
   } catch (error: any) {
-    ElMessage.error('加载K线图失败: ' + error.message)
+    console.error('加载K线图失败:', error)
+  } finally {
+    loadingChart.value = false
   }
 }
 
 async function loadAnalysis(id: number) {
+  if (loadingAnalysis.value) return
+  loadingAnalysis.value = true
+
   try {
-    const data = await apiWatchlist.getAnalysis(id)
-    analysisHistory.value = data.analyses || []
+    // 使用缓存
+    let data = analysisCache.get(id)
+    if (!data) {
+      const response = await apiWatchlist.getAnalysis(id)
+      data = response.analyses || []
+      analysisCache.set(id, data)
+    }
+
+    analysisHistory.value = data
     persistWatchlistState()
   } catch (error) {
     console.error('Failed to load analysis:', error)
+  } finally {
+    loadingAnalysis.value = false
   }
 }
 
@@ -576,6 +653,8 @@ async function saveEdit() {
   try {
     const entryPrice = (editForm.value.entryPrice || '').trim()
     const positionRatio = (editForm.value.positionRatio || '').trim()
+    const hasNewData = entryPrice || positionRatio
+
     await apiWatchlist.update(editForm.value.id, {
       reason: editForm.value.reason || undefined,
       entry_price: entryPrice ? Number(entryPrice) : null,
@@ -586,6 +665,13 @@ async function saveEdit() {
     if (selectedStock.value?.id === editForm.value.id) {
       const updated = watchlist.value.find((item) => item.id === editForm.value.id) || null
       selectedStock.value = updated
+
+      // 如果填写了买入成本或仓位信息，自动触发分析
+      if (hasNewData) {
+        // 清除缓存
+        analysisCache.delete(editForm.value.id)
+        await analyzeNow()
+      }
     }
     persistWatchlistState()
     ElMessage.success('保存成功')
@@ -597,6 +683,8 @@ async function saveEdit() {
 async function removeStock(row: WatchlistItem) {
   try {
     await apiWatchlist.delete(row.id)
+    // 清除缓存
+    analysisCache.delete(row.id)
     await loadWatchlist()
     if (selectedStock.value?.id === row.id) {
       selectedStock.value = null
@@ -610,14 +698,17 @@ async function removeStock(row: WatchlistItem) {
 
 async function analyzeNow() {
   if (!selectedStock.value) return
+  if (analyzing.value) return // 防止重复分析
+
   analyzing.value = true
   try {
     await apiWatchlist.analyze(selectedStock.value.id)
+    // 清除缓存
+    analysisCache.delete(selectedStock.value.id)
     await loadAnalysis(selectedStock.value.id)
     persistWatchlistState()
-    ElMessage.success('分析完成')
   } catch (error: any) {
-    ElMessage.error('分析失败: ' + error.message)
+    console.error('分析失败:', error)
   } finally {
     analyzing.value = false
   }
@@ -801,27 +892,85 @@ function restoreWatchlistState() {
 
 <style scoped lang="scss">
 .watchlist-page {
-  .watchlist-layout {
-    display: grid;
-    grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+
+  .loading-container {
+    padding: 60px 40px;
+    text-align: center;
+
+    .loading-text {
+      margin-top: 16px;
+      color: var(--color-text-light);
+      font-size: 14px;
+    }
+  }
+
+  .top-section {
+    display: flex;
     gap: 20px;
-    align-items: start;
+    align-items: stretch;
+    height: calc(100vh - 320px);
+    min-height: 400px;
   }
 
-  .top-card {
-    height: 100%;
+  .list-card {
+    flex: 0 0 320px;
+    display: flex;
+    flex-direction: column;
+
+    :deep(.el-card__body) {
+      flex: 1;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .watchlist-table {
+      height: 100%;
+    }
   }
 
-  .history-card {
-    grid-column: 1 / -1;
+  .detail-card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+
+    :deep(.el-card__body) {
+      display: flex;
+      flex-direction: column;
+      overflow: auto;
+    }
   }
 
   .detail-empty {
-    grid-column: 2;
-    min-height: 420px;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 12px;
     background: #fff;
     border: 1px solid var(--el-border-color-light);
+
+    :deep(.el-empty) {
+      padding: 40px 0;
+    }
+  }
+
+  .history-card {
+    display: flex;
+    flex-direction: column;
+
+    :deep(.el-card__body) {
+      max-height: 400px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    :deep(.el-table) {
+      flex: 1;
+    }
   }
 
   .risk-tooltip {
@@ -842,9 +991,25 @@ function restoreWatchlistState() {
     justify-content: space-between;
     align-items: center;
 
+    .stock-title {
+      min-width: 150px;
+    }
+
     .header-actions {
       display: flex;
       gap: 8px;
+      align-items: center;
+    }
+
+    .analyzing-tag {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+
+      &.visible {
+        opacity: 1;
+        pointer-events: auto;
+      }
     }
   }
 
@@ -853,8 +1018,12 @@ function restoreWatchlistState() {
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
+      gap: 4px;
       white-space: nowrap;
+
+      .el-divider--vertical {
+        margin: 0 4px;
+      }
     }
 
     :deep(.el-table__row) {
@@ -863,6 +1032,10 @@ function restoreWatchlistState() {
       &.current-row {
         background-color: #e6f7ff;
       }
+    }
+
+    :deep(.el-table__cell) {
+      padding: 8px 0;
     }
   }
 
@@ -874,9 +1047,12 @@ function restoreWatchlistState() {
 
   .chart-container {
     height: 350px;
+    flex-shrink: 0;
   }
 
   .trend-section {
+    flex-shrink: 0;
+
     h4 {
       margin: 0 0 16px 0;
       color: var(--color-text-secondary);
@@ -893,6 +1069,10 @@ function restoreWatchlistState() {
       padding: 16px;
       background-color: var(--color-bg-light);
       border-radius: 8px;
+
+      &.compact {
+        padding: 12px 16px;
+      }
 
       .trend-label {
         font-weight: 500;
@@ -1000,13 +1180,14 @@ function restoreWatchlistState() {
 
 @media (max-width: 1080px) {
   .watchlist-page {
-    .watchlist-layout {
-      grid-template-columns: 1fr;
+    .top-section {
+      flex-direction: column;
+      height: auto;
     }
 
-    .history-card,
-    .detail-empty {
-      grid-column: auto;
+    .list-card {
+      flex: none;
+      width: 100%;
     }
   }
 }

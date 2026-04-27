@@ -21,35 +21,49 @@
       </el-empty>
     </div>
 
-    <el-row v-else :gutter="20">
+    <!-- 增量更新进度提示 -->
+    <el-card v-if="incrementalUpdate.running" class="update-progress-card" shadow="never">
+      <div class="progress-content">
+        <div class="progress-info">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span class="progress-text">增量更新中...</span>
+          <span class="progress-detail">
+            {{ incrementalUpdate.updated_count }} 更新 / {{ incrementalUpdate.skipped_count }} 跳过 / {{ incrementalUpdate.failed_count }} 失败
+          </span>
+          <span v-if="incrementalUpdate.current_code" class="current-code">
+            当前: {{ incrementalUpdate.current_code }}
+          </span>
+        </div>
+        <el-progress
+          :percentage="incrementalUpdate.progress"
+          :stroke-width="12"
+          :show-text="true"
+        />
+      </div>
+    </el-card>
+
+    <el-row :gutter="20" class="top-row">
       <!-- 左侧：历史记录 -->
       <el-col :span="8">
-        <el-card class="history-card">
+        <el-card class="history-card matched-height">
           <template #header>
             <div class="card-header">
               <span>历史记录</span>
-              <el-button
-                type="primary"
-                size="small"
-                :icon="Refresh"
-                :loading="loading"
-                @click="ensureFreshDataAndLoad(true)"
-              >
-                刷新
-              </el-button>
             </div>
           </template>
 
           <div class="table-header-tip">
-            <span class="tip-item">· 时间：分析日期</span>
-            <span class="tip-item">· 候选数：符合条件的股票数量</span>
-            <span class="tip-item">· 趋势启动数：分析结果中判定为趋势启动的股票数量</span>
+            <span class="tip-item">· 点击日期查看对应数据</span>
+            <span class="tip-item">· 右侧跟随左侧选择</span>
           </div>
+
           <el-table
-            :data="historyData"
+            :data="displayHistoryData"
             @row-click="selectDate"
             class="history-table"
-            height="460"
+            height="400"
+            highlight-current-row
+            :current-row-key="selectedDate"
           >
             <el-table-column prop="date" label="时间" width="120" />
             <el-table-column prop="count" label="候选数" width="100" align="center">
@@ -65,40 +79,48 @@
                 <span v-else>-</span>
               </template>
             </el-table-column>
+            <el-table-column label="状态" width="80" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.date === latestDate" type="success" size="small">最新</el-tag>
+              </template>
+            </el-table-column>
           </el-table>
+
+          <div class="pagination-wrap">
+            <el-pagination
+              v-model:current-page="historyPage"
+              :page-size="historyPageSize"
+              layout="total, prev, pager, next"
+              :total="totalHistoryCount"
+              :hide-on-single-page="false"
+              background
+              size="small"
+            />
+          </div>
         </el-card>
       </el-col>
 
-      <!-- 右侧：候选列表 -->
+      <!-- 右侧：候选列表（跟随左侧选择） -->
       <el-col :span="16">
-        <el-card class="candidates-card">
+        <el-card class="candidates-card matched-height">
           <template #header>
             <div class="card-header">
               <div class="title-section">
                 <span>候选股票</span>
-                <el-tag v-if="dataDate" size="small" type="info" class="date-tag">
-                  数据日期: {{ dataDate }}
+                <el-tag size="small" type="success" class="date-tag">
+                  {{ viewingDateDisplay }}
                 </el-tag>
               </div>
               <div class="header-actions">
                 <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
-                  已展示上次结果
-                </el-tag>
-                <el-tag v-if="checkingFreshness" type="info" size="small" effect="plain">
-                  后台校验中
-                </el-tag>
-                <el-tag v-if="updatingData" type="warning" size="small" effect="plain">
-                  更新中...
-                </el-tag>
-                <el-tag v-if="loadingCandidates" type="warning" size="small" effect="plain">
-                  筛选中...
+                  已展示缓存结果
                 </el-tag>
                 <el-button
                   type="primary"
                   size="small"
                   :icon="Refresh"
-                  :loading="loadingCandidates"
-                  @click="refreshCandidates"
+                  :loading="loadingLatest"
+                  @click="refreshCurrentCandidates"
                 >
                   刷新
                 </el-button>
@@ -112,39 +134,37 @@
           </div>
 
           <el-table
-            :data="displayCandidates"
+            :data="displayLatestCandidates"
             stripe
             class="candidates-table"
             height="400"
             table-layout="auto"
           >
-            <el-table-column prop="code" label="代码" min-width="140" />
-            <el-table-column prop="name" label="名称" min-width="160" show-overflow-tooltip />
-            <el-table-column prop="close_price" label="收盘价" min-width="140" align="right">
+            <el-table-column prop="code" label="代码" min-width="100" />
+            <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+            <el-table-column prop="open_price" label="开盘价" min-width="100" align="right">
+              <template #default="{ row }">
+                {{ row.open_price ? row.open_price.toFixed(2) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="close_price" label="收盘价" min-width="100" align="right">
               <template #default="{ row }">
                 {{ row.close_price ? row.close_price.toFixed(2) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column prop="kdj_j" label="KDJ-J" min-width="120" align="right">
+            <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
+              <template #default="{ row }">
+                <span :class="row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : ''">
+                  {{ row.change_pct !== undefined ? row.change_pct.toFixed(2) + '%' : '-' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="kdj_j" label="KDJ-J" min-width="100" align="right">
               <template #default="{ row }">
                 {{ row.kdj_j ? row.kdj_j.toFixed(1) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column prop="strategy" label="策略" min-width="120">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.strategy === 'b1' ? 'primary' : 'warning'">
-                  {{ (row.strategy || '').toUpperCase() }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="b1_passed" label="B1检查" min-width="140" align="center">
-              <template #default="{ row }">
-                <el-tag :type="row.b1_passed ? 'success' : 'danger'" size="small">
-                  {{ row.b1_passed ? '通过' : '未通过' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="120" align="center" fixed="right">
+            <el-table-column label="操作" width="80" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button text type="primary" size="small" @click="viewStock(row.code)">
                   详情
@@ -153,56 +173,55 @@
             </el-table-column>
           </el-table>
 
-          <div v-if="totalCandidates > candidatePageSize" class="pagination-wrap">
+          <div class="pagination-wrap">
             <el-pagination
-              v-model:current-page="candidatePage"
+              v-model:current-page="latestCandidatePage"
               :page-size="candidatePageSize"
               layout="total, prev, pager, next"
-              :total="totalCandidates"
+              :total="totalLatestCandidates"
+              :hide-on-single-page="false"
               background
             />
           </div>
 
-          <!-- 分析结果 -->
-          <template v-if="topResults.length > 0">
-            <el-divider />
-            <div class="analysis-section">
-              <div class="analysis-tip">
-                <span>对候选股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度</span>
-              </div>
-              <h4>分析结果 (Top 5)</h4>
-              <el-table
-                :data="topResults"
-                stripe
-                size="small"
-                max-height="300"
-              >
-                <el-table-column prop="code" label="代码" width="80" />
-                <el-table-column prop="total_score" label="评分" width="80" align="right">
-                  <template #default="{ row }">
-                    <el-tag :type="getScoreType(row.total_score)" size="small">
-                      {{ row.total_score ? row.total_score.toFixed(1) : '-' }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="signal_type" label="信号" width="120">
-                  <template #default="{ row }">
-                    <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
-                      {{ getSignalTypeLabel(row.signal_type) }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="comment" label="评语" show-overflow-tooltip />
-                <el-table-column label="操作" width="90" align="center">
-                  <template #default="{ row }">
-                    <el-button text type="primary" size="small" @click="viewStock(row.code)">
-                      详情
-                    </el-button>
-                  </template>
-                </el-table-column>
-              </el-table>
+          <!-- 分析结果（移入卡片内部以保持对齐） -->
+          <el-divider v-if="topAnalysisResults.length > 0" />
+          <div v-if="topAnalysisResults.length > 0" class="analysis-section">
+            <div class="analysis-tip">
+              <span>对候选股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度</span>
             </div>
-          </template>
+            <h4>分析结果 (Top 5)</h4>
+            <el-table
+              :data="topAnalysisResults"
+              stripe
+              size="small"
+              max-height="200"
+            >
+              <el-table-column prop="code" label="代码" width="80" />
+              <el-table-column prop="total_score" label="评分" width="80" align="right">
+                <template #default="{ row }">
+                  <el-tag :type="getScoreType(row.total_score)" size="small">
+                    {{ row.total_score ? row.total_score.toFixed(1) : '-' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="signal_type" label="信号" width="120">
+                <template #default="{ row }">
+                  <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                    {{ getSignalTypeLabel(row.signal_type) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="comment" label="评语" show-overflow-tooltip />
+              <el-table-column label="操作" width="90" align="center">
+                <template #default="{ row }">
+                  <el-button text type="primary" size="small" @click="viewStock(row.code)">
+                    详情
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
         </el-card>
       </el-col>
     </el-row>
@@ -210,55 +229,96 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onActivated } from 'vue'
+import { ref, computed, onMounted, onActivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, Loading } from '@element-plus/icons-vue'
 import { apiAnalysis, apiTasks } from '@/api'
 import { ElMessage } from 'element-plus'
-import type { AnalysisResult, Candidate, Task, TomorrowStarHistoryItem } from '@/types'
+import type { Candidate, AnalysisResult, Task, IncrementalUpdateStatus } from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const router = useRouter()
 const configStore = useConfigStore()
+
 let loadDataRequestId = 0
 let candidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
 const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache'
+const INCREMENTAL_POLL_INTERVAL_MS = 2000
+let incrementalPollTimer: number | null = null
 
 const loading = ref(false)
-const loadingCandidates = ref(false)
+const loadingLatest = ref(false)
 const checkingFreshness = ref(false)
-const updatingData = ref(false)
+
 type HistoryRow = { date: string; count: number | '-'; pass: number | '-' }
 
 const historyData = ref<HistoryRow[]>([])
-const hasLatestData = ref(false)
-const dataDate = ref<string>('')
-
-const candidates = ref<Candidate[]>([])
-const analysisResults = ref<AnalysisResult[]>([])
 const selectedDate = ref<string | null>(null)
+const latestDate = ref<string>('')
+const latestDataDate = ref<string>('')
 const lastHistorySignature = ref<string>('')
 const lastRefreshCheckAt = ref<number>(0)
-const currentTaskId = ref<number | null>(null)
 const hydratedFromCache = ref(false)
 const freshnessVersion = ref<string>('')
-const candidatePage = ref(1)
-const candidatePageSize = 10
-const showCachedHint = computed(() => hydratedFromCache.value && !updatingData.value)
-const showInitializationAlert = computed(() => configStore.tushareReady && !configStore.dataInitialized)
-const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && candidates.value.length === 0)
 
-const totalCandidates = computed(() => candidates.value.length)
-const displayCandidates = computed(() => {
-  const start = (candidatePage.value - 1) * candidatePageSize
-  const sorted = [...candidates.value].sort((a, b) => {
+// 历史记录分页（左侧）
+const historyPage = ref(1)
+const historyPageSize = 10
+
+// 最新数据（右侧显示）
+const latestCandidates = ref<Candidate[]>([])
+const latestAnalysisResults = ref<AnalysisResult[]>([])
+const latestCandidatePage = ref(1)
+const candidatePageSize = 10
+
+// 当前查看的日期（默认为最新）
+const viewingDate = ref<string | null>(null)
+
+// 按日期缓存的数据（避免重复请求）
+const candidatesCache = ref<Map<string, { candidates: Candidate[], results: AnalysisResult[], timestamp: number }>>(new Map())
+const CACHE_TTL_MS = 5 * 60 * 1000  // 缓存5分钟
+
+// 增量更新状态
+const incrementalUpdate = ref<IncrementalUpdateStatus>({
+  running: false,
+  progress: 0,
+  total: 0,
+  updated_count: 0,
+  skipped_count: 0,
+  failed_count: 0,
+  message: '',
+})
+
+const showCachedHint = computed(() => hydratedFromCache.value && !incrementalUpdate.value.running)
+const showInitializationAlert = computed(() => configStore.tushareReady && !configStore.dataInitialized)
+const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && latestCandidates.value.length === 0)
+
+// 历史记录分页数据
+const totalHistoryCount = computed(() => historyData.value.length)
+const displayHistoryData = computed(() => {
+  const start = (historyPage.value - 1) * historyPageSize
+  return historyData.value.slice(start, start + historyPageSize)
+})
+
+const totalLatestCandidates = computed(() => latestCandidates.value.length)
+const displayLatestCandidates = computed(() => {
+  const start = (latestCandidatePage.value - 1) * candidatePageSize
+  const sorted = [...latestCandidates.value].sort((a, b) => {
     const aVal = typeof a.kdj_j === 'number' ? a.kdj_j : Number.POSITIVE_INFINITY
     const bVal = typeof b.kdj_j === 'number' ? b.kdj_j : Number.POSITIVE_INFINITY
     if (aVal !== bVal) return aVal - bVal
     return a.code.localeCompare(b.code)
   })
   return sorted.slice(start, start + candidatePageSize)
+})
+
+// 当前查看的日期显示
+const viewingDateDisplay = computed(() => {
+  if (viewingDate.value) {
+    return viewingDate.value
+  }
+  return latestDate.value ? latestDate.value : ''
 })
 
 function getVerdictPriority(verdict?: string): number {
@@ -270,8 +330,8 @@ function getVerdictPriority(verdict?: string): number {
   return priorityMap[verdict || ''] || 0
 }
 
-const topResults = computed(() => {
-  return [...analysisResults.value]
+const topAnalysisResults = computed(() => {
+  return [...latestAnalysisResults.value]
     .sort((a, b) => {
       const verdictDiff = getVerdictPriority(b.verdict) - getVerdictPriority(a.verdict)
       if (verdictDiff !== 0) return verdictDiff
@@ -280,17 +340,17 @@ const topResults = computed(() => {
     .slice(0, 5)
 })
 
-async function loadData() {
+async function loadData(skipLatestLoad: boolean = false) {
+  if (loading.value) return
+
   const requestId = ++loadDataRequestId
   loading.value = true
   try {
-    // 加载日期列表
     const datesData = await apiAnalysis.getDates()
     if (requestId !== loadDataRequestId) return
 
     const dates = datesData.dates || []
     const history = datesData.history || []
-    const previousSelectedDate = selectedDate.value
 
     if (history.length > 0) {
       historyData.value = history.map((item) => ({
@@ -298,8 +358,10 @@ async function loadData() {
         count: typeof item.count === 'number' ? item.count : '-',
         pass: typeof item.pass === 'number' ? item.pass : '-',
       }))
+      if (dates.length > 0) {
+        latestDate.value = formatDateString(dates[0])
+      }
     } else {
-      // 兼容旧接口：如果后端尚未返回明细，则退回到逐日请求
       const historyPromises = dates.map(async (date: string) => {
         try {
           const [candidatesData, resultsData] = await Promise.all([
@@ -326,32 +388,34 @@ async function loadData() {
 
       historyData.value = await Promise.all(historyPromises)
       if (requestId !== loadDataRequestId) return
+      if (dates.length > 0) {
+        latestDate.value = formatDateString(dates[0])
+      }
     }
 
     lastHistorySignature.value = buildHistorySignature(dates, historyData.value)
     lastRefreshCheckAt.value = Date.now()
     hydratedFromCache.value = false
 
-    // 检查是否有最新数据（考虑周末情况）
-    hasLatestData.value = hasLatestTradingDayData(dates)
-
     if (dates.length === 0) {
       selectedDate.value = null
-      candidates.value = []
-      analysisResults.value = []
-      dataDate.value = ''
+      viewingDate.value = null
+      latestCandidates.value = []
+      latestAnalysisResults.value = []
+      latestDataDate.value = ''
       return
     }
 
-    // 刷新时保留当前选中的历史日期；如果已失效则退回最新日期
-    const nextSelectedDate = previousSelectedDate && dates.includes(previousSelectedDate)
-      ? previousSelectedDate
-      : dates[0]
+    // 默认选中最新日期
+    selectedDate.value = latestDate.value
+    // 如果当前正在查看的日期不在新的历史列表中，重置为最新
+    if (viewingDate.value && !historyData.value.some(h => h.date === viewingDate.value)) {
+      viewingDate.value = latestDate.value
+    }
 
-    selectedDate.value = nextSelectedDate
-
-    if (requestId === loadDataRequestId) {
-      await loadCandidatesForDate(nextSelectedDate)
+    // 加载最新数据（右侧显示）- 根据 skipLatestLoad 参数决定是否跳过
+    if (!skipLatestLoad && requestId === loadDataRequestId) {
+      await loadLatestCandidates()
     }
 
     persistTomorrowStarCache()
@@ -365,26 +429,233 @@ async function loadData() {
   }
 }
 
-async function pollTaskUntilFinished(taskId: number) {
-  currentTaskId.value = taskId
+async function loadLatestCandidates() {
+  if (loadingLatest.value) return
 
-  while (true) {
-    const task: Task = await apiTasks.get(taskId)
-    if (task.status === 'completed') {
-      currentTaskId.value = null
+  loadingLatest.value = true
+  try {
+    const candidatesData = await apiAnalysis.getCandidates('')
+    const candidates = candidatesData.candidates || []
+    latestCandidates.value = candidates
+    latestCandidatePage.value = 1
+
+    if (candidatesData.pick_date) {
+      const newPickDate = formatDate(candidatesData.pick_date)
+      latestDataDate.value = newPickDate
+      viewingDate.value = newPickDate
+
+      // 如果发现新的日期（与当前 latestDate 不同），刷新左侧历史列表
+      if (newPickDate && newPickDate !== latestDate.value) {
+        console.log(`检测到新日期 ${newPickDate}，刷新历史列表`)
+        // 传入 true 跳过重复的 loadLatestCandidates 调用，避免递归
+        await loadData(true)
+        // loadData 完成后，继续加载分析结果（因为上面 return 了，需要在这里加载）
+        try {
+          const resultsData = await apiAnalysis.getResults('')
+          latestAnalysisResults.value = resultsData.results || []
+          // 缓存最新数据
+          candidatesCache.value.set(newPickDate, {
+            candidates,
+            results: resultsData.results || [],
+            timestamp: Date.now()
+          })
+        } catch {
+          latestAnalysisResults.value = []
+        }
+        persistTomorrowStarCache()
+        return
+      }
+    } else {
+      latestDataDate.value = ''
+    }
+
+    // 加载最新分析结果
+    try {
+      const resultsData = await apiAnalysis.getResults('')
+      latestAnalysisResults.value = resultsData.results || []
+      // 缓存最新数据
+      if (latestDataDate.value) {
+        candidatesCache.value.set(latestDataDate.value, {
+          candidates,
+          results: resultsData.results || [],
+          timestamp: Date.now()
+        })
+      }
+    } catch {
+      latestAnalysisResults.value = []
+    }
+
+    persistTomorrowStarCache()
+  } catch (error) {
+    console.error('Failed to load latest candidates:', error)
+    ElMessage.error('加载最新候选股票失败')
+  } finally {
+    loadingLatest.value = false
+  }
+}
+
+async function refreshLatestCandidates() {
+  if (!configStore.dataInitialized) {
+    ElMessage.info('请先完成首次初始化')
+    return
+  }
+  await loadLatestCandidates()
+}
+
+async function selectDate(row: HistoryRow) {
+  // 防止并发刷新
+  if (loadingLatest.value) {
+    console.log('正在加载中，忽略此次选择')
+    return
+  }
+
+  selectedDate.value = row.date
+  viewingDate.value = row.date
+  persistTomorrowStarCache()
+
+  // 先检查缓存
+  const cached = candidatesCache.value.get(row.date)
+  const now = Date.now()
+  if (cached && (now - cached.timestamp) < CACHE_TTL_MS) {
+    // 使用缓存数据，立即显示
+    latestCandidates.value = cached.candidates
+    latestAnalysisResults.value = cached.results
+    latestDataDate.value = row.date
+    console.log(`使用缓存数据: ${row.date}`)
+    return
+  }
+
+  // 加载选中日期的数据到右侧显示
+  loadingLatest.value = true
+  try {
+    const [candidatesData, resultsData] = await Promise.all([
+      apiAnalysis.getCandidates(row.date),
+      apiAnalysis.getResults(row.date)
+    ])
+
+    const candidates = candidatesData.candidates || []
+    const results = resultsData.results || []
+
+    latestCandidates.value = candidates
+    latestAnalysisResults.value = results
+    latestDataDate.value = row.date
+
+    // 存入缓存
+    candidatesCache.value.set(row.date, {
+      candidates,
+      results,
+      timestamp: now
+    })
+  } catch (error) {
+    console.error('Failed to load selected date data:', error)
+    ElMessage.error('加载数据失败')
+  } finally {
+    loadingLatest.value = false
+  }
+}
+
+async function refreshCurrentCandidates() {
+  // 防止并发刷新
+  if (loadingLatest.value || loading.value) {
+    console.log('正在刷新中，忽略此次刷新请求')
+    return
+  }
+
+  // 清除缓存，强制从后端重新加载
+  candidatesCache.value.clear()
+
+  // 强制检查新鲜度并重新加载数据
+  await ensureFreshDataAndLoad(true)
+
+  // 刷新当前查看的日期的数据
+  const dateToRefresh = viewingDate.value || latestDate.value
+  if (dateToRefresh) {
+    loadingLatest.value = true
+    try {
+      const [candidatesData, resultsData] = await Promise.all([
+        apiAnalysis.getCandidates(dateToRefresh),
+        apiAnalysis.getResults(dateToRefresh)
+      ])
+
+      const candidates = candidatesData.candidates || []
+      const results = resultsData.results || []
+
+      latestCandidates.value = candidates
+      latestAnalysisResults.value = results
+      latestDataDate.value = dateToRefresh
+
+      // 更新缓存
+      candidatesCache.value.set(dateToRefresh, {
+        candidates,
+        results,
+        timestamp: Date.now()
+      })
+
+      ElMessage.success(`已刷新 ${dateToRefresh} 的数据`)
+    } catch (error) {
+      console.error('Failed to refresh current candidates:', error)
+      ElMessage.error('刷新失败')
+    } finally {
+      loadingLatest.value = false
+    }
+  }
+}
+
+async function startIncrementalUpdate() {
+  try {
+    const result = await apiTasks.startIncrementalUpdate()
+    if (!result.success) {
+      if (result.running) {
+        // 已有任务在运行，开始轮询
+        await checkIncrementalStatus()
+        startIncrementalPolling()
+      }
       return
     }
-    if (task.status === 'failed' || task.status === 'cancelled') {
-      currentTaskId.value = null
-      throw new Error(task.error_message || `任务状态异常: ${task.status}`)
+
+    // 启动成功，开始轮询状态
+    await checkIncrementalStatus()
+    startIncrementalPolling()
+  } catch (error: any) {
+    console.error('Failed to start incremental update:', error)
+  }
+}
+
+async function checkIncrementalStatus() {
+  try {
+    const status = await apiTasks.getIncrementalStatus()
+    incrementalUpdate.value = status
+  } catch (error) {
+    console.error('Failed to check incremental status:', error)
+  }
+}
+
+function startIncrementalPolling() {
+  if (incrementalPollTimer) {
+    return
+  }
+
+  incrementalPollTimer = window.setInterval(async () => {
+    await checkIncrementalStatus()
+
+    // 如果更新完成，停止轮询并刷新数据
+    if (!incrementalUpdate.value.running) {
+      stopIncrementalPolling()
+      await loadData()
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000))
+  }, INCREMENTAL_POLL_INTERVAL_MS)
+}
+
+function stopIncrementalPolling() {
+  if (incrementalPollTimer) {
+    window.clearInterval(incrementalPollTimer)
+    incrementalPollTimer = null
   }
 }
 
 async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   if (!configStore.tushareReady) return
-  if (checkingFreshness.value || updatingData.value) return
+  if (checkingFreshness.value || incrementalUpdate.value.running || loading.value || loadingLatest.value) return
 
   const hasLoadedData = historyData.value.length > 0
   const shouldSkipServerCheck = !forceReload
@@ -398,6 +669,19 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     const freshness = await apiAnalysis.getFreshness()
     lastRefreshCheckAt.value = Date.now()
     const nextFreshnessVersion = freshness.freshness_version || ''
+
+    // 更新增量更新状态
+    if (freshness.incremental_update) {
+      incrementalUpdate.value = freshness.incremental_update
+      if (freshness.incremental_update.running) {
+        startIncrementalPolling()
+      }
+    }
+
+    // 如果需要更新且没有正在运行的增量更新，自动启动
+    if (freshness.needs_update && !incrementalUpdate.value.running) {
+      await startIncrementalUpdate()
+    }
 
     if (
       !forceReload
@@ -413,21 +697,8 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     freshnessVersion.value = nextFreshnessVersion
     persistTomorrowStarCache()
 
-    if (freshness.running_task_id) {
+    if (freshness.incremental_update?.running) {
       checkingFreshness.value = false
-      updatingData.value = true
-      await pollTaskUntilFinished(freshness.running_task_id)
-      await loadData()
-      return
-    }
-
-    if (freshness.needs_update) {
-      checkingFreshness.value = false
-      updatingData.value = true
-      const result = await apiAnalysis.generate('quant')
-      ElMessage.info(`检测到新交易日数据，已启动更新任务 #${result.task_id}`)
-      await pollTaskUntilFinished(result.task_id)
-      await loadData()
       return
     }
 
@@ -436,52 +707,16 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     }
   } catch (error: any) {
     console.error('Failed to ensure tomorrow-star freshness:', error)
-    ElMessage.error(`明日之星数据检查失败: ${error.message || error}`)
     if (historyData.value.length === 0) {
       await loadData()
     }
   } finally {
     checkingFreshness.value = false
-    updatingData.value = false
   }
 }
 
-async function loadCandidatesForDate(date: string) {
-  const requestId = ++candidatesRequestId
-  loadingCandidates.value = true
-  try {
-    const candidatesData = await apiAnalysis.getCandidates(date)
-    if (requestId !== candidatesRequestId) return
-
-    candidates.value = candidatesData.candidates || []
-    candidatePage.value = 1
-
-    // 设置数据日期
-    if (candidatesData.pick_date) {
-      dataDate.value = formatDate(candidatesData.pick_date)
-    } else {
-      dataDate.value = ''
-    }
-
-    // 加载分析结果
-    try {
-      const resultsData = await apiAnalysis.getResults(date)
-      if (requestId !== candidatesRequestId) return
-      analysisResults.value = resultsData.results || []
-      persistTomorrowStarCache()
-    } catch {
-      if (requestId === candidatesRequestId) {
-        analysisResults.value = []
-      }
-    }
-  } catch (error) {
-    console.error('Failed to load candidates:', error)
-    ElMessage.error('加载候选股票失败')
-  } finally {
-    if (requestId === candidatesRequestId) {
-      loadingCandidates.value = false
-    }
-  }
+function viewStock(code: string) {
+  router.push({ path: '/diagnosis', query: { code } })
 }
 
 function formatDate(date: string | Date): string {
@@ -489,69 +724,7 @@ function formatDate(date: string | Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-async function refreshCandidates() {
-  if (!configStore.dataInitialized) {
-    ElMessage.info('请先完成首次初始化')
-    return
-  }
-  if (selectedDate.value) {
-    await loadCandidatesForDate(selectedDate.value)
-  } else {
-    // 加载最新数据
-    await loadCandidatesForDate('')
-  }
-}
-
-async function refreshStatusAndRetry() {
-  await configStore.checkTushareStatus()
-  if (configStore.dataInitialized) {
-    await ensureFreshDataAndLoad(true)
-  }
-}
-
-function selectDate(row: HistoryRow) {
-  selectedDate.value = row.date
-  persistTomorrowStarCache()
-  loadCandidatesForDate(row.date)
-}
-
-function viewStock(code: string) {
-  router.push({ path: '/diagnosis', query: { code } })
-}
-
-// 获取最近的交易日（考虑周末）
-function getLatestTradingDay(): string {
-  const now = new Date()
-  const day = now.getDay() // 0=周日, 1=周一, ..., 6=周六
-
-  // 如果是周日 (0)，最近交易日是周五 (-2天)
-  // 如果是周六 (6)，最近交易日是周五 (-1天)
-  // 否则就是今天
-  let offset = 0
-  if (day === 0) {
-    offset = -2
-  } else if (day === 6) {
-    offset = -1
-  }
-
-  const tradingDay = new Date(now)
-  tradingDay.setDate(now.getDate() + offset)
-
-  return tradingDay.toISOString().split('T')[0]
-}
-
-// 检查是否有最新交易日数据
-function hasLatestTradingDayData(dates: string[]): boolean {
-  if (dates.length === 0) return false
-
-  const latestTradingDay = getLatestTradingDay()
-  const latestDate = dates[0] // dates是按日期降序排列的
-
-  return latestDate === latestTradingDay
-}
-
 function formatDateString(dateStr: string): string {
-  // 处理各种日期格式
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     return dateStr
   }
@@ -584,7 +757,13 @@ function getSignalTypeTag(signalType?: string): string {
   return 'info'
 }
 
-function buildHistorySignature(dates: string[], history: Array<HistoryRow | TomorrowStarHistoryItem>): string {
+function getVerdictType(verdict?: string): string {
+  if (verdict === 'PASS') return 'success'
+  if (verdict === 'WATCH') return 'warning'
+  return 'info'
+}
+
+function buildHistorySignature(dates: string[], history: Array<HistoryRow>): string {
   if (history.length > 0) {
     return JSON.stringify(
       history.map((item) => ({
@@ -594,12 +773,11 @@ function buildHistorySignature(dates: string[], history: Array<HistoryRow | Tomo
       }))
     )
   }
-
   return JSON.stringify(dates.map((date) => formatDateString(date)))
 }
 
 async function checkForRefresh(forceLoad: boolean = false) {
-  if (loading.value || loadingCandidates.value) return
+  if (loading.value || loadingLatest.value) return
 
   const now = Date.now()
   if (!forceLoad && now - lastRefreshCheckAt.value < REFRESH_CHECK_INTERVAL_MS) return
@@ -620,36 +798,30 @@ async function checkForRefresh(forceLoad: boolean = false) {
   }
 }
 
-onMounted(() => {
-  configStore.checkTushareStatus()
-  hydrateTomorrowStarCache()
-
-  if (historyData.value.length === 0) {
-    loadData()
+async function refreshStatusAndRetry() {
+  await configStore.checkTushareStatus()
+  if (configStore.dataInitialized) {
+    await ensureFreshDataAndLoad(true)
   }
-
-  ensureFreshDataAndLoad(hydratedFromCache.value ? false : true)
-})
-
-onActivated(() => {
-  configStore.checkTushareStatus()
-  ensureFreshDataAndLoad()
-})
+}
 
 function persistTomorrowStarCache() {
   if (typeof window === 'undefined') return
 
-    const payload = {
+  const payload = {
     historyData: historyData.value,
-    candidates: candidates.value,
-    analysisResults: analysisResults.value,
+    latestCandidates: latestCandidates.value,
+    latestAnalysisResults: latestAnalysisResults.value,
     selectedDate: selectedDate.value,
-      dataDate: dataDate.value,
-      candidatePage: candidatePage.value,
-      lastHistorySignature: lastHistorySignature.value,
-      freshnessVersion: freshnessVersion.value,
-      cachedAt: Date.now(),
-    }
+    viewingDate: viewingDate.value,
+    latestDate: latestDate.value,
+    latestDataDate: latestDataDate.value,
+    historyPage: historyPage.value,
+    latestCandidatePage: latestCandidatePage.value,
+    lastHistorySignature: lastHistorySignature.value,
+    freshnessVersion: freshnessVersion.value,
+    cachedAt: Date.now(),
+  }
 
   sessionStorage.setItem(TOMORROW_STAR_CACHE_KEY, JSON.stringify(payload))
 }
@@ -663,24 +835,60 @@ function hydrateTomorrowStarCache() {
   try {
     const payload = JSON.parse(raw)
     historyData.value = payload.historyData || []
-    candidates.value = payload.candidates || []
-    analysisResults.value = payload.analysisResults || []
+    latestCandidates.value = payload.latestCandidates || []
+    latestAnalysisResults.value = payload.latestAnalysisResults || []
     selectedDate.value = payload.selectedDate || null
-    dataDate.value = payload.dataDate || ''
-    candidatePage.value = Math.max(1, Number(payload.candidatePage) || 1)
+    viewingDate.value = payload.viewingDate || null
+    latestDate.value = payload.latestDate || ''
+    latestDataDate.value = payload.latestDataDate || ''
+    historyPage.value = Math.max(1, Number(payload.historyPage) || 1)
+    latestCandidatePage.value = Math.max(1, Number(payload.latestCandidatePage) || 1)
     lastHistorySignature.value = payload.lastHistorySignature || ''
     freshnessVersion.value = payload.freshnessVersion || ''
-    hydratedFromCache.value = historyData.value.length > 0 || candidates.value.length > 0 || analysisResults.value.length > 0
+    hydratedFromCache.value = historyData.value.length > 0 || latestCandidates.value.length > 0
   } catch {
     sessionStorage.removeItem(TOMORROW_STAR_CACHE_KEY)
   }
 }
+
+onMounted(() => {
+  configStore.checkTushareStatus()
+  hydrateTomorrowStarCache()
+
+  if (historyData.value.length === 0) {
+    loadData()
+  }
+
+  ensureFreshDataAndLoad(hydratedFromCache.value ? false : true)
+
+  // 检查增量更新状态
+  checkIncrementalStatus()
+})
+
+onActivated(() => {
+  configStore.checkTushareStatus()
+  ensureFreshDataAndLoad()
+  checkIncrementalStatus()
+})
+
+onUnmounted(() => {
+  stopIncrementalPolling()
+})
 </script>
 
 <style scoped lang="scss">
+// 8px 网格系统
+$space-xs: 8px;
+$space-sm: 16px;
+$space-md: 24px;
+$space-lg: 32px;
+
 .tomorrow-star-page {
+  padding: 0;
+  margin: 0;
+
   .page-alert {
-    margin-bottom: 16px;
+    margin-bottom: $space-sm;
   }
 
   .page-empty {
@@ -690,18 +898,71 @@ function hydrateTomorrowStarCache() {
     min-height: 560px;
     background: #fff;
     border: 1px solid #e5e7eb;
-    border-radius: 16px;
+    border-radius: 8px;
+  }
+
+  .update-progress-card {
+    margin-bottom: $space-sm;
+    border: 1px solid #409eff;
+    background: #f0f9ff;
+
+    :deep(.el-card__body) {
+      padding: $space-sm;
+    }
+
+    .progress-content {
+      .progress-info {
+        display: flex;
+        align-items: center;
+        gap: $space-xs;
+        margin-bottom: $space-xs;
+
+        .progress-text {
+          font-weight: 500;
+          color: #409eff;
+          font-size: 14px;
+        }
+
+        .progress-detail {
+          color: #606266;
+          font-size: 13px;
+        }
+
+        .current-code {
+          margin-left: auto;
+          color: #909399;
+          font-size: 12px;
+        }
+      }
+    }
+  }
+
+  // 统一卡片样式
+  .el-card {
+    border-radius: 8px;
+
+    :deep(.el-card__header) {
+      padding: $space-xs $space-sm;
+      border-bottom: 1px solid #ebeef5;
+    }
+
+    :deep(.el-card__body) {
+      padding: $space-sm;
+    }
   }
 
   .card-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    min-height: 32px;
 
     .title-section {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: $space-xs;
+      font-size: 14px;
+      font-weight: 500;
 
       .date-tag {
         font-size: 12px;
@@ -711,30 +972,35 @@ function hydrateTomorrowStarCache() {
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: $space-xs;
+    }
+  }
+
+  // 统一提示框样式
+  .table-header-tip {
+    margin-bottom: $space-xs;
+    padding: $space-xs $space-xs;
+    background-color: #f5f7fa;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #606266;
+    line-height: 1.6;
+
+    .tip-item {
+      margin-right: $space-sm;
+
+      &:last-child {
+        margin-right: 0;
+      }
     }
   }
 
   .history-card {
-    .table-header-tip {
-      margin-bottom: 12px;
-      padding: 10px 12px;
-      background-color: #f5f7fa;
-      border-radius: 4px;
-      font-size: 12px;
-      color: #606266;
-      line-height: 1.6;
-
-      .tip-item {
-        margin-right: 16px;
-
-        &:last-child {
-          margin-right: 0;
-        }
-      }
-    }
+    height: 100%;
 
     .history-table {
+      flex: 1 1 auto;
+
       :deep(.el-table__row) {
         cursor: pointer;
 
@@ -742,56 +1008,163 @@ function hydrateTomorrowStarCache() {
           background-color: #f0f9ff;
         }
       }
+
+      :deep(.el-table__cell) {
+        padding: $space-xs 0;
+      }
     }
   }
 
   .candidates-card {
-    .table-header-tip {
-      margin-bottom: 12px;
-      padding: 10px 12px;
-      background-color: #f5f7fa;
-      border-radius: 4px;
-      font-size: 12px;
-      color: #606266;
-      line-height: 1.6;
-
-      .tip-item {
-        margin-right: 16px;
-
-        &:last-child {
-          margin-right: 0;
-        }
-      }
-    }
-
     .candidates-table {
+      flex: 1 1 auto;
+      min-height: 200px;
+
       :deep(.cell) {
         white-space: nowrap;
+      }
+
+      :deep(.el-table__cell) {
+        padding: $space-xs 0;
       }
     }
 
     .pagination-wrap {
       display: flex;
       justify-content: flex-end;
-      margin-top: 14px;
+      margin-top: $space-xs;
+      flex-shrink: 0;
+      min-height: 32px;
     }
+
+    .el-divider {
+      margin: $space-sm 0;
+      flex-shrink: 0;
+    }
+
+    .analysis-section {
+      flex-shrink: 0;
+      overflow: hidden;
+      padding: 0 $space-xs;
+
+      .analysis-tip {
+        margin-bottom: $space-xs;
+        padding: $space-xs $space-xs;
+        background-color: #e8f4fd;
+        border-radius: 4px;
+        font-size: 12px;
+        color: #409eff;
+        line-height: 1.6;
+      }
+
+      h4 {
+        margin: 0 0 $space-xs 0;
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--color-text-secondary);
+      }
+    }
+  }
+
+  .history-card {
+    .pagination-wrap {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: $space-xs;
+      flex-shrink: 0;
+      min-height: 32px;
+    }
+  }
+
+  // 统一 el-divider 样式
+  .el-divider {
+    margin: $space-sm 0;
+  }
+
+  // 统一 el-tag 样式
+  .el-tag {
+    border-radius: 4px;
+  }
+
+  // 统一按钮样式
+  .el-button {
+    border-radius: 4px;
+  }
+}
+
+// 确保 el-row 和 el-col 对齐
+.el-row {
+  margin: 0 !important;
+
+  .el-col {
+    padding: 0 !important;
+  }
+}
+
+// 顶部两列等高对齐
+.top-row {
+  display: flex;
+  align-items: stretch;
+
+  .el-col {
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+// 等高卡片
+.matched-height {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+
+  :deep(.el-card__body) {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+}
+
+.history-card {
+  :deep(.el-card__body) {
+    overflow: hidden;
+  }
+
+  .history-table {
+    flex: 1;
+  }
+}
+
+.candidates-card {
+  :deep(.el-card__body) {
+    overflow: hidden;
+  }
+
+  .candidates-table {
+    flex: 1;
+  }
+
+  .pagination-wrap {
+    flex-shrink: 0;
+  }
+
+  .el-divider {
+    flex-shrink: 0;
   }
 
   .analysis-section {
-    .analysis-tip {
-      margin-bottom: 8px;
-      padding: 8px 12px;
-      background-color: #e8f4fd;
-      border-radius: 4px;
-      font-size: 12px;
-      color: #409eff;
-      line-height: 1.6;
-    }
-
-    h4 {
-      margin: 0 0 12px 0;
-      color: var(--color-text-secondary);
-    }
+    flex-shrink: 0;
   }
+}
+
+// 涨跌颜色
+.text-up {
+  color: #e74c3c;
+}
+
+.text-down {
+  color: #2ecc71;
 }
 </style>

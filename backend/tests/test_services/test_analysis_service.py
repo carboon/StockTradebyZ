@@ -485,6 +485,47 @@ def test_single_stock_analysis(analysis_service, sample_stock_df_b1_pass, mock_q
 
 
 @pytest.mark.service
+def test_single_stock_analysis_persists_result_by_check_date(analysis_service, tmp_path):
+    """
+    单股分析落盘时应按实际数据日期归档，而不是按执行当天归档。
+    """
+    test_root = tmp_path / "test_single_analysis_save"
+    review_dir = test_root / "review"
+
+    with patch("app.services.analysis_service.settings") as mock_settings:
+        with patch("app.services.analysis_service.ROOT", test_root):
+            mock_settings.review_dir = review_dir
+            mock_settings.raw_data_dir = test_root / "raw"
+
+            with patch.object(analysis_service, "check_b1_strategy", return_value={
+                "code": "600000",
+                "b1_passed": True,
+                "kdj_j": 12.3,
+                "close_price": 10.8,
+                "check_date": "2024-01-15",
+            }):
+                with patch.object(analysis_service, "_quant_review", return_value={
+                    "score": 4.6,
+                    "verdict": "PASS",
+                    "comment": "趋势健康",
+                    "signal_type": "trend_start",
+                    "scores": {"trend_structure": 4},
+                }):
+                    result = analysis_service.analyze_stock("600000", reviewer="quant")
+
+            saved_file = review_dir / "2024-01-15" / "600000.json"
+            assert result["score"] == 4.6
+            assert saved_file.exists()
+
+            with open(saved_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+
+            assert saved["analysis_date"] == "2024-01-15"
+            assert saved["pick_date"] == "2024-01-15"
+            assert saved["close_price"] == 10.8
+
+
+@pytest.mark.service
 def test_single_stock_analysis_llm_reviewer(analysis_service, sample_stock_df):
     """
     测试单股分析使用LLM评分

@@ -210,7 +210,6 @@ class AnalysisService:
     def analyze_stock(self, code: str, reviewer: str = "quant") -> Dict[str, Any]:
         """执行完整的单股分析"""
         import json
-        from datetime import datetime
 
         b1_result = self.check_b1_strategy(code)
         result = {
@@ -231,9 +230,13 @@ class AnalysisService:
         # 保存分析结果到文件（供历史记录读取）
         if result.get("score") is not None:
             try:
-                # 使用今天的日期作为文件夹
-                today = datetime.now().strftime("%Y-%m-%d")
-                review_dir = ROOT / settings.review_dir / today
+                # 单股分析也按实际数据日期归档，避免污染“今天”的批量结果目录。
+                analysis_date = (
+                    self._normalize_pick_date(result.get("check_date"))
+                    or self._normalize_pick_date(result.get("analysis_date"))
+                    or datetime.now().strftime("%Y-%m-%d")
+                )
+                review_dir = ROOT / settings.review_dir / analysis_date
                 review_dir.mkdir(parents=True, exist_ok=True)
 
                 # 尝试获取股票的收盘价（用于历史记录显示）
@@ -258,7 +261,8 @@ class AnalysisService:
                     "b1_passed": result.get("b1_passed"),
                     "kdj_j": result.get("kdj_j"),
                     "close_price": close_price,  # 保存收盘价
-                    "analysis_date": today,
+                    "analysis_date": analysis_date,
+                    "pick_date": analysis_date,
                 }
 
                 with open(stock_file, "w", encoding="utf-8") as f:
@@ -369,7 +373,10 @@ class AnalysisService:
         return history[:limit]
 
     def get_analysis_results(self, pick_date: Optional[str] = None) -> Dict[str, Any]:
-        """获取分析结果"""
+        """获取分析结果
+
+        如果分析结果不存在，会自动触发对候选股票的量化分析评分
+        """
         import json
         pick_date = self._normalize_pick_date(pick_date)
 
@@ -385,12 +392,18 @@ class AnalysisService:
         _, candidate_codes_list = self.load_candidate_codes(pick_date)
         candidate_codes = set(candidate_codes_list)
 
+        # 创建 review 目录
+        review_dir.mkdir(parents=True, exist_ok=True)
+
         try:
             detailed_results = []
-            if review_dir.exists() and candidate_codes:
+            missing_analysis_codes = []
+
+            if candidate_codes_list:
                 for code in candidate_codes_list:
                     stock_file = review_dir / f"{code}.json"
                     if not stock_file.exists():
+                        missing_analysis_codes.append(code)
                         continue
                     with open(stock_file, "r", encoding="utf-8") as f:
                         item = json.load(f)
@@ -402,14 +415,55 @@ class AnalysisService:
                         "comment": item.get("comment"),
                     })
 
+            # 如果有缺失的分析，触发自动评分
+            if missing_analysis_codes and len(missing_analysis_codes) <= 100:  # 限制自动分析数量
+                print(f"[get_analysis_results] 检测到 {len(missing_analysis_codes)} 个候选股票缺少分析结果，开始自动评分...")
+                for code in missing_analysis_codes:
+                    try:
+                        result = self.analyze_stock(code, "quant")
+                        detailed_results.append({
+                            "code": code,
+                            "verdict": result.get("verdict"),
+                            "total_score": result.get("score"),
+                            "signal_type": result.get("signal_type"),
+                            "comment": result.get("comment"),
+                        })
+                    except Exception as e:
+                        print(f"[get_analysis_results] 分析 {code} 失败: {e}")
+                        continue
+
             if detailed_results:
+                # 按 verdict 优先级和 score 排序，生成 Top 5
+                verdict_priority = {"PASS": 3, "WATCH": 2, "FAIL": 1, "": 0}
+                sorted_results = sorted(
+                    detailed_results,
+                    key=lambda x: (
+                        verdict_priority.get(x.get("verdict", ""), 0),
+                        x.get("total_score", 0) or 0
+                    ),
+                    reverse=True
+                )
+                top5 = sorted_results[:5]
+
+                # 保存 suggestion.json（Top 5）
+                suggestion_data = {
+                    "date": pick_date,
+                    "min_score_threshold": settings.min_score_threshold,
+                    "total_reviewed": len(detailed_results),
+                    "recommendations": top5,
+                    "excluded": [],  # 可选：记录被排除的股票
+                }
+                with open(suggestion_file, "w", encoding="utf-8") as f:
+                    json.dump(suggestion_data, f, ensure_ascii=False, indent=2)
+
                 return {
                     "pick_date": pick_date,
-                    "results": detailed_results,
-                    "total": len(detailed_results),
+                    "results": sorted_results,  # 返回所有结果
+                    "total": len(sorted_results),
                     "min_score_threshold": settings.min_score_threshold,
                 }
 
+            # 如果没有候选代码，尝试从 suggestion.json 读取
             if not suggestion_file.exists():
                 return {"pick_date": pick_date, "results": [], "total": 0, "min_score_threshold": 4.0}
 
@@ -427,7 +481,9 @@ class AnalysisService:
                 "total": len(recommendations),
                 "min_score_threshold": data.get("min_score_threshold", 4.0)
             }
-        except:
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             return {"pick_date": pick_date, "results": [], "total": 0, "min_score_threshold": 4.0}
 
     def get_stock_history_checks(self, code: str, days: int = 30) -> list:

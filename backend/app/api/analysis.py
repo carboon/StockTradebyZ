@@ -55,7 +55,7 @@ async def get_tomorrow_star_freshness(
     db: Session = Depends(get_db),
 ) -> dict:
     """获取明日之星数据新鲜度状态。"""
-    from app.services.market_service import market_service
+    from app.services.market_service import market_service, MarketService
 
     latest_trade_date = market_service.get_latest_trade_date() if market_service.token else None
     local_latest_date = market_service.get_local_latest_date()
@@ -72,6 +72,9 @@ async def get_tomorrow_star_freshness(
         .first()
     )
 
+    # 获取增量更新状态
+    incremental_state = MarketService.get_update_state()
+
     needs_update = bool(
         latest_trade_date and (
             local_latest_date != latest_trade_date
@@ -87,6 +90,8 @@ async def get_tomorrow_star_freshness(
         str(latest_result_date or ""),
         str(running_task.id if running_task else ""),
         str(running_task.status if running_task else ""),
+        str(incremental_state.get("running", False)),
+        str(incremental_state.get("progress", 0)),
     ])
 
     return {
@@ -98,6 +103,17 @@ async def get_tomorrow_star_freshness(
         "freshness_version": freshness_version,
         "running_task_id": running_task.id if running_task else None,
         "running_task_status": running_task.status if running_task else None,
+        "incremental_update": {
+            "running": incremental_state.get("running", False),
+            "progress": incremental_state.get("progress", 0),
+            "total": incremental_state.get("total", 0),
+            "current_code": incremental_state.get("current_code"),
+            "updated_count": incremental_state.get("updated_count", 0),
+            "skipped_count": incremental_state.get("skipped_count", 0),
+            "failed_count": incremental_state.get("failed_count", 0),
+            "started_at": incremental_state.get("started_at"),
+            "message": incremental_state.get("message", ""),
+        },
     }
 
 
@@ -198,11 +214,16 @@ async def get_candidates(
                         continue
 
                     row = current_df.loc[check_date]
+                    open_val = float(row["open"]) if pd.notna(row.get("open")) else None
+                    close_val = float(row["close"])
+                    change_pct = (close_val - open_val) / open_val * 100 if open_val and open_val > 0 else None
                     computed_candidates.append({
                         "code": code,
                         "date": check_date.strftime("%Y-%m-%d"),
                         "strategy": "b1",
-                        "close": float(row["close"]),
+                        "open": open_val,
+                        "close": close_val,
+                        "change_pct": change_pct,
                         "turnover_n": float(row.get("turnover_n", 0)),
                         "b1_passed": True,
                         "kdj_j": float(row.get("J", 0)) if pd.notna(row.get("J")) else None,
@@ -243,11 +264,16 @@ async def get_candidates(
                         check_date = valid_dates[-1]
 
                     row = current_df.loc[check_date]
+                    open_val = float(row["open"]) if pd.notna(row.get("open")) else None
+                    close_val = float(row["close"])
+                    change_pct = (close_val - open_val) / open_val * 100 if open_val and open_val > 0 else None
                     computed_candidates.append({
                         "code": code,
                         "date": check_date.strftime("%Y-%m-%d"),
                         "strategy": "b1",
-                        "close": float(row["close"]),
+                        "open": open_val,
+                        "close": close_val,
+                        "change_pct": change_pct,
                         "turnover_n": float(row.get("turnover_n", 0)),
                         "b1_passed": True,
                         "kdj_j": float(row.get("J", 0)) if pd.notna(row.get("J")) else None,
@@ -300,7 +326,9 @@ async def get_candidates(
                         code=c["code"],
                         name=stock_name_map.get(c["code"]),
                         strategy="b1",
+                        open_price=c.get("open"),
                         close_price=c["close"],
+                        change_pct=c.get("change_pct"),
                         turnover=float(c["turnover_n"]),
                         b1_passed=True,
                         kdj_j=c["kdj_j"],
@@ -401,7 +429,9 @@ async def get_candidates(
                     code=c["code"],
                     name=stock_name_map.get(c["code"]),
                     strategy="b1",
+                    open_price=c.get("open"),
                     close_price=c["close"],
+                    change_pct=c.get("change_pct"),
                     turnover=float(c["turnover_n"]),
                     b1_passed=c["b1_passed"],
                     kdj_j=c["kdj_j"],

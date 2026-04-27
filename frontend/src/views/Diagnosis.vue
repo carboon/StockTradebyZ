@@ -12,7 +12,7 @@
 
     <!-- 搜索栏 -->
     <el-card class="search-card">
-      <el-form :inline="true" :model="searchForm" @submit.prevent="searchStock">
+      <el-form :inline="true" :model="searchForm" @submit.prevent="searchAndAnalyze">
         <el-form-item label="股票代码">
           <el-input
             v-model="searchForm.code"
@@ -22,19 +22,17 @@
             style="width: 200px"
           >
             <template #append>
-              <el-button :icon="Search" @click="searchStock" />
+              <el-button :icon="Search" @click="searchAndAnalyze" />
             </template>
           </el-input>
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" @click="analyzeStock" :loading="analyzing" :disabled="disableAnalyze">
-            开始分析
-          </el-button>
         </el-form-item>
         <el-form-item v-if="stockCode">
           <el-button @click="addCurrentToWatchlist" :loading="addingToWatchlist" :disabled="isInWatchlist">
             {{ isInWatchlist ? '已纳入重点观察' : '纳入重点观察' }}
           </el-button>
+        </el-form-item>
+        <el-form-item v-if="analyzing">
+          <el-tag type="primary" effect="plain">分析中...</el-tag>
         </el-form-item>
       </el-form>
     </el-card>
@@ -81,7 +79,7 @@
                 <span class="label">
                         趋势判断
                         <el-tooltip raw-content content="PASS: 趋势启动，建议关注<br/>WATCH: 结构偏多，继续观察<br/>FAIL: 条件不足，暂不关注" placement="top">
-                          <el-icon class="info-icon"><QuestionFilled /></el-icon>
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
                         </el-tooltip>
                       </span>
                 <span class="value">{{ analysisResult.verdict || '-' }}</span>
@@ -97,7 +95,7 @@
                   <span class="detail-label">
                         KDJ-J
                         <el-tooltip raw-content content="KDJ指标中的J值<br/>反映价格超买超卖状态<br/>J值低于0表示超卖<br/>高于100表示超买<br/>B1策略寻找J值处于低位的股票" placement="top">
-                          <el-icon class="info-icon"><QuestionFilled /></el-icon>
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
                         </el-tooltip>
                       </span>
                   <span class="detail-value">{{ analysisResult.kdj_j ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
@@ -106,7 +104,7 @@
                   <span class="detail-label">
                         知行线多头
                         <el-tooltip raw-content content="知行线是特殊均线系统<br/>当短期线上穿长期线时<br/>表示趋势转多<br/>股价处于上升通道" placement="top">
-                          <el-icon class="info-icon"><QuestionFilled /></el-icon>
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
                         </el-tooltip>
                       </span>
                   <el-tag :type="analysisResult.zx_long_pos ? 'success' : 'info'" size="small">
@@ -117,7 +115,7 @@
                   <span class="detail-label">
                         周线多头
                         <el-tooltip raw-content content="周线级别均线呈多头排列<br/>短期均线>中期均线>长期均线<br/>表示中期趋势向上<br/>股票处于稳健上涨阶段" placement="top">
-                          <el-icon class="info-icon"><QuestionFilled /></el-icon>
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
                         </el-tooltip>
                       </span>
                   <el-tag :type="analysisResult.weekly_ma_aligned ? 'success' : 'info'" size="small">
@@ -128,7 +126,7 @@
                   <span class="detail-label">
                         量能健康
                         <el-tooltip raw-content content="成交量处于合理水平<br/>既不过度萎缩(缺乏人气)<br/>也不过度放大(可能透支)<br/>健康的量能配合价格上涨<br/>是持续上涨的基础" placement="top">
-                          <el-icon class="info-icon"><QuestionFilled /></el-icon>
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
                         </el-tooltip>
                       </span>
                   <el-tag :type="analysisResult.volume_healthy ? 'success' : 'info'" size="small">
@@ -269,7 +267,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Search, QuestionFilled, Refresh } from '@element-plus/icons-vue'
+import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist } from '@/api'
 import { ElMessage } from 'element-plus'
 import { BarChart, CandlestickChart, LineChart } from 'echarts/charts'
@@ -376,7 +374,6 @@ const scoreItems = computed(() => {
   ]
 })
 const showInitializationAlert = computed(() => configStore.tushareReady && !configStore.dataInitialized)
-const disableAnalyze = computed(() => !configStore.tushareReady || !configStore.dataInitialized)
 const emptyDescription = computed(() => {
   if (!configStore.tushareReady) return '请先完成 Tushare 配置后再进行单股诊断'
   if (!configStore.dataInitialized) return '请先完成首次初始化，再进行单股诊断'
@@ -393,7 +390,7 @@ onMounted(() => {
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode) {
     searchForm.value.code = routeCode
-    searchStock()
+    searchAndAnalyze()
   }
 
   window.addEventListener('resize', handleResize)
@@ -401,12 +398,14 @@ onMounted(() => {
 
 onActivated(() => {
   configStore.checkTushareStatus()
-  chartInstance?.resize()
+  nextTick(() => {
+    chartInstance?.resize()
+  })
 
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode && routeCode !== stockCode.value) {
     searchForm.value.code = routeCode
-    searchStock()
+    searchAndAnalyze()
     return
   }
 
@@ -462,6 +461,26 @@ async function searchStock() {
   await loadHistoryData()
   persistDiagnosisState()
   await maybeAutoRefreshHistory()
+}
+
+async function searchAndAnalyze() {
+  // 如果状态还没加载过，先加载一次
+  if (!configStore.tushareStatus) {
+    await configStore.checkTushareStatus()
+  }
+
+  // 现在再检查初始化状态
+  if (!configStore.dataInitialized) {
+    ElMessage.info('请先完成首次初始化')
+    return
+  }
+
+  await searchStock()
+
+  // 自动开始分析
+  if (stockCode.value) {
+    await analyzeStock()
+  }
 }
 
 async function loadStockInfo() {
@@ -546,9 +565,11 @@ function startPollingHistory(silent: boolean = false) {
       // 加载最新数据
       await loadHistoryData()
 
-      // 如果生成完成，停止轮询
+      // 如果生成完成，停止轮询并刷新分析
       if (!status.generating) {
         stopPollingHistory()
+        // 刷新最新分析
+        await analyzeStock()
         if (!silent) {
           ElMessage.success(`历史数据刷新完成，共 ${historyData.value.length} 条`)
         }
@@ -574,6 +595,10 @@ async function loadKlineData() {
     const data = await apiStock.getKline(stockCode.value, chartDays.value)
     await nextTick()
     renderChart(data)
+    // 确保图表在容器渲染完成后有正确的尺寸
+    setTimeout(() => {
+      chartInstance?.resize()
+    }, 100)
     persistDiagnosisState()
   } catch (error: any) {
     console.error('Failed to load kline:', error)
@@ -585,7 +610,7 @@ function renderChart(data: KLineData) {
   if (!chartRef.value) return
 
   if (!chartInstance) {
-    chartInstance = init(chartRef.value)
+    chartInstance = init(chartRef.value, { renderer: 'canvas' })
   }
 
   const dates = data.daily.map((d) => d.date)
@@ -723,7 +748,12 @@ function renderChart(data: KLineData) {
     ],
   }
 
-  chartInstance.setOption(option)
+  nextTick(() => {
+    if (chartInstance) {
+      chartInstance.setOption(option)
+      chartInstance.resize()
+    }
+  })
 }
 
 async function loadHistoryData() {

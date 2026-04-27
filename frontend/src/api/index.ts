@@ -10,6 +10,8 @@ import type {
   DiagnosisHistoryResponse,
   DiagnosisHistoryStatusResponse,
   FreshnessResponse,
+  IncrementalUpdateResponse,
+  IncrementalUpdateStatus,
   KLineData,
   SaveEnvResponse,
   StockInfo,
@@ -162,6 +164,13 @@ export const apiTasks = {
   // 启动更新
   startUpdate: (reviewer: string = 'quant', skipFetch: boolean = false, startFrom: number = 1) =>
     api.post<{ reviewer: string; skip_fetch: boolean; start_from: number }, TaskResponse>('/v1/tasks/start', { reviewer, skip_fetch: skipFetch, start_from: startFrom }),
+
+  // 启动增量更新
+  startIncrementalUpdate: (endDate?: string) =>
+    api.post<null, IncrementalUpdateResponse>('/v1/tasks/start-incremental', null, { params: { end_date: endDate } }),
+
+  // 获取增量更新状态
+  getIncrementalStatus: () => api.get<never, IncrementalUpdateStatus>('/v1/tasks/incremental-status'),
 
   // 获取任务列表
   getAll: (status?: string, limit: number = 20) =>

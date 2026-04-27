@@ -14,7 +14,9 @@ export interface Candidate {
   code: string
   name?: string
   strategy?: string
+  open_price?: number
   close_price?: number
+  change_pct?: number
   turnover?: number
   b1_passed?: boolean
   kdj_j?: number
@@ -171,6 +173,7 @@ export interface FreshnessResponse {
   freshness_version?: string
   running_task_id?: number | null
   running_task_status?: Task['status'] | null
+  incremental_update?: IncrementalUpdateStatus
 }
 
 export interface CandidatesResponse {
@@ -314,4 +317,23 @@ export interface TaskEnvironmentSection {
 
 export interface TaskEnvironmentResponse {
   sections: TaskEnvironmentSection[]
+}
+
+export interface IncrementalUpdateStatus {
+  running: boolean
+  progress: number
+  total: number
+  current_code?: string
+  updated_count: number
+  skipped_count: number
+  failed_count: number
+  started_at?: string
+  message: string
+}
+
+export interface IncrementalUpdateResponse {
+  success: boolean
+  message: string
+  running: boolean
+  state?: IncrementalUpdateStatus
 }

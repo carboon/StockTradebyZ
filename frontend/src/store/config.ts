@@ -10,6 +10,11 @@ export const useConfigStore = defineStore('config', () => {
   const apiAvailable = ref(true)
   const statusError = ref('')
 
+  // 状态检查去重：防止并发重复请求
+  let statusCheckPromise: Promise<TushareStatusResponse> | null = null
+  let lastStatusCheckTime = 0
+  const STATUS_CHECK_DEBOUNCE_MS = 2000 // 2秒内不重复检查
+
   const tushareToken = computed(() => configs.value.tushare_token || '')
   const hasTushareToken = computed(() => !!tushareToken.value)
   const tushareReady = computed(() => Boolean(tushareStatus.value?.configured && tushareStatus.value?.available))
@@ -92,19 +97,39 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function checkTushareStatus() {
-    try {
-      const result = await apiConfig.getTushareStatus()
-      apiAvailable.value = true
-      statusError.value = ''
-      tushareStatus.value = result
-      return result
-    } catch (error) {
-      console.error('Failed to check tushare status:', error)
-      apiAvailable.value = false
-      statusError.value = error instanceof Error ? error.message : 'Tushare 状态检查失败'
-      tushareStatus.value = null
-      throw error
+    const now = Date.now()
+
+    // 如果距离上次检查不到2秒，且已有状态，直接返回
+    if (tushareStatus.value && now - lastStatusCheckTime < STATUS_CHECK_DEBOUNCE_MS) {
+      return tushareStatus.value
     }
+
+    // 如果正在检查，等待已有请求完成
+    if (statusCheckPromise) {
+      return statusCheckPromise
+    }
+
+    // 发起新请求
+    statusCheckPromise = (async () => {
+      try {
+        const result = await apiConfig.getTushareStatus()
+        apiAvailable.value = true
+        statusError.value = ''
+        tushareStatus.value = result
+        lastStatusCheckTime = now
+        return result
+      } catch (error) {
+        console.error('Failed to check tushare status:', error)
+        apiAvailable.value = false
+        statusError.value = error instanceof Error ? error.message : 'Tushare 状态检查失败'
+        tushareStatus.value = null
+        throw error
+      } finally {
+        statusCheckPromise = null
+      }
+    })()
+
+    return statusCheckPromise
   }
 
   return {

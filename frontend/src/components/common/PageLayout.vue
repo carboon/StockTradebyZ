@@ -144,6 +144,11 @@ function toggleSidebar() {
 </script>
 
 <style scoped lang="scss">
+// 8px 网格系统
+$space-xs: 8px;
+$space-sm: 16px;
+$space-md: 24px;
+
 .page-layout {
   width: 100%;
   height: 100vh;
@@ -156,13 +161,14 @@ function toggleSidebar() {
   .sidebar-header {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 20px;
+    gap: $space-xs;
+    padding: $space-sm $space-xs;
+    height: 56px;
     color: white;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 
     .app-title {
-      font-size: 18px;
+      font-size: 16px;
       font-weight: 600;
     }
   }
@@ -172,6 +178,8 @@ function toggleSidebar() {
     background-color: transparent;
 
     :deep(.el-menu-item) {
+      height: 44px;
+      line-height: 44px;
       color: rgba(255, 255, 255, 0.7);
 
       &:hover,
@@ -194,28 +202,29 @@ function toggleSidebar() {
   justify-content: space-between;
   background-color: white;
   border-bottom: 1px solid #e5e7eb;
-  padding: 0 20px;
+  padding: 0 $space-sm;
+  height: 56px;
 
   .header-right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: $space-xs;
   }
 }
 
 .tushare-badge {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: $space-xs;
+  padding: $space-xs $space-sm;
   border-radius: 999px;
   font-size: 12px;
   cursor: pointer;
   transition: all 0.2s ease;
 
   .badge-dot {
-    width: 8px;
-    height: 8px;
+    width: $space-xs;
+    height: $space-xs;
     border-radius: 999px;
   }
 
@@ -242,15 +251,16 @@ function toggleSidebar() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 20px;
+  gap: $space-sm;
+  padding: $space-xs $space-sm;
   background: linear-gradient(90deg, #fff7ed 0%, #fffbeb 100%);
   border-bottom: 1px solid #fed7aa;
+  min-height: 44px;
 
   .status-banner__content {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: $space-xs;
     color: #9a3412;
     font-size: 13px;
   }
@@ -267,7 +277,7 @@ function toggleSidebar() {
 
 .app-main {
   background-color: #f8fafb;
-  padding: 24px;
+  padding: $space-md;
   overflow-y: auto;
 
   .page-shell {
@@ -284,7 +294,7 @@ function toggleSidebar() {
 
 @media (max-width: 960px) {
   .app-header {
-    padding: 0 16px;
+    padding: 0 $space-xs;
 
     .header-right {
       gap: 6px;
@@ -292,13 +302,13 @@ function toggleSidebar() {
   }
 
   .status-banner {
-    padding: 12px 16px;
+    padding: $space-xs $space-xs;
     align-items: flex-start;
     flex-direction: column;
   }
 
   .app-main {
-    padding: 16px;
+    padding: $space-sm;
 
     .page-shell {
       max-width: none;

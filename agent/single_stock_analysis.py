@@ -60,6 +60,31 @@ def _load_b1_config(config_path: Optional[Path] = None) -> dict:
     return {}
 
 
+def _load_env_var(name: str) -> str:
+    """优先读取环境变量，缺失时回退到项目根目录 .env。"""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+
+    env_path = _ROOT / ".env"
+    if not env_path.exists():
+        return ""
+
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            if key.strip() != name:
+                continue
+            return raw.strip().strip("'\"")
+    except Exception:
+        return ""
+
+    return ""
+
+
 # ────────────────────────────────────────────────
 # 步骤 1: 数据采集
 # ────────────────────────────────────────────────
@@ -85,18 +110,16 @@ def fetch_stock_data(code: str, days: int = 500) -> Optional[pd.DataFrame]:
     Returns:
         DataFrame with columns: date, open, close, high, low, volume
     """
-    ts_token = os.environ.get("TUSHARE_TOKEN")
+    ts_token = _load_env_var("TUSHARE_TOKEN") or _load_env_var("TS_TOKEN")
     if not ts_token:
-        print("[ERROR] 未设置环境变量 TUSHARE_TOKEN")
+        print("[ERROR] 未找到 TUSHARE_TOKEN，请在环境变量或项目根目录 .env 中配置")
         return None
-
-    ts.set_token(ts_token)
 
     # 计算日期范围
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
 
-    pro = ts.pro_api()
+    pro = ts.pro_api(ts_token)
     ts_code = _to_ts_code(code)
 
     print(f"[步骤1] 正在拉取 {code} 数据（{start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')}）...")
