@@ -292,6 +292,24 @@ class TaskEnvironmentResponse(BaseModel):
     sections: List[TaskEnvironmentSection]
 
 
+class TaskDiagnosticCheck(BaseModel):
+    key: str
+    label: str
+    status: str
+    summary: str
+    action: Optional[str] = None
+
+
+class TaskDiagnosticsResponse(BaseModel):
+    generated_at: str
+    checks: List[TaskDiagnosticCheck]
+    running_tasks: List[TaskItem]
+    latest_failed_task: Optional[TaskItem] = None
+    latest_completed_task: Optional[TaskItem] = None
+    environment: List[TaskEnvironmentSection]
+    data_status: Dict[str, Any]
+
+
 # ==================== 数据更新状态 ====================
 class DataStatusResponse(BaseModel):
     """数据状态响应"""

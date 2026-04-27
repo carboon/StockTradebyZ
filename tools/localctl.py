@@ -350,6 +350,7 @@ def install() -> None:
     log("Windows 下一步：")
     log(r"1. 一键启动：.\bootstrap-local.bat")
     log(r"2. 或分步执行：.\init-data.bat / .\start-local.bat / .\status-local.bat")
+    log("3. 浏览器首次进入后，可在配置页使用“首次启动自检”检查 Token、数据库和初始化状态")
 
 
 def build_backend_env(env_values: dict[str, str]) -> dict[str, str]:
@@ -554,7 +555,8 @@ def bootstrap(skip_init_data: bool = False) -> None:
     if token in {"", "your_tushare_token_here"}:
         log("")
         log("安装已完成，当前未配置有效的 TUSHARE_TOKEN。")
-        log("系统将先启动前后端，请在浏览器进入配置页完成 Token 配置后再执行数据初始化。")
+        log("系统将先启动前后端，请在浏览器进入配置页完成 Token 配置。")
+        log("配置页会显示“首次启动自检”，任务中心可继续执行首次初始化并查看恢复提示。")
         start(skip_preflight=True)
         return
 

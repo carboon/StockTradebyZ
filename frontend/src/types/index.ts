@@ -319,6 +319,24 @@ export interface TaskEnvironmentResponse {
   sections: TaskEnvironmentSection[]
 }
 
+export interface TaskDiagnosticCheck {
+  key: string
+  label: string
+  status: string
+  summary: string
+  action?: string | null
+}
+
+export interface TaskDiagnosticsResponse {
+  generated_at: string
+  checks: TaskDiagnosticCheck[]
+  running_tasks: Task[]
+  latest_failed_task?: Task | null
+  latest_completed_task?: Task | null
+  environment: TaskEnvironmentSection[]
+  data_status: DataStatus
+}
+
 export interface IncrementalUpdateStatus {
   running: boolean
   progress: number

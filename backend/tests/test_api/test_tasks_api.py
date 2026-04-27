@@ -15,7 +15,6 @@ Tasks API Tests
 - 使用 test_client_with_db fixture 用于需要同时访问客户端和数据库的测试
 - Mock task_service 和 tushare_service 以避免实际执行任务
 """
-from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +23,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.models import Task
+from app.time_utils import utc_now
+
+
+def _close_scheduled_task(coro):
+    coro.close()
+    return None
 
 
 @pytest.mark.api
@@ -110,56 +115,83 @@ def test_get_data_update_status_no_logs(test_client: TestClient) -> None:
 
 
 @pytest.mark.api
-def test_start_full_update_success(test_client: TestClient) -> None:
+def test_start_full_update_success(test_client_with_db: Any) -> None:
     """
     测试启动全量更新 - 成功场景
 
-    由于异步任务的复杂性，这个测试主要验证端点可访问性。
-    实际任务创建在集成测试中验证。
+    使用测试数据库创建任务后，验证接口返回新任务信息。
     """
-    # 验证端点存在且可访问
-    # 注意：由于TestClient的异步限制，完整的任务创建流程需要集成测试
-    with patch("app.main.manager", MagicMock()):
-        response = test_client.post(
+    with patch("app.api.tasks.TushareService") as mock_service_class, \
+            patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task) as mock_create_task, \
+            patch("app.main.manager", MagicMock()):
+        mock_service = MagicMock()
+        mock_service.verify_token.return_value = (True, "ok")
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.post(
             "/api/v1/tasks/start",
             json={
                 "reviewer": "quant",
                 "skip_fetch": False,
-                "start_from": 1
-            }
+                "start_from": 1,
+            },
         )
 
-        # 验证请求被处理（可能返回500因为实际执行会失败）
-        # 但请求格式应该是正确的
-        assert response.status_code in [200, 500]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task"]["id"] > 0
+    assert data["task"]["task_type"] == "full_update"
+    assert data["task"]["status"] == "pending"
+    assert data["task"]["params_json"]["reviewer"] == "quant"
+    assert data["task"]["params_json"]["skip_fetch"] is False
+    assert data["task"]["params_json"]["start_from"] == 1
+    assert data["ws_url"] == f"/ws/tasks/{data['task']['id']}"
+    mock_create_task.assert_called_once()
 
 
 @pytest.mark.api
-def test_start_full_update_default_params(test_client: TestClient) -> None:
+def test_start_full_update_default_params(test_client_with_db: Any) -> None:
     """
     测试启动全量更新 - 使用默认参数
 
     验证不传递参数时，API能处理请求并使用默认值。
     """
-    with patch("app.main.manager", MagicMock()):
-        response = test_client.post(
+    with patch("app.api.tasks.TushareService") as mock_service_class, \
+            patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task) as mock_create_task, \
+            patch("app.main.manager", MagicMock()):
+        mock_service = MagicMock()
+        mock_service.verify_token.return_value = (True, "ok")
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.post(
             "/api/v1/tasks/start",
-            json={}
+            json={},
         )
 
-        # 验证请求被接受（参数格式正确，会使用默认值）
-        assert response.status_code in [200, 500]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task"]["id"] > 0
+    assert data["task"]["params_json"]["reviewer"] == "quant"
+    assert data["task"]["params_json"]["skip_fetch"] is False
+    assert data["task"]["params_json"]["start_from"] == 1
+    mock_create_task.assert_called_once()
 
 
 @pytest.mark.api
-def test_start_full_update_with_params(test_client: TestClient) -> None:
+def test_start_full_update_with_params(test_client_with_db: Any) -> None:
     """
     测试启动全量更新 - 自定义参数
 
     验证能正确传递自定义参数（reviewer, skip_fetch, start_from）。
     """
-    with patch("app.main.manager", MagicMock()):
-        response = test_client.post(
+    with patch("app.api.tasks.TushareService") as mock_service_class, \
+            patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task) as mock_create_task, \
+            patch("app.main.manager", MagicMock()):
+        mock_service = MagicMock()
+        mock_service.verify_token.return_value = (True, "ok")
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.post(
             "/api/v1/tasks/start",
             json={
                 "reviewer": "glm",
@@ -168,8 +200,47 @@ def test_start_full_update_with_params(test_client: TestClient) -> None:
             }
         )
 
-        # 验证端点可访问且参数格式正确
-        assert response.status_code in [200, 500]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task"]["id"] > 0
+    assert data["task"]["params_json"]["reviewer"] == "glm"
+    assert data["task"]["params_json"]["skip_fetch"] is True
+    assert data["task"]["params_json"]["start_from"] == 3
+    mock_create_task.assert_called_once()
+
+
+@pytest.mark.api
+def test_start_full_update_returns_existing_running_task(test_client_with_db: Any) -> None:
+    """
+    测试重复启动全量更新时直接返回已有任务
+    """
+    existing_task = Task(
+        task_type="full_update",
+        status="running",
+        progress=42,
+        params_json={"reviewer": "quant"},
+        started_at=utc_now(),
+        created_at=utc_now(),
+    )
+    test_client_with_db.db.add(existing_task)
+    test_client_with_db.db.commit()
+    test_client_with_db.db.refresh(existing_task)
+
+    with patch("app.api.tasks.TushareService") as mock_service_class, \
+            patch("app.api.tasks.TaskService.create_task", new=AsyncMock()) as mock_create_task, \
+            patch("app.main.manager", MagicMock()):
+        response = test_client_with_db.post(
+            "/api/v1/tasks/start",
+            json={"reviewer": "glm", "skip_fetch": True, "start_from": 3},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task"]["id"] == existing_task.id
+    assert data["task"]["status"] == "running"
+    assert data["ws_url"] == f"/ws/tasks/{existing_task.id}"
+    mock_service_class.assert_not_called()
+    mock_create_task.assert_not_awaited()
 
 
 @pytest.mark.api
@@ -191,6 +262,47 @@ def test_get_tasks_empty(test_client_with_db: Any) -> None:
 
 
 @pytest.mark.api
+def test_get_task_diagnostics(test_client_with_db: Any) -> None:
+    now = utc_now()
+    running_task = Task(
+        task_type="full_update",
+        status="running",
+        progress=25,
+        created_at=now,
+        started_at=now,
+    )
+    failed_task = Task(
+        task_type="full_update",
+        status="failed",
+        progress=80,
+        error_message="network timeout",
+        created_at=now,
+        completed_at=now,
+    )
+    test_client_with_db.db.add_all([running_task, failed_task])
+    test_client_with_db.db.commit()
+
+    with patch("app.api.tasks.TushareService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service.check_data_status.return_value = {
+            "raw_data": {"exists": True, "count": 3200, "latest_date": "2025-04-25"},
+            "candidates": {"exists": False, "count": 0, "latest_date": None},
+            "analysis": {"exists": False, "count": 0, "latest_date": None},
+            "kline": {"exists": True, "count": 500, "latest_date": "2025-04-25"},
+        }
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.get("/api/v1/tasks/diagnostics")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["checks"]) >= 4
+    assert data["running_tasks"][0]["status"] == "running"
+    assert data["latest_failed_task"]["status"] == "failed"
+    assert data["data_status"]["raw_data"]["exists"] is True
+
+
+@pytest.mark.api
 def test_get_tasks(test_client_with_db: Any) -> None:
     """
     测试获取任务列表
@@ -199,7 +311,7 @@ def test_get_tasks(test_client_with_db: Any) -> None:
     验证任务按创建时间倒序排列。
     """
     # 创建多个任务
-    now = datetime.utcnow()
+    now = utc_now()
     tasks = [
         Task(
             task_type="full_update",
@@ -254,7 +366,7 @@ def test_get_tasks_with_status_filter(test_client_with_db: Any) -> None:
 
     创建不同状态的任务，验证status参数能正确筛选任务。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     tasks = [
         Task(task_type="full_update", status="pending", progress=0, created_at=now),
         Task(task_type="full_update", status="running", progress=30, created_at=now),
@@ -287,6 +399,11 @@ def test_get_tasks_with_status_filter(test_client_with_db: Any) -> None:
     data_empty = response_empty.json()
     assert len(data_empty["tasks"]) == 0
 
+    response_multi = test_client_with_db.get("/api/v1/tasks/?status=completed,failed")
+    assert response_multi.status_code == 200
+    data_multi = response_multi.json()
+    assert len(data_multi["tasks"]) == 2
+
 
 @pytest.mark.api
 def test_get_tasks_with_limit(test_client_with_db: Any) -> None:
@@ -295,7 +412,7 @@ def test_get_tasks_with_limit(test_client_with_db: Any) -> None:
 
     创建多个任务，验证limit参数能正确限制返回的任务数量。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     for i in range(5):
         task = Task(
             task_type="full_update",
@@ -323,7 +440,7 @@ def test_get_task_detail_success(test_client_with_db: Any) -> None:
 
     创建一个任务，验证API能正确返回任务的完整详情。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     task = Task(
         task_type="single_analysis",
         status="completed",
@@ -375,7 +492,7 @@ def test_get_task_detail_with_error(test_client_with_db: Any) -> None:
 
     创建一个失败的任务，验证API能正确返回错误信息。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     task = Task(
         task_type="full_update",
         status="failed",
@@ -406,7 +523,7 @@ def test_cancel_task_success(test_client_with_db: Any) -> None:
     创建一个运行中的任务，Mock TaskService.cancel_task()返回True，
     验证任务状态被更新为cancelled。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     task = Task(
         task_type="full_update",
         status="running",
@@ -419,7 +536,7 @@ def test_cancel_task_success(test_client_with_db: Any) -> None:
 
     with patch("app.api.tasks.TaskService") as mock_service_class:
         mock_service = MagicMock()
-        mock_service.cancel_task.return_value = True
+        mock_service.cancel_task = AsyncMock(return_value=True)
         mock_service_class.return_value = mock_service
 
         response = test_client_with_db.post(f"/api/v1/tasks/{task.id}/cancel")
@@ -444,7 +561,7 @@ def test_cancel_task_not_found(test_client: TestClient) -> None:
     """
     with patch("app.api.tasks.TaskService") as mock_service_class:
         mock_service = MagicMock()
-        mock_service.cancel_task.return_value = False
+        mock_service.cancel_task = AsyncMock(return_value=False)
         mock_service_class.return_value = mock_service
 
         response = test_client.post("/api/v1/tasks/99999/cancel")
@@ -463,7 +580,7 @@ def test_cancel_task_already_completed(test_client_with_db: Any) -> None:
     创建一个已完成的任务，Mock cancel_task返回False，
     验证API能正确处理（已完成的任务无法取消）。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     task = Task(
         task_type="full_update",
         status="completed",
@@ -477,7 +594,7 @@ def test_cancel_task_already_completed(test_client_with_db: Any) -> None:
     with patch("app.api.tasks.TaskService") as mock_service_class:
         mock_service = MagicMock()
         # 已完成的任务不在running_tasks中，cancel_task返回False
-        mock_service.cancel_task.return_value = False
+        mock_service.cancel_task = AsyncMock(return_value=False)
         mock_service_class.return_value = mock_service
 
         response = test_client_with_db.post(f"/api/v1/tasks/{task.id}/cancel")
@@ -499,7 +616,7 @@ def test_cancel_task_failed(test_client_with_db: Any) -> None:
 
     创建一个失败的任务，验证取消操作的处理。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     task = Task(
         task_type="full_update",
         status="failed",
@@ -513,7 +630,7 @@ def test_cancel_task_failed(test_client_with_db: Any) -> None:
 
     with patch("app.api.tasks.TaskService") as mock_service_class:
         mock_service = MagicMock()
-        mock_service.cancel_task.return_value = False
+        mock_service.cancel_task = AsyncMock(return_value=False)
         mock_service_class.return_value = mock_service
 
         response = test_client_with_db.post(f"/api/v1/tasks/{task.id}/cancel")
@@ -530,7 +647,7 @@ def test_get_task_with_cancelled_status(test_client_with_db: Any) -> None:
 
     创建一个已取消的任务，验证API能正确返回取消状态。
     """
-    now = datetime.utcnow()
+    now = utc_now()
     task = Task(
         task_type="full_update",
         status="cancelled",

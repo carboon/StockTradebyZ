@@ -54,13 +54,31 @@
             @click="router.push('/update')"
           >
             <span class="badge-dot" />
-            <span>{{ configStore.dataInitialized ? '初始化已完成' : '初始化未完成' }}</span>
+            <span>{{ configStore.dataInitialized ? '首次初始化已完成' : '首次初始化待完成' }}</span>
           </div>
           <el-button text @click="router.push('/config')">
             <el-icon><Setting /></el-icon>
           </el-button>
         </div>
       </el-header>
+
+      <div v-if="noticeStore.notice" class="global-notice" :class="`global-notice--${noticeStore.notice.type}`">
+        <div class="global-notice__content">
+          <strong>{{ noticeStore.notice.title }}</strong>
+          <span>{{ noticeStore.notice.message }}</span>
+        </div>
+        <div class="global-notice__actions">
+          <el-button
+            v-if="noticeStore.notice.actionRoute"
+            size="small"
+            text
+            @click="goNoticeRoute"
+          >
+            {{ noticeStore.notice.actionLabel || '去处理' }}
+          </el-button>
+          <el-button size="small" text @click="noticeStore.clearNotice()">关闭</el-button>
+        </div>
+      </div>
 
       <div v-if="!configStore.apiAvailable" class="status-banner">
         <div class="status-banner__content">
@@ -85,7 +103,7 @@
         class="status-banner status-banner--info"
       >
         <div class="status-banner__content">
-          <strong>数据源已就绪，但尚未完成首次初始化。</strong>
+          <strong>数据源已就绪，但首次初始化尚未全部完成。</strong>
           <span>{{ configStore.initializationMessage }}</span>
         </div>
         <el-button type="primary" plain @click="router.push('/update')">
@@ -119,10 +137,12 @@ import {
   TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document,
 } from '@element-plus/icons-vue'
 import { useConfigStore } from '@/store/config'
+import { useNoticeStore } from '@/store/notice'
 
 const router = useRouter()
 const route = useRoute()
 const configStore = useConfigStore()
+const noticeStore = useNoticeStore()
 
 const isCollapsed = ref(false)
 
@@ -140,6 +160,12 @@ const menuRoutes = [
 
 function toggleSidebar() {
   isCollapsed.value = !isCollapsed.value
+}
+
+function goNoticeRoute() {
+  if (noticeStore.notice?.actionRoute) {
+    router.push(noticeStore.notice.actionRoute)
+  }
 }
 </script>
 
@@ -272,6 +298,45 @@ $space-md: 24px;
     .status-banner__content {
       color: #1d4ed8;
     }
+  }
+}
+
+.global-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $space-sm;
+  padding: 10px $space-sm;
+  border-bottom: 1px solid #dbeafe;
+  background: linear-gradient(90deg, #eff6ff 0%, #f8fafc 100%);
+
+  .global-notice__content {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    line-height: 1.6;
+  }
+
+  .global-notice__actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  &.global-notice--warning {
+    background: linear-gradient(90deg, #fff7ed 0%, #fffbeb 100%);
+    border-bottom-color: #fed7aa;
+  }
+
+  &.global-notice--error {
+    background: linear-gradient(90deg, #fef2f2 0%, #fff7ed 100%);
+    border-bottom-color: #fecaca;
+  }
+
+  &.global-notice--success {
+    background: linear-gradient(90deg, #ecfdf5 0%, #f0fdf4 100%);
+    border-bottom-color: #bbf7d0;
   }
 }
 

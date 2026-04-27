@@ -5,6 +5,39 @@
         <span>配置管理</span>
       </template>
 
+      <div class="startup-panel">
+        <div class="startup-panel__header">
+          <div>
+            <div class="startup-panel__title">首次启动自检</div>
+            <div class="startup-panel__subtitle">先确认本机环境、Token、数据库和初始化状态，再决定下一步。</div>
+          </div>
+          <div class="startup-panel__actions">
+            <el-button :loading="diagnosticsLoading" @click="loadDiagnostics">重新检查</el-button>
+            <el-button v-if="diagnosticsPrimaryAction" type="primary" @click="handleDiagnosticsAction">
+              {{ diagnosticsPrimaryAction }}
+            </el-button>
+          </div>
+        </div>
+
+        <div class="startup-checklist">
+          <div
+            v-for="check in startupChecks"
+            :key="check.key"
+            class="startup-check"
+            :class="`is-${check.status}`"
+          >
+            <div class="startup-check__main">
+              <div class="startup-check__title-row">
+                <span class="startup-check__title">{{ check.label }}</span>
+                <el-tag :type="checkTagType(check.status)" size="small">{{ checkStatusLabel(check.status) }}</el-tag>
+              </div>
+              <div class="startup-check__summary">{{ check.summary }}</div>
+              <div v-if="check.action" class="startup-check__action">{{ check.action }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
         <el-form :model="configs" label-width="140px" class="config-form">
         <el-alert
           v-if="!configStore.apiAvailable"
@@ -24,6 +57,47 @@
           :closable="false"
           class="status-alert"
         />
+        <el-alert
+          v-if="initGuide"
+          :title="initGuide.title"
+          :description="initGuide.description"
+          :type="initGuide.type"
+          show-icon
+          :closable="false"
+          class="status-alert"
+        />
+        <div class="init-guide-panel">
+          <div class="init-guide-copy">
+            <div class="init-guide-title">首次使用建议路径</div>
+            <div class="init-guide-text">
+              1. 填写并验证 Tushare Token。2. 点击“保存并初始化”启动全量初始化。3. 系统会跳转到任务中心查看进度；刷新页面后会尽量恢复到当前任务视图。
+            </div>
+          </div>
+          <el-button
+            v-if="showTaskCenterShortcut"
+            text
+            type="primary"
+            @click="goToTaskCenter"
+          >
+            {{ taskCenterShortcutText }}
+          </el-button>
+        </div>
+
+        <div v-if="nextStepCards.length > 0" class="next-steps-panel">
+          <div class="next-steps-panel__title">初始化完成后的推荐入口</div>
+          <div class="next-steps-grid">
+            <button
+              v-for="item in nextStepCards"
+              :key="item.title"
+              type="button"
+              class="next-step-card"
+              @click="router.push(item.route)"
+            >
+              <div class="next-step-card__title">{{ item.title }}</div>
+              <div class="next-step-card__desc">{{ item.description }}</div>
+            </button>
+          </div>
+        </div>
 
         <!-- Tushare 配置 -->
         <el-divider content-position="left">Tushare 配置</el-divider>
@@ -146,9 +220,13 @@ import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/store/config'
+import { useNoticeStore } from '@/store/notice'
 import { apiTasks } from '@/api'
+import { saveInitTaskViewState } from '@/utils/initTaskViewState'
+import type { TaskDiagnosticCheck, TaskDiagnosticsResponse } from '@/types'
 
 const configStore = useConfigStore()
+const noticeStore = useNoticeStore()
 const router = useRouter()
 
 const configs = ref({
@@ -163,6 +241,9 @@ const configs = ref({
 const verifying = ref(false)
 const saving = ref(false)
 const savingAndInitializing = ref(false)
+const diagnosticsLoading = ref(false)
+const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
+
 const statusSummary = computed(() => {
   if (!configStore.apiAvailable) return null
   const status = configStore.tushareStatus
@@ -191,9 +272,101 @@ const statusSummary = computed(() => {
   }
 })
 
+const initGuide = computed(() => {
+  if (!configStore.apiAvailable) {
+    return {
+      type: 'error' as const,
+      title: '后端未就绪，暂时不能初始化',
+      description: configStore.statusError || '请先确认后端服务已启动，再返回此页保存配置和启动初始化。',
+    }
+  }
+
+  if (!configStore.tushareReady) {
+    return {
+      type: 'warning' as const,
+      title: 'Token 未验证，初始化入口暂不可用',
+      description: '只有验证通过后，“保存并初始化”才会启动任务。验证成功后会自动进入任务中心查看进度。',
+    }
+  }
+
+  if (!configStore.dataInitialized) {
+    return {
+      type: 'info' as const,
+      title: '配置已就绪，下一步请完成首次初始化',
+      description: configStore.initializationMessage || '初始化会补齐原始数据、候选结果和分析结果，完成前业务页仍会受限。',
+    }
+  }
+
+  return {
+    type: 'success' as const,
+    title: '首次初始化已完成',
+    description: '当前配置和初始化结果已就绪；如需查看任务记录或重试历史任务，可进入任务中心。',
+  }
+})
+
+const showTaskCenterShortcut = computed(() => configStore.tushareReady || configStore.dataInitialized)
+
+const taskCenterShortcutText = computed(() => (
+  configStore.dataInitialized ? '查看任务中心' : '去任务中心继续初始化'
+))
+
+const startupChecks = computed<TaskDiagnosticCheck[]>(() => {
+  if (diagnostics.value?.checks?.length) return diagnostics.value.checks
+
+  return [
+    {
+      key: 'backend',
+      label: '后端服务',
+      status: configStore.apiAvailable ? 'success' : 'error',
+      summary: configStore.apiAvailable ? '后端接口可访问。' : (configStore.statusError || '当前无法连接后端服务。'),
+    },
+    {
+      key: 'tushare',
+      label: 'Tushare 配置',
+      status: configStore.tushareReady ? 'success' : 'warning',
+      summary: configStore.tushareReady ? 'Token 已验证，可继续初始化。' : '请先填写并验证 Token。',
+    },
+    {
+      key: 'initialization',
+      label: '首次初始化',
+      status: configStore.dataInitialized ? 'success' : 'info',
+      summary: configStore.initializationMessage,
+    },
+  ]
+})
+
+const diagnosticsPrimaryAction = computed(() => {
+  if (!configStore.apiAvailable) return '留在配置页处理'
+  if (!configStore.tushareReady) return '去任务中心查看准备项'
+  if (!configStore.dataInitialized) return '去任务中心初始化'
+  return '查看任务中心'
+})
+
+const nextStepCards = computed(() => {
+  if (!configStore.dataInitialized) return []
+  return [
+    {
+      title: '明日之星',
+      description: '先看最新交易日候选股和分析结果，确认系统已经给出的重点标的。',
+      route: '/tomorrow-star',
+    },
+    {
+      title: '单股诊断',
+      description: '对单只股票补看 K 线、评分细项和历史表现，适合首次核对结果口径。',
+      route: '/diagnosis',
+    },
+    {
+      title: '重点观察',
+      description: '把准备跟踪的股票加入观察列表，记录仓位和后续操作建议。',
+      route: '/watchlist',
+    },
+  ]
+})
+
 onMounted(async () => {
   await loadConfigs()
   await loadStatus()
+  await loadDiagnostics()
 })
 
 async function loadConfigs() {
@@ -218,6 +391,57 @@ async function loadStatus() {
   } catch (error) {
     console.error('Failed to load tushare status:', error)
   }
+}
+
+async function loadDiagnostics() {
+  diagnosticsLoading.value = true
+  try {
+    diagnostics.value = await apiTasks.getDiagnostics()
+  } catch (error) {
+    console.error('Failed to load diagnostics:', error)
+    noticeStore.setNotice({
+      type: 'warning',
+      title: '本机诊断读取失败',
+      message: error instanceof Error ? error.message : '请稍后重试，或先确认后端服务是否稳定。',
+      actionLabel: '前往配置',
+      actionRoute: '/config',
+    })
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+function goToTaskCenter() {
+  saveInitTaskViewState({ activeTab: 'tasks' })
+  router.push('/update')
+}
+
+function handleDiagnosticsAction() {
+  if (!configStore.apiAvailable) {
+    router.push('/config')
+    return
+  }
+  goToTaskCenter()
+}
+
+function checkTagType(status: string) {
+  const map: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
+    success: 'success',
+    warning: 'warning',
+    error: 'danger',
+    info: 'info',
+  }
+  return map[status] || 'info'
+}
+
+function checkStatusLabel(status: string) {
+  const map: Record<string, string> = {
+    success: '正常',
+    warning: '待处理',
+    error: '异常',
+    info: '未完成',
+  }
+  return map[status] || status
 }
 
 async function verifyTushare() {
@@ -276,9 +500,34 @@ async function saveConfigs(startInitialization: boolean) {
     ElMessage.success(startInitialization ? '配置已保存，开始初始化任务' : '配置已保存')
 
     if (configStore.tushareReady && startInitialization) {
-      await apiTasks.startUpdate('quant', false, 1)
-      router.push('/update')
-      return
+      try {
+        const result = await apiTasks.startUpdate('quant', false, 1)
+        saveInitTaskViewState({
+          activeTab: 'tasks',
+          selectedTaskId: result.task.id,
+          bootstrapTaskId: result.task.id,
+        })
+        router.push('/update')
+        return
+      } catch (startError) {
+        try {
+          const runningResp = await apiTasks.getRunning()
+          const bootstrapTask = runningResp.tasks.find((task) => task.task_type === 'full_update')
+          if (bootstrapTask) {
+            saveInitTaskViewState({
+              activeTab: 'logs',
+              selectedTaskId: bootstrapTask.id,
+              bootstrapTaskId: bootstrapTask.id,
+            })
+            ElMessage.warning(`检测到已有初始化任务 #${bootstrapTask.id}，已跳转到任务中心继续查看`)
+            router.push('/update')
+            return
+          }
+        } catch (recoverError) {
+          console.error('Failed to recover running bootstrap task:', recoverError)
+        }
+        throw startError
+      }
     }
 
     if (configStore.tushareReady) {
@@ -297,6 +546,90 @@ async function saveConfigs(startInitialization: boolean) {
 .config-page {
   max-width: 800px;
 
+  .startup-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding: 18px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+    border: 1px solid #dbeafe;
+  }
+
+  .startup-panel__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .startup-panel__title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .startup-panel__subtitle {
+    margin-top: 4px;
+    color: #475569;
+    line-height: 1.6;
+  }
+
+  .startup-panel__actions {
+    display: inline-flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .startup-checklist {
+    display: grid;
+    gap: 12px;
+  }
+
+  .startup-check {
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid #cbd5e1;
+    background: rgba(255, 255, 255, 0.9);
+  }
+
+  .startup-check.is-success {
+    border-color: #86efac;
+  }
+
+  .startup-check.is-warning {
+    border-color: #fdba74;
+  }
+
+  .startup-check.is-error {
+    border-color: #fca5a5;
+  }
+
+  .startup-check__title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .startup-check__title {
+    font-weight: 600;
+    color: #0f172a;
+  }
+
+  .startup-check__summary,
+  .startup-check__action {
+    line-height: 1.7;
+    color: #475569;
+  }
+
+  .startup-check__action {
+    margin-top: 6px;
+    font-size: 13px;
+  }
+
   .verify-button {
     border-color: #0284c7;
     background: #0284c7;
@@ -313,6 +646,83 @@ async function saveConfigs(startInitialization: boolean) {
   .config-form {
     .status-alert {
       margin-bottom: 20px;
+    }
+
+    .init-guide-panel {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin: 0 0 24px;
+      padding: 16px 18px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+
+    .next-steps-panel {
+      margin: 0 0 24px;
+      padding: 18px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+
+    .next-steps-panel__title {
+      margin-bottom: 14px;
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+
+    .next-steps-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .next-step-card {
+      padding: 14px;
+      border: 1px solid #dbeafe;
+      border-radius: 12px;
+      background: #fff;
+      text-align: left;
+      cursor: pointer;
+      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .next-step-card:hover {
+      transform: translateY(-1px);
+      border-color: #60a5fa;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+    }
+
+    .next-step-card__title {
+      margin-bottom: 8px;
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .next-step-card__desc {
+      font-size: 13px;
+      line-height: 1.7;
+      color: #475569;
+    }
+
+    .init-guide-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .init-guide-title {
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+
+    .init-guide-text {
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--color-text-secondary);
     }
 
     .form-tip {
@@ -360,6 +770,28 @@ async function saveConfigs(startInitialization: boolean) {
 
     &:hover {
       color: var(--color-primary);
+    }
+  }
+
+  @media (max-width: 768px) {
+    .startup-panel__header {
+      flex-direction: column;
+    }
+
+    .startup-panel__actions {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .config-form {
+      .init-guide-panel {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .next-steps-grid {
+        grid-template-columns: 1fr;
+      }
     }
   }
 }

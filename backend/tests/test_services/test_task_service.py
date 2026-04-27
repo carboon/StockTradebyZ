@@ -4,13 +4,13 @@ Task Service Tests
 任务服务测试用例
 """
 import asyncio
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.models import Task
 from app.services.task_service import TaskService
+from app.time_utils import utc_now
 
 
 # ============================================
@@ -104,6 +104,7 @@ async def test_create_task(task_service, sample_task_params):
         assert task.status == "pending"
         assert task.progress == 0
         assert task.params_json == sample_task_params
+        assert result["existing"] is False
 
 
 @pytest.mark.service
@@ -161,6 +162,59 @@ async def test_create_task_tomorrow_star(task_service):
         task = task_service.db.query(Task).filter(Task.id == result["task_id"]).first()
         assert task.task_type == "tomorrow_star"
         assert task.params_json["reviewer"] == "qwen"
+
+
+@pytest.mark.service
+@pytest.mark.asyncio
+async def test_create_task_reuses_existing_full_update(task_service, sample_task_params):
+    """
+    测试创建全量任务时复用已有运行中任务
+
+    当已有全量类任务处于 pending/running 状态时，不应重复创建新任务。
+    """
+    existing_task = Task(
+        task_type="full_update",
+        status="running",
+        progress=35,
+        params_json={"reviewer": "quant"},
+        started_at=utc_now(),
+    )
+    task_service.db.add(existing_task)
+    task_service.db.commit()
+    task_service.db.refresh(existing_task)
+
+    with patch("app.services.task_service.asyncio.create_task") as mock_create_task:
+        result = await task_service.create_task("full_update", sample_task_params)
+
+    assert result["task_id"] == existing_task.id
+    assert result["ws_url"] == f"/ws/tasks/{existing_task.id}"
+    assert result["existing"] is True
+    assert task_service.db.query(Task).count() == 1
+    mock_create_task.assert_not_called()
+
+
+@pytest.mark.service
+@pytest.mark.asyncio
+async def test_create_tomorrow_star_reuses_existing_full_update(task_service):
+    """
+    测试明日之星任务与全量更新共享互斥保护
+    """
+    existing_task = Task(
+        task_type="full_update",
+        status="pending",
+        progress=0,
+        params_json={"reviewer": "quant"},
+    )
+    task_service.db.add(existing_task)
+    task_service.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task") as mock_create_task:
+        result = await task_service.create_task("tomorrow_star", {"reviewer": "qwen"})
+
+    assert result["task_id"] == existing_task.id
+    assert result["existing"] is True
+    assert task_service.db.query(Task).count() == 1
+    mock_create_task.assert_not_called()
 
 
 # ============================================
@@ -364,7 +418,7 @@ def test_fail_task(task_service):
     # 模拟任务失败
     task.status = "failed"
     task.error_message = "网络连接超时"
-    task.completed_at = datetime.utcnow()
+    task.completed_at = utc_now()
     task_service.db.commit()
 
     task_service.db.refresh(task)
@@ -390,7 +444,7 @@ def test_fail_task_with_long_error_message(task_service):
     long_error = "错误: " + "x" * 500  # 长错误消息
     task.status = "failed"
     task.error_message = long_error
-    task.completed_at = datetime.utcnow()
+    task.completed_at = utc_now()
     task_service.db.commit()
 
     task_service.db.refresh(task)
@@ -403,7 +457,8 @@ def test_fail_task_with_long_error_message(task_service):
 # ============================================
 
 @pytest.mark.service
-def test_cancel_task(task_service):
+@pytest.mark.asyncio
+async def test_cancel_task(task_service):
     """
     测试取消任务
 
@@ -412,34 +467,33 @@ def test_cancel_task(task_service):
     # Mock一个运行中的进程
     mock_process = MagicMock()
     mock_process.terminate = MagicMock()
-    mock_process.wait = MagicMock()
+    mock_process.wait = AsyncMock(return_value=0)
     task_service.running_tasks[999] = mock_process
 
-    result = task_service.cancel_task(999)
+    result = await task_service.cancel_task(999)
 
     assert result is True
     mock_process.terminate.assert_called_once()
-    mock_process.wait.assert_called_once_with(timeout=5)
+    mock_process.wait.assert_awaited()
     # cancel_task会将进程terminate，不会立即删除running_tasks
     # running_tasks在_run_task的finally块中删除
 
 
 @pytest.mark.service
-def test_cancel_task_with_timeout(task_service):
+@pytest.mark.asyncio
+async def test_cancel_task_with_timeout(task_service):
     """
     测试取消任务超时处理
 
     当进程在超时时间内未终止时，应该使用kill强制终止。
     """
-    from subprocess import TimeoutExpired
-
     mock_process = MagicMock()
     mock_process.terminate = MagicMock()
-    mock_process.wait.side_effect = TimeoutExpired("cmd", 5)
+    mock_process.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
     mock_process.kill = MagicMock()
     task_service.running_tasks[888] = mock_process
 
-    result = task_service.cancel_task(888)
+    result = await task_service.cancel_task(888)
 
     assert result is True
     mock_process.terminate.assert_called_once()
@@ -447,25 +501,27 @@ def test_cancel_task_with_timeout(task_service):
 
 
 @pytest.mark.service
-def test_cancel_nonexistent_task(task_service):
+@pytest.mark.asyncio
+async def test_cancel_nonexistent_task(task_service):
     """
     测试取消不存在的任务
 
     应该返回False而不是抛出异常。
     """
-    result = task_service.cancel_task(12345)
+    result = await task_service.cancel_task(12345)
 
     assert result is False
 
 
 @pytest.mark.service
-def test_cancel_task_not_running(task_service):
+@pytest.mark.asyncio
+async def test_cancel_task_not_running(task_service):
     """
     测试取消不在运行列表中的任务
 
     应该返回False。
     """
-    result = task_service.cancel_task(1)
+    result = await task_service.cancel_task(1)
 
     assert result is False
 
@@ -641,7 +697,7 @@ def test_get_running_task(task_service):
         task_type="full_update",
         status="running",
         progress=50,
-        started_at=datetime.utcnow()
+        started_at=utc_now()
     )
     task_service.db.add(task)
     task_service.db.commit()
@@ -1051,7 +1107,7 @@ def test_task_timestamps(task_service):
 
     应该正确记录任务的创建、开始和完成时间。
     """
-    now = datetime.utcnow()
+    now = utc_now()
 
     task = Task(
         task_type="full_update",
@@ -1068,7 +1124,7 @@ def test_task_timestamps(task_service):
 
     # 模拟任务开始
     task.status = "running"
-    task.started_at = datetime.utcnow()
+    task.started_at = utc_now()
     task_service.db.commit()
     task_service.db.refresh(task)
 
@@ -1076,7 +1132,7 @@ def test_task_timestamps(task_service):
 
     # 模拟任务完成
     task.status = "completed"
-    task.completed_at = datetime.utcnow()
+    task.completed_at = utc_now()
     task_service.db.commit()
     task_service.db.refresh(task)
 

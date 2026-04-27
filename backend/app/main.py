@@ -6,6 +6,7 @@ StockTrader 2.0 后端服务主入口
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -103,6 +104,12 @@ def ensure_watchlist_schema() -> None:
             conn.execute(text("ALTER TABLE watchlist_analysis ADD COLUMN hold_recommendation TEXT"))
         if "risk_recommendation" not in analysis_columns:
             conn.execute(text("ALTER TABLE watchlist_analysis ADD COLUMN risk_recommendation TEXT"))
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_watchlist_analysis_watchlist_date "
+                "ON watchlist_analysis (watchlist_id, analysis_date)"
+            )
+        )
 
 
 ensure_watchlist_schema()
@@ -128,6 +135,15 @@ def ensure_task_center_schema() -> None:
 
 ensure_task_center_schema()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage FastAPI startup/shutdown lifecycle without deprecated hooks."""
+    print(f"🚀 StockTrader API v{app.version} 启动成功")
+    print(f"📍 API 文档: http://{settings.host}:{settings.port}/docs")
+    yield
+    print("👋 StockTrader API 已关闭")
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="StockTrader API",
@@ -135,6 +151,7 @@ app = FastAPI(
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS 配置
@@ -235,20 +252,6 @@ async def ops_websocket(websocket: WebSocket):
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         manager.disconnect(websocket, "ops")
-
-
-@app.on_event("startup")
-async def startup_event():
-    """应用启动事件"""
-    print(f"🚀 StockTrader API v{app.version} 启动成功")
-    print(f"📍 API 文档: http://{settings.host}:{settings.port}/docs")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭事件"""
-    print("👋 StockTrader API 已关闭")
-
 
 if __name__ == "__main__":
     import uvicorn

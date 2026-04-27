@@ -7,17 +7,23 @@ import asyncio
 import json
 import locale
 import os
+import subprocess
 import sys
-from datetime import datetime
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
+from app.time_utils import utc_now
 
 ROOT = Path(__file__).parent.parent.parent.parent
 
 
 class TaskService:
     """后台任务服务"""
+
+    ACTIVE_STATUSES = ("pending", "running")
+    FULL_TASK_TYPES = ("full_update", "tomorrow_star")
+    _creation_lock = threading.Lock()
 
     def __init__(self, db: Session, manager=None):
         self.db = db
@@ -28,26 +34,51 @@ class TaskService:
         """创建任务"""
         from app.models import Task
 
-        task = Task(
-            task_type=task_type,
-            trigger_source=params.get("trigger_source", "manual"),
-            status="pending",
-            task_stage="queued",
-            params_json=params,
-            progress=0,
-            summary=self._build_summary(task_type, params),
-        )
-        self.db.add(task)
-        self.db.commit()
-        self.db.refresh(task)
+        with self._creation_lock:
+            if task_type in self.FULL_TASK_TYPES:
+                existing_task = self.get_active_full_task()
+                if existing_task:
+                    return {
+                        "task_id": existing_task.id,
+                        "ws_url": f"/ws/tasks/{existing_task.id}",
+                        "existing": True,
+                    }
+
+            task = Task(
+                task_type=task_type,
+                trigger_source=params.get("trigger_source", "manual"),
+                status="pending",
+                task_stage="queued",
+                params_json=params,
+                progress=0,
+                summary=self._build_summary(task_type, params),
+            )
+            self.db.add(task)
+            self.db.commit()
+            self.db.refresh(task)
 
         # 启动任务（后台执行）
         asyncio.create_task(self._run_task(task.id))
 
         return {
             "task_id": task.id,
-            "ws_url": f"/ws/tasks/{task.id}"
+            "ws_url": f"/ws/tasks/{task.id}",
+            "existing": False,
         }
+
+    def get_active_full_task(self) -> Optional[Any]:
+        """返回当前活跃的全量类任务。"""
+        from app.models import Task
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type.in_(self.FULL_TASK_TYPES),
+                Task.status.in_(self.ACTIVE_STATUSES),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
 
     async def _run_task(self, task_id: int):
         """运行任务"""
@@ -60,7 +91,7 @@ class TaskService:
             return
 
         task.status = "running"
-        task.started_at = datetime.utcnow()
+        task.started_at = utc_now()
         task.progress = 0
         task.task_stage = "starting"
         db.commit()
@@ -78,7 +109,7 @@ class TaskService:
             task.status = "completed"
             task.progress = 100
             task.task_stage = "completed"
-            task.completed_at = datetime.utcnow()
+            task.completed_at = utc_now()
             self._record_task_log(db, task, "任务执行完成", "success")
             await self._publish_ops_task_event(task, "task_completed")
 
@@ -86,7 +117,7 @@ class TaskService:
             task.status = "failed"
             task.error_message = str(e)
             task.task_stage = "failed"
-            task.completed_at = datetime.utcnow()
+            task.completed_at = utc_now()
             self._record_task_log(db, task, f"任务执行失败: {str(e)}", "error")
             await self._publish_ops_task_event(task, "task_failed")
 

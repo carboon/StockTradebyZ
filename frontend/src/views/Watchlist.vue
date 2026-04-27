@@ -12,7 +12,10 @@
       <el-card class="list-card">
           <template #header>
             <div class="card-header">
-              <span>我的观察</span>
+              <div class="card-header__title">
+                <span>我的观察</span>
+                <el-tag v-if="isRefreshingList" type="info" size="small">刷新中...</el-tag>
+              </div>
               <el-button
                 type="primary"
                 size="small"
@@ -189,7 +192,7 @@
 
           <el-empty v-if="historyRows.length === 0" description="暂无分析记录" :image-size="60" />
           <el-table v-else :data="historyRows" class="history-table">
-            <el-table-column prop="analysis_date" label="日期" min-width="130">
+            <el-table-column prop="analysis_date" label="交易日" min-width="130">
               <template #default="{ row }">
                 {{ formatTradeDate(row.analysis_date) }}
               </template>
@@ -334,28 +337,45 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onActivated, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { Plus, Delete } from '@element-plus/icons-vue'
-import { apiWatchlist, apiStock } from '@/api'
+import { apiWatchlist, apiStock, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
-import { CandlestickChart, LineChart } from 'echarts/charts'
-import { DataZoomComponent, GridComponent, TooltipComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
 import type { KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
-import { use, init, type ECharts } from 'echarts/core'
-
-use([
-  CandlestickChart,
-  LineChart,
-  TooltipComponent,
-  GridComponent,
-  DataZoomComponent,
-  CanvasRenderer,
-])
+import type { ECharts } from 'echarts/core'
 
 const router = useRouter()
 const WATCHLIST_STATE_KEY = 'stocktrade:watchlist:state'
+const WATCHLIST_CACHE_TTL_MS = 5 * 60 * 1000
+const WATCHLIST_CHART_CACHE_KEY = 'stocktrade:watchlist:chart-cache'
+const WATCHLIST_CHART_CACHE_TTL_MS = 30 * 60 * 1000
+const INITIAL_CHART_DAYS = 60
+const FULL_CHART_DAYS = 120
+
+type WatchlistTrendState = {
+  outlook: 'bullish' | 'bearish' | 'neutral'
+  support: number | null
+  resistance: number | null
+}
+
+type WatchlistViewState = {
+  selectedStockId: number | null
+  watchlist: WatchlistItem[]
+  analysisHistory: WatchlistAnalysis[]
+  trendData: WatchlistTrendState
+  cachedAt: number
+}
+
+type WatchlistChartCacheEntry = {
+  code: string
+  days: number
+  cachedAt: number
+  data: KLineData
+}
+
+type WatchlistChartCacheMap = Record<string, WatchlistChartCacheEntry>
+
 const watchlist = ref<WatchlistItem[]>([])
 const selectedStock = ref<WatchlistItem | null>(null)
 const analysisHistory = ref<WatchlistAnalysis[]>([])
@@ -368,18 +388,24 @@ const analyzing = ref(false)
 
 // 缓存优化
 const chartDataCache = new Map<string, KLineData>()
+const chartDataDaysCache = new Map<string, number>()
 const analysisCache = new Map<number, WatchlistAnalysis[]>()
 const loadingChart = ref(false)
 const loadingAnalysis = ref(false)
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: ECharts | null = null
+let chartRuntimePromise: Promise<{ init: (dom: HTMLElement) => ECharts }> | null = null
+const requestControllers = new Map<string, AbortController>()
+let selectionSequence = 0
 
 // 加载状态
 const isLoading = ref(false)
 const isDataReady = ref(false)
+const isHydratedFromCache = ref(false)
+const isRefreshingList = ref(false)
 
-const trendData = ref({
+const trendData = ref<WatchlistTrendState>({
   outlook: 'neutral',
   support: null as number | null,
   resistance: null as number | null,
@@ -408,26 +434,65 @@ const historyRows = computed(() => {
   return Array.from(deduped.values())
 })
 
+function beginRequest(key: string): AbortSignal {
+  requestControllers.get(key)?.abort()
+  const controller = new AbortController()
+  requestControllers.set(key, controller)
+  return controller.signal
+}
+
+function finishRequest(key: string, signal?: AbortSignal) {
+  const controller = requestControllers.get(key)
+  if (controller && (!signal || controller.signal === signal)) {
+    requestControllers.delete(key)
+  }
+}
+
+function cancelRequest(key: string) {
+  const controller = requestControllers.get(key)
+  if (controller) {
+    controller.abort()
+    requestControllers.delete(key)
+  }
+}
+
+function cancelWatchlistPageRequests() {
+  requestControllers.forEach((controller) => controller.abort())
+  requestControllers.clear()
+}
+
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
-  await ensureDataLoaded()
+  hydrateWatchlistState()
+  await ensureDataLoaded(true)
 })
 
 onActivated(async () => {
   chartInstance?.resize()
 
   // 确保数据已加载，然后再恢复选中状态
-  await ensureDataLoaded()
+  await ensureDataLoaded(!isHydratedFromCache.value)
   if (!selectedStock.value && watchlist.value.length > 0) {
     await restoreSelectedStock()
   }
 })
 
+onDeactivated(() => {
+  selectionSequence += 1
+  cancelWatchlistPageRequests()
+  loadingChart.value = false
+  loadingAnalysis.value = false
+  isLoading.value = false
+  loadPromise = null
+})
+
 onUnmounted(() => {
+  selectionSequence += 1
   if (chartInstance) {
     chartInstance.dispose()
   }
   window.removeEventListener('resize', handleResize)
+  cancelWatchlistPageRequests()
 })
 
 function handleResize() {
@@ -437,8 +502,8 @@ function handleResize() {
 // 确保数据已加载（避免重复加载）
 let loadPromise: Promise<void> | null = null
 
-async function ensureDataLoaded() {
-  if (isDataReady.value && watchlist.value.length > 0) {
+async function ensureDataLoaded(forceRefresh: boolean = false) {
+  if (!forceRefresh && isDataReady.value && watchlist.value.length > 0) {
     return
   }
 
@@ -449,12 +514,14 @@ async function ensureDataLoaded() {
 
   // 发起新加载
   loadPromise = (async () => {
-    isLoading.value = true
+    isLoading.value = watchlist.value.length === 0
+    isRefreshingList.value = watchlist.value.length > 0
     try {
       await loadWatchlist()
       isDataReady.value = true
     } finally {
       isLoading.value = false
+      isRefreshingList.value = false
       loadPromise = null
     }
   })()
@@ -463,16 +530,54 @@ async function ensureDataLoaded() {
 }
 
 async function loadWatchlist() {
+  const signal = beginRequest('watchlist')
   try {
-    const data = await apiWatchlist.getAll()
+    const data = await apiWatchlist.getAll({ signal })
+    const previousState = loadWatchlistState()
+    const previousSelectedId = selectedStock.value?.id || previousState?.selectedStockId || null
     watchlist.value = data.items || []
-    await restoreSelectedStock()
+    if (!watchlist.value.length) {
+      selectedStock.value = null
+      analysisHistory.value = []
+      persistWatchlistState()
+      return
+    }
+
+    if (selectedStock.value) {
+      const refreshed = watchlist.value.find((item) => item.id === selectedStock.value?.id) || null
+      selectedStock.value = refreshed
+    } else if (previousSelectedId) {
+      selectedStock.value = watchlist.value.find((item) => item.id === previousSelectedId) || null
+    }
+
+    if (!selectedStock.value) {
+      analysisHistory.value = []
+      trendData.value = {
+        outlook: 'neutral',
+        support: null,
+        resistance: null,
+      }
+    }
+
+    persistWatchlistState()
+
+    if (selectedStock.value) {
+      queueDetailRefresh(selectedStock.value)
+    }
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load watchlist:', error)
+  } finally {
+    finishRequest('watchlist', signal)
   }
 }
 
 async function selectStock(row: WatchlistItem) {
+  const requestId = ++selectionSequence
+  cancelRequest('chart')
+  cancelRequest('chartExtended')
+  cancelRequest('analysis')
+  cancelRequest('watchlistAnalyze')
   selectedStock.value = row
   persistWatchlistState()
 
@@ -481,25 +586,38 @@ async function selectStock(row: WatchlistItem) {
     loadChart(row.code),
     loadAnalysis(row.id)
   ])
+  if (requestId !== selectionSequence) return
 
-  // 自动触发分析
-  await analyzeNow()
+  // 自动触发分析，但不阻塞当前视图渲染
+  void analyzeNow()
 }
 
 async function loadChart(code: string) {
-  if (loadingChart.value) return
+  const signal = beginRequest('chart')
   loadingChart.value = true
 
   try {
-    // 使用缓存
     let data = chartDataCache.get(code)
+    let cachedDays = chartDataDaysCache.get(code) || 0
+
     if (!data) {
-      data = await apiStock.getKline(code, 120)
-      chartDataCache.set(code, data)
+      const persistent = loadChartCache(code)
+      if (persistent) {
+        data = persistent.data
+        cachedDays = persistent.days
+        chartDataCache.set(code, persistent.data)
+        chartDataDaysCache.set(code, persistent.days)
+      }
+    }
+
+    if (!data) {
+      data = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal })
+      cachedDays = INITIAL_CHART_DAYS
+      setChartCache(code, data, INITIAL_CHART_DAYS)
     }
 
     await nextTick()
-    renderChart(data)
+    await renderChart(data)
 
     // 简单计算支撑位和压力位
     const closes = data.daily.map((d) => d.close)
@@ -513,22 +631,58 @@ async function loadChart(code: string) {
       resistance: max,
     }
     persistWatchlistState()
+    queueFullChartRefresh(code, cachedDays)
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('加载K线图失败:', error)
   } finally {
+    finishRequest('chart', signal)
     loadingChart.value = false
   }
 }
 
+function queueFullChartRefresh(code: string, currentDays: number) {
+  if (currentDays >= FULL_CHART_DAYS) return
+  if (selectedStock.value?.code !== code) return
+  void refreshFullChartInBackground(code)
+}
+
+async function refreshFullChartInBackground(code: string) {
+  const signal = beginRequest('chartExtended')
+  try {
+    const fullData = await apiStock.getKline(code, FULL_CHART_DAYS, false, { signal, timeoutMs: 20000 })
+    if (selectedStock.value?.code !== code) return
+
+    setChartCache(code, fullData, FULL_CHART_DAYS)
+    await renderChart(fullData)
+
+    const closes = fullData.daily.map((d) => d.close)
+    const max = Math.max(...closes)
+    const min = Math.min(...closes)
+    const current = closes[closes.length - 1]
+    trendData.value = {
+      outlook: current > (max + min) / 2 ? 'bullish' : 'bearish',
+      support: min,
+      resistance: max,
+    }
+    persistWatchlistState()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('后台补全K线失败:', error)
+  } finally {
+    finishRequest('chartExtended', signal)
+  }
+}
+
 async function loadAnalysis(id: number) {
-  if (loadingAnalysis.value) return
+  const signal = beginRequest('analysis')
   loadingAnalysis.value = true
 
   try {
     // 使用缓存
     let data = analysisCache.get(id)
     if (!data) {
-      const response = await apiWatchlist.getAnalysis(id)
+      const response = await apiWatchlist.getAnalysis(id, { signal })
       data = response.analyses || []
       analysisCache.set(id, data)
     }
@@ -536,14 +690,18 @@ async function loadAnalysis(id: number) {
     analysisHistory.value = data
     persistWatchlistState()
   } catch (error) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load analysis:', error)
   } finally {
+    finishRequest('analysis', signal)
     loadingAnalysis.value = false
   }
 }
 
-function renderChart(data: KLineData) {
+async function renderChart(data: KLineData) {
   if (!chartRef.value) return
+
+  const { init } = await loadChartRuntime()
 
   if (!chartInstance) {
     chartInstance = init(chartRef.value)
@@ -557,6 +715,24 @@ function renderChart(data: KLineData) {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
+      formatter: (params: Array<{ seriesName: string; axisValue: string; data: number[] | number | null }>) => {
+        const lines = [params[0]?.axisValue || '-']
+
+        for (const item of params) {
+          if (item.seriesName === 'K线' && Array.isArray(item.data)) {
+            const [open, close, low, high] = item.data
+            lines.push(`开盘: ${formatChartNumber(open)}`)
+            lines.push(`收盘: ${formatChartNumber(close)}`)
+            lines.push(`最低: ${formatChartNumber(low)}`)
+            lines.push(`最高: ${formatChartNumber(high)}`)
+            continue
+          }
+
+          lines.push(`${item.seriesName}: ${formatChartNumber(item.data)}`)
+        }
+
+        return lines.join('<br/>')
+      },
     },
     grid: [
       { left: '8%', right: '8%', top: '10%', height: '65%' },
@@ -605,6 +781,39 @@ function renderChart(data: KLineData) {
   }
 
   chartInstance.setOption(option)
+}
+
+function formatChartNumber(value: number[] | number | null | undefined) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '-'
+  }
+  return value.toFixed(2)
+}
+
+async function loadChartRuntime() {
+  if (!chartRuntimePromise) {
+    chartRuntimePromise = (async () => {
+      const [{ use, init }, charts, components, renderers] = await Promise.all([
+        import('echarts/core'),
+        import('echarts/charts'),
+        import('echarts/components'),
+        import('echarts/renderers'),
+      ])
+
+      use([
+        charts.CandlestickChart,
+        charts.LineChart,
+        components.TooltipComponent,
+        components.GridComponent,
+        components.DataZoomComponent,
+        renderers.CanvasRenderer,
+      ])
+
+      return { init }
+    })()
+  }
+
+  return chartRuntimePromise
 }
 
 async function addToWatchlist() {
@@ -700,16 +909,19 @@ async function analyzeNow() {
   if (!selectedStock.value) return
   if (analyzing.value) return // 防止重复分析
 
+  const signal = beginRequest('watchlistAnalyze')
   analyzing.value = true
   try {
-    await apiWatchlist.analyze(selectedStock.value.id)
+    await apiWatchlist.analyze(selectedStock.value.id, { signal })
     // 清除缓存
     analysisCache.delete(selectedStock.value.id)
     await loadAnalysis(selectedStock.value.id)
     persistWatchlistState()
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('分析失败:', error)
   } finally {
+    finishRequest('watchlistAnalyze', signal)
     analyzing.value = false
   }
 }
@@ -842,11 +1054,10 @@ function getRiskLevelTooltipLines(item?: WatchlistAnalysis | null): string[] {
 }
 
 async function restoreSelectedStock() {
-  const raw = sessionStorage.getItem(WATCHLIST_STATE_KEY)
-  if (!raw || selectedStock.value) return
+  const state = loadWatchlistState()
+  if (!state || selectedStock.value) return
 
   try {
-    const state = JSON.parse(raw)
     const selectedId = state.selectedStockId as number | undefined
     if (!selectedId) return
 
@@ -857,37 +1068,130 @@ async function restoreSelectedStock() {
     trendData.value = state.trendData || trendData.value
     analysisHistory.value = state.analysisHistory || []
     await nextTick()
-    await loadChart(target.code)
-    if (analysisHistory.value.length === 0) {
-      await loadAnalysis(target.id)
-    }
+    queueDetailRefresh(target)
   } catch {
-    sessionStorage.removeItem(WATCHLIST_STATE_KEY)
+    clearWatchlistState()
   }
 }
 
 function persistWatchlistState() {
-  const state = {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
+
+  const state: WatchlistViewState = {
     selectedStockId: selectedStock.value?.id || null,
+    watchlist: watchlist.value,
     analysisHistory: analysisHistory.value,
     trendData: trendData.value,
+    cachedAt: Date.now(),
   }
 
-  sessionStorage.setItem(WATCHLIST_STATE_KEY, JSON.stringify(state))
+  window.localStorage.setItem(WATCHLIST_STATE_KEY, JSON.stringify(state))
 }
 
-function restoreWatchlistState() {
-  const raw = sessionStorage.getItem(WATCHLIST_STATE_KEY)
-  if (!raw) return
+function hydrateWatchlistState() {
+  const state = loadWatchlistState()
+  if (!state) return
+
+  watchlist.value = state.watchlist || []
+  analysisHistory.value = state.analysisHistory || []
+  trendData.value = state.trendData || trendData.value
+  isDataReady.value = watchlist.value.length > 0
+  isHydratedFromCache.value = watchlist.value.length > 0
+
+  if (state.selectedStockId) {
+    selectedStock.value = watchlist.value.find((item) => item.id === state.selectedStockId) || null
+  }
+}
+
+function loadWatchlistState(): WatchlistViewState | null {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
+
+  const raw = window.localStorage.getItem(WATCHLIST_STATE_KEY)
+  if (!raw) return null
 
   try {
-    const state = JSON.parse(raw)
-    trendData.value = state.trendData || trendData.value
-    analysisHistory.value = state.analysisHistory || []
+    const state = JSON.parse(raw) as WatchlistViewState
+    if (!state.cachedAt || Date.now() - state.cachedAt > WATCHLIST_CACHE_TTL_MS) {
+      clearWatchlistState()
+      return null
+    }
+    return state
   } catch {
-    sessionStorage.removeItem(WATCHLIST_STATE_KEY)
+    clearWatchlistState()
+    return null
   }
 }
+
+function clearWatchlistState() {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
+  window.localStorage.removeItem(WATCHLIST_STATE_KEY)
+}
+
+function loadChartCache(code: string): WatchlistChartCacheEntry | null {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
+  const raw = window.localStorage.getItem(WATCHLIST_CHART_CACHE_KEY)
+  if (!raw) return null
+
+  try {
+    const cache = JSON.parse(raw) as WatchlistChartCacheMap
+    const entry = cache[code]
+    if (!entry) return null
+    if (!entry.cachedAt || Date.now() - entry.cachedAt > WATCHLIST_CHART_CACHE_TTL_MS) {
+      delete cache[code]
+      window.localStorage.setItem(WATCHLIST_CHART_CACHE_KEY, JSON.stringify(cache))
+      return null
+    }
+    return entry
+  } catch {
+    window.localStorage.removeItem(WATCHLIST_CHART_CACHE_KEY)
+    return null
+  }
+}
+
+function setChartCache(code: string, data: KLineData, days: number) {
+  chartDataCache.set(code, data)
+  chartDataDaysCache.set(code, days)
+
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
+
+  const nextEntry: WatchlistChartCacheEntry = {
+    code,
+    days,
+    cachedAt: Date.now(),
+    data,
+  }
+
+  let cache: WatchlistChartCacheMap = {}
+  try {
+    cache = JSON.parse(window.localStorage.getItem(WATCHLIST_CHART_CACHE_KEY) || '{}') as WatchlistChartCacheMap
+  } catch {
+    cache = {}
+  }
+
+  cache[code] = nextEntry
+  const trimmedEntries = Object.values(cache)
+    .sort((a, b) => b.cachedAt - a.cachedAt)
+    .slice(0, 12)
+  const trimmedCache = Object.fromEntries(trimmedEntries.map((entry) => [entry.code, entry]))
+  window.localStorage.setItem(WATCHLIST_CHART_CACHE_KEY, JSON.stringify(trimmedCache))
+}
+
+function queueDetailRefresh(target: WatchlistItem) {
+  void nextTick(() => {
+    void loadChart(target.code)
+    if (analysisHistory.value.length === 0) {
+      void loadAnalysis(target.id)
+    } else {
+      void refreshAnalysisInBackground(target.id)
+    }
+  })
+}
+
+async function refreshAnalysisInBackground(id: number) {
+  analysisCache.delete(id)
+  await loadAnalysis(id)
+}
+
 </script>
 
 <style scoped lang="scss">
@@ -990,6 +1294,12 @@ function restoreWatchlistState() {
     display: flex;
     justify-content: space-between;
     align-items: center;
+
+    .card-header__title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
 
     .stock-title {
       min-width: 150px;

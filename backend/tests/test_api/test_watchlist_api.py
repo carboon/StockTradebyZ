@@ -900,6 +900,7 @@ def test_analyze_watchlist_item_success(test_client_with_db) -> None:
     data = response.json()
     assert data["status"] == "ok"
     assert data["code"] == "600000"
+    assert data["analysis"]["analysis_date"] == "2024-01-11"
     assert data["analysis"]["verdict"] == "PASS"
     assert data["analysis"]["trend_outlook"] == "bullish"
     assert data["analysis"]["buy_action"] == "buy"
@@ -912,9 +913,9 @@ def test_analyze_watchlist_item_success(test_client_with_db) -> None:
 
 
 @pytest.mark.api
-def test_analyze_watchlist_item_updates_same_day_record(test_client_with_db) -> None:
+def test_analyze_watchlist_item_updates_same_trade_day_record(test_client_with_db) -> None:
     """
-    测试同一天立即分析会更新已有记录，不重复新增
+    测试同一交易日立即分析会更新已有记录，不重复新增
     """
     item = create_watchlist_item(
         test_client_with_db.db,
@@ -922,9 +923,10 @@ def test_analyze_watchlist_item_updates_same_day_record(test_client_with_db) -> 
         entry_price=10.5,
         position_ratio=0.8,
     )
+    trade_date = date(2024, 1, 10)
     existing = WatchlistAnalysis(
         watchlist_id=item.id,
-        analysis_date=date.today(),
+        analysis_date=trade_date,
         verdict="WATCH",
         score=3.5,
     )
@@ -948,15 +950,17 @@ def test_analyze_watchlist_item_updates_same_day_record(test_client_with_db) -> 
         response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
 
     assert response.status_code == 200
+    data = response.json()
+    assert data["analysis"]["analysis_date"] == "2024-01-10"
     count = test_client_with_db.db.query(WatchlistAnalysis).filter(
         WatchlistAnalysis.watchlist_id == item.id,
-        WatchlistAnalysis.analysis_date == date.today(),
+        WatchlistAnalysis.analysis_date == trade_date,
     ).count()
     assert count == 1
 
     refreshed = test_client_with_db.db.query(WatchlistAnalysis).filter(
         WatchlistAnalysis.watchlist_id == item.id,
-        WatchlistAnalysis.analysis_date == date.today(),
+        WatchlistAnalysis.analysis_date == trade_date,
     ).first()
     assert refreshed.verdict == "FAIL"
     assert refreshed.trend_outlook == "bearish"
@@ -966,6 +970,47 @@ def test_analyze_watchlist_item_updates_same_day_record(test_client_with_db) -> 
     assert refreshed.buy_recommendation == "暂不买入。"
     assert refreshed.hold_recommendation == "谨慎持有，优先减仓观察。"
     assert refreshed.risk_recommendation == "跌破支撑执行止损。"
+
+
+@pytest.mark.api
+def test_analyze_watchlist_item_prefers_check_date(test_client_with_db) -> None:
+    """
+    测试立即分析优先使用分析结果中的交易日
+    """
+    item = create_watchlist_item(
+        test_client_with_db.db,
+        code="600000",
+        entry_price=10.0,
+        position_ratio=0.3,
+    )
+
+    mock_df = pd.DataFrame([
+        {"date": "2024-01-10", "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "volume": 1000000},
+        {"date": "2024-01-11", "open": 10.2, "high": 10.8, "low": 10.0, "close": 10.6, "volume": 1200000},
+    ])
+
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        mock_service.analyze_stock.return_value = {
+            "close_price": 10.6,
+            "verdict": "PASS",
+            "score": 4.1,
+            "signal_type": "trend_start",
+            "comment": "结构良好",
+            "check_date": "2024-01-09",
+        }
+        mock_service.load_stock_data.return_value = mock_df
+
+        response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["analysis"]["analysis_date"] == "2024-01-09"
+
+    saved = test_client_with_db.db.query(WatchlistAnalysis).filter(
+        WatchlistAnalysis.watchlist_id == item.id,
+        WatchlistAnalysis.analysis_date == date(2024, 1, 9),
+    ).first()
+    assert saved is not None
 
 
 @pytest.mark.api

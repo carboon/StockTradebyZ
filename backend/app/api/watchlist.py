@@ -3,7 +3,6 @@ Watchlist API
 ~~~~~~~~~~~~
 重点观察相关 API
 """
-from datetime import datetime
 from datetime import date as date_class
 from typing import List
 
@@ -23,6 +22,24 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+
+def _resolve_analysis_trade_date(result: dict, df) -> date_class:
+    """Resolve analysis date to the latest market data date instead of query time."""
+    check_date = result.get("check_date") or result.get("analysis_date")
+    if check_date:
+        try:
+            return date_class.fromisoformat(str(check_date)[:10])
+        except ValueError:
+            pass
+
+    if df is not None and not df.empty and "date" in df.columns:
+        latest = df.sort_values("date").iloc[-1]["date"]
+        if hasattr(latest, "date"):
+            return latest.date()
+        return date_class.fromisoformat(str(latest)[:10])
+
+    return date_class.today()
 
 
 def _build_trend_outlook(verdict: str | None, signal_type: str | None, score: float | None) -> str:
@@ -408,7 +425,7 @@ async def analyze_watchlist_item(item_id: int, db: Session = Depends(get_db)) ->
         position_ratio=w.position_ratio,
     )
 
-    analysis_date = date_class.today()
+    analysis_date = _resolve_analysis_trade_date(result, df)
     existing = (
         db.query(WatchlistAnalysis)
         .filter(

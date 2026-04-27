@@ -29,21 +29,24 @@ export const useConfigStore = defineStore('config', () => {
       return '请先完成 Tushare 配置和验证。'
     }
     if (dataInitialized.value) {
-      return '历史数据、候选结果与分析结果均已就绪。'
+      return '首次初始化已完成，原始数据、候选结果和分析结果均已就绪。'
     }
 
     const status = dataStatus.value
     if (!status) {
-      return '尚未检测到初始化结果，请先执行首次初始化。'
+      return '尚未检测到初始化结果，请先前往任务中心执行首次初始化。'
     }
 
     const missing: string[] = []
     if (!status.raw_data?.exists) missing.push('原始数据')
     if (!status.candidates?.exists) missing.push('候选结果')
     if (!status.analysis?.exists) missing.push('分析结果')
-    return missing.length > 0
-      ? `尚未完成首次初始化，当前缺少：${missing.join('、')}。`
-      : '尚未完成首次初始化，请前往任务中心执行初始化。'
+
+    if (missing.length > 0) {
+      return `尚未完成首次初始化，当前缺少：${missing.join('、')}。请前往任务中心继续初始化。`
+    }
+
+    return '初始化状态待确认，请前往任务中心重新检查。'
   })
 
   // 加载配置

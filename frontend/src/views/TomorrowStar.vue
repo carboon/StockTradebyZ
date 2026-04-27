@@ -229,12 +229,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onActivated, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh, Loading } from '@element-plus/icons-vue'
-import { apiAnalysis, apiTasks } from '@/api'
+import { apiAnalysis, apiTasks, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
-import type { Candidate, AnalysisResult, Task, IncrementalUpdateStatus } from '@/types'
+import type { Candidate, AnalysisResult, IncrementalUpdateStatus } from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const router = useRouter()
@@ -246,6 +246,7 @@ const REFRESH_CHECK_INTERVAL_MS = 60_000
 const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 let incrementalPollTimer: number | null = null
+const requestControllers = new Map<string, AbortController>()
 
 const loading = ref(false)
 const loadingLatest = ref(false)
@@ -340,13 +341,33 @@ const topAnalysisResults = computed(() => {
     .slice(0, 5)
 })
 
+function beginRequest(key: string): AbortSignal {
+  requestControllers.get(key)?.abort()
+  const controller = new AbortController()
+  requestControllers.set(key, controller)
+  return controller.signal
+}
+
+function finishRequest(key: string, signal?: AbortSignal) {
+  const controller = requestControllers.get(key)
+  if (controller && (!signal || controller.signal === signal)) {
+    requestControllers.delete(key)
+  }
+}
+
+function cancelAllPageRequests() {
+  requestControllers.forEach((controller) => controller.abort())
+  requestControllers.clear()
+}
+
 async function loadData(skipLatestLoad: boolean = false) {
   if (loading.value) return
 
   const requestId = ++loadDataRequestId
+  const signal = beginRequest('loadData')
   loading.value = true
   try {
-    const datesData = await apiAnalysis.getDates()
+    const datesData = await apiAnalysis.getDates({ signal })
     if (requestId !== loadDataRequestId) return
 
     const dates = datesData.dates || []
@@ -365,8 +386,8 @@ async function loadData(skipLatestLoad: boolean = false) {
       const historyPromises = dates.map(async (date: string) => {
         try {
           const [candidatesData, resultsData] = await Promise.all([
-            apiAnalysis.getCandidates(date),
-            apiAnalysis.getResults(date)
+            apiAnalysis.getCandidates(date, { signal }),
+            apiAnalysis.getResults(date, { signal })
           ])
           const candidates = candidatesData.candidates || []
           const results = resultsData.results || []
@@ -420,9 +441,11 @@ async function loadData(skipLatestLoad: boolean = false) {
 
     persistTomorrowStarCache()
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load data:', error)
     ElMessage.error('加载数据失败: ' + error.message)
   } finally {
+    finishRequest('loadData', signal)
     if (requestId === loadDataRequestId) {
       loading.value = false
     }
@@ -430,11 +453,12 @@ async function loadData(skipLatestLoad: boolean = false) {
 }
 
 async function loadLatestCandidates() {
-  if (loadingLatest.value) return
-
+  const requestId = ++candidatesRequestId
+  const signal = beginRequest('latestCandidates')
   loadingLatest.value = true
   try {
-    const candidatesData = await apiAnalysis.getCandidates('')
+    const candidatesData = await apiAnalysis.getCandidates('', { signal })
+    if (requestId !== candidatesRequestId) return
     const candidates = candidatesData.candidates || []
     latestCandidates.value = candidates
     latestCandidatePage.value = 1
@@ -449,9 +473,11 @@ async function loadLatestCandidates() {
         console.log(`检测到新日期 ${newPickDate}，刷新历史列表`)
         // 传入 true 跳过重复的 loadLatestCandidates 调用，避免递归
         await loadData(true)
+        if (requestId !== candidatesRequestId) return
         // loadData 完成后，继续加载分析结果（因为上面 return 了，需要在这里加载）
         try {
-          const resultsData = await apiAnalysis.getResults('')
+          const resultsData = await apiAnalysis.getResults('', { signal })
+          if (requestId !== candidatesRequestId) return
           latestAnalysisResults.value = resultsData.results || []
           // 缓存最新数据
           candidatesCache.value.set(newPickDate, {
@@ -471,7 +497,8 @@ async function loadLatestCandidates() {
 
     // 加载最新分析结果
     try {
-      const resultsData = await apiAnalysis.getResults('')
+      const resultsData = await apiAnalysis.getResults('', { signal })
+      if (requestId !== candidatesRequestId) return
       latestAnalysisResults.value = resultsData.results || []
       // 缓存最新数据
       if (latestDataDate.value) {
@@ -487,28 +514,16 @@ async function loadLatestCandidates() {
 
     persistTomorrowStarCache()
   } catch (error) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load latest candidates:', error)
     ElMessage.error('加载最新候选股票失败')
   } finally {
+    finishRequest('latestCandidates', signal)
     loadingLatest.value = false
   }
 }
 
-async function refreshLatestCandidates() {
-  if (!configStore.dataInitialized) {
-    ElMessage.info('请先完成首次初始化')
-    return
-  }
-  await loadLatestCandidates()
-}
-
 async function selectDate(row: HistoryRow) {
-  // 防止并发刷新
-  if (loadingLatest.value) {
-    console.log('正在加载中，忽略此次选择')
-    return
-  }
-
   selectedDate.value = row.date
   viewingDate.value = row.date
   persistTomorrowStarCache()
@@ -526,12 +541,15 @@ async function selectDate(row: HistoryRow) {
   }
 
   // 加载选中日期的数据到右侧显示
+  const requestId = ++candidatesRequestId
+  const signal = beginRequest('latestCandidates')
   loadingLatest.value = true
   try {
     const [candidatesData, resultsData] = await Promise.all([
-      apiAnalysis.getCandidates(row.date),
-      apiAnalysis.getResults(row.date)
+      apiAnalysis.getCandidates(row.date, { signal }),
+      apiAnalysis.getResults(row.date, { signal })
     ])
+    if (requestId !== candidatesRequestId) return
 
     const candidates = candidatesData.candidates || []
     const results = resultsData.results || []
@@ -547,16 +565,17 @@ async function selectDate(row: HistoryRow) {
       timestamp: now
     })
   } catch (error) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load selected date data:', error)
     ElMessage.error('加载数据失败')
   } finally {
+    finishRequest('latestCandidates', signal)
     loadingLatest.value = false
   }
 }
 
 async function refreshCurrentCandidates() {
-  // 防止并发刷新
-  if (loadingLatest.value || loading.value) {
+  if (loading.value) {
     console.log('正在刷新中，忽略此次刷新请求')
     return
   }
@@ -570,12 +589,15 @@ async function refreshCurrentCandidates() {
   // 刷新当前查看的日期的数据
   const dateToRefresh = viewingDate.value || latestDate.value
   if (dateToRefresh) {
+    const requestId = ++candidatesRequestId
+    const signal = beginRequest('latestCandidates')
     loadingLatest.value = true
     try {
       const [candidatesData, resultsData] = await Promise.all([
-        apiAnalysis.getCandidates(dateToRefresh),
-        apiAnalysis.getResults(dateToRefresh)
+        apiAnalysis.getCandidates(dateToRefresh, { signal }),
+        apiAnalysis.getResults(dateToRefresh, { signal })
       ])
+      if (requestId !== candidatesRequestId) return
 
       const candidates = candidatesData.candidates || []
       const results = resultsData.results || []
@@ -593,9 +615,11 @@ async function refreshCurrentCandidates() {
 
       ElMessage.success(`已刷新 ${dateToRefresh} 的数据`)
     } catch (error) {
+      if (isRequestCanceled(error)) return
       console.error('Failed to refresh current candidates:', error)
       ElMessage.error('刷新失败')
     } finally {
+      finishRequest('latestCandidates', signal)
       loadingLatest.value = false
     }
   }
@@ -622,11 +646,15 @@ async function startIncrementalUpdate() {
 }
 
 async function checkIncrementalStatus() {
+  const signal = beginRequest('incrementalStatus')
   try {
-    const status = await apiTasks.getIncrementalStatus()
+    const status = await apiTasks.getIncrementalStatus({ signal })
     incrementalUpdate.value = status
   } catch (error) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to check incremental status:', error)
+  } finally {
+    finishRequest('incrementalStatus', signal)
   }
 }
 
@@ -655,7 +683,7 @@ function stopIncrementalPolling() {
 
 async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   if (!configStore.tushareReady) return
-  if (checkingFreshness.value || incrementalUpdate.value.running || loading.value || loadingLatest.value) return
+  if (checkingFreshness.value || incrementalUpdate.value.running || loading.value) return
 
   const hasLoadedData = historyData.value.length > 0
   const shouldSkipServerCheck = !forceReload
@@ -665,8 +693,9 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   if (shouldSkipServerCheck) return
 
   checkingFreshness.value = true
+  const signal = beginRequest('freshness')
   try {
-    const freshness = await apiAnalysis.getFreshness()
+    const freshness = await apiAnalysis.getFreshness({ signal })
     lastRefreshCheckAt.value = Date.now()
     const nextFreshnessVersion = freshness.freshness_version || ''
 
@@ -706,11 +735,13 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
       await checkForRefresh(true)
     }
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to ensure tomorrow-star freshness:', error)
     if (historyData.value.length === 0) {
       await loadData()
     }
   } finally {
+    finishRequest('freshness', signal)
     checkingFreshness.value = false
   }
 }
@@ -757,13 +788,7 @@ function getSignalTypeTag(signalType?: string): string {
   return 'info'
 }
 
-function getVerdictType(verdict?: string): string {
-  if (verdict === 'PASS') return 'success'
-  if (verdict === 'WATCH') return 'warning'
-  return 'info'
-}
-
-function buildHistorySignature(dates: string[], history: Array<HistoryRow>): string {
+function buildHistorySignature(dates: string[], history: Array<{ date: string; count?: number; pass?: number } | HistoryRow>): string {
   if (history.length > 0) {
     return JSON.stringify(
       history.map((item) => ({
@@ -777,15 +802,16 @@ function buildHistorySignature(dates: string[], history: Array<HistoryRow>): str
 }
 
 async function checkForRefresh(forceLoad: boolean = false) {
-  if (loading.value || loadingLatest.value) return
+  if (loading.value) return
 
   const now = Date.now()
   if (!forceLoad && now - lastRefreshCheckAt.value < REFRESH_CHECK_INTERVAL_MS) return
 
   lastRefreshCheckAt.value = now
 
+  const signal = beginRequest('datesCheck')
   try {
-    const datesData = await apiAnalysis.getDates()
+    const datesData = await apiAnalysis.getDates({ signal })
     const dates = datesData.dates || []
     const history = datesData.history || []
     const nextSignature = buildHistorySignature(dates, history)
@@ -794,7 +820,10 @@ async function checkForRefresh(forceLoad: boolean = false) {
       await loadData()
     }
   } catch (error) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to check tomorrow-star freshness:', error)
+  } finally {
+    finishRequest('datesCheck', signal)
   }
 }
 
@@ -871,8 +900,17 @@ onActivated(() => {
   checkIncrementalStatus()
 })
 
+onDeactivated(() => {
+  stopIncrementalPolling()
+  cancelAllPageRequests()
+  loading.value = false
+  loadingLatest.value = false
+  checkingFreshness.value = false
+})
+
 onUnmounted(() => {
   stopIncrementalPolling()
+  cancelAllPageRequests()
 })
 </script>
 

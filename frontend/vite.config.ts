@@ -2,26 +2,56 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
+function getPackageChunkName(id: string): string | null {
+  if (!id.includes('node_modules')) return null
+
+  const normalized = id.split('node_modules/').pop()
+  if (!normalized) return 'vendor'
+
+  const segments = normalized.split('/')
+  const packageName = segments[0] === '.pnpm'
+    ? segments[1]?.split('@').slice(0, -1).join('@') || 'vendor'
+    : segments[0]?.startsWith('@')
+      ? `${segments[0]}/${segments[1]}`
+      : segments[0]
+
+  return packageName
+    .replace(/^@/, '')
+    .replace(/[\\/]/g, '-')
+    .replace(/[^a-zA-Z0-9-_]/g, '-')
+}
+
 export default defineConfig({
   plugins: [vue()],
+  css: {
+    preprocessorOptions: {
+      scss: {
+        api: 'modern-compiler',
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
   build: {
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return
 
-          if (id.includes('echarts')) return 'vendor-echarts'
-          if (id.includes('element-plus') || id.includes('@element-plus')) return 'vendor-element-plus'
-          if (id.includes('vue-router')) return 'vendor-router'
-          if (id.includes('pinia')) return 'vendor-pinia'
-          if (id.includes('axios')) return 'vendor-axios'
+          const packageName = getPackageChunkName(id)
+          if (!packageName) return
 
-          return 'vendor'
+          if (packageName.startsWith('element-plus')) return `vendor-element-plus-${packageName}`
+          if (packageName.startsWith('lodash-unified')) return 'vendor-element-plus-element-plus'
+          if (packageName.startsWith('echarts') || packageName.startsWith('zrender')) return `vendor-echarts-${packageName}`
+          if (packageName.startsWith('vue') || packageName.startsWith('pinia')) return 'vendor-vue-core'
+          if (packageName.startsWith('axios')) return `vendor-axios-${packageName}`
+
+          return `vendor-${packageName}`
         },
       },
     },

@@ -5,10 +5,11 @@ Tasks API
 """
 import os
 import platform
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -19,6 +20,8 @@ from app.services.tushare_service import TushareService
 from app.schemas import (
     DataStatusResponse,
     TaskAlertItem,
+    TaskDiagnosticCheck,
+    TaskDiagnosticsResponse,
     TaskEnvironmentResponse,
     TaskEnvironmentSection,
     TaskItem,
@@ -44,6 +47,52 @@ def _ensure_tushare_ready() -> None:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
 
 
+def _build_environment_sections(tushare_service: TushareService) -> list[TaskEnvironmentSection]:
+    data_status = tushare_service.check_data_status()
+    return [
+        TaskEnvironmentSection(
+            key="service",
+            label="服务信息",
+            items={
+                "app_name": settings.app_name,
+                "debug": settings.debug,
+                "host": settings.host,
+                "port": settings.port,
+                "python_version": platform.python_version(),
+                "platform": platform.platform(),
+                "timezone": os.environ.get("TZ", "system-default"),
+            },
+        ),
+        TaskEnvironmentSection(
+            key="paths",
+            label="运行路径",
+            items={
+                "data_dir": str(settings.data_dir),
+                "db_dir": str(settings.db_dir),
+                "raw_data_dir": str(settings.raw_data_dir),
+                "review_dir": str(settings.review_dir),
+                "logs_dir": str(settings.logs_dir),
+            },
+        ),
+        TaskEnvironmentSection(
+            key="integrations",
+            label="外部依赖",
+            items={
+                "tushare_configured": bool(settings.tushare_token),
+                "zhipuai_configured": bool(settings.zhipuai_api_key),
+                "dashscope_configured": bool(settings.dashscope_api_key),
+                "gemini_configured": bool(settings.gemini_api_key),
+                "default_reviewer": settings.default_reviewer,
+            },
+        ),
+        TaskEnvironmentSection(
+            key="data_status",
+            label="数据状态",
+            items=data_status,
+        ),
+    ]
+
+
 @router.get("/status", response_model=DataStatusResponse)
 async def get_data_status() -> DataStatusResponse:
     """获取数据更新状态"""
@@ -63,10 +112,18 @@ async def get_data_status() -> DataStatusResponse:
 @router.post("/start", response_model=TaskResponse)
 async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db)) -> TaskResponse:
     """启动全量更新"""
-    _ensure_tushare_ready()
     # 导入 manager 实例
     from app.main import manager
     task_service = TaskService(db, manager=manager)
+
+    existing_task = task_service.get_active_full_task()
+    if existing_task:
+        return TaskResponse(
+            task=TaskItem.model_validate(existing_task, from_attributes=True),
+            ws_url=f"/ws/tasks/{existing_task.id}",
+        )
+
+    _ensure_tushare_ready()
 
     result = await task_service.create_task(
         "full_update",
@@ -286,50 +343,108 @@ async def get_running_tasks(db: Session = Depends(get_db)) -> TaskRunningRespons
 @router.get("/environment", response_model=TaskEnvironmentResponse)
 async def get_task_environment(db: Session = Depends(get_db)) -> TaskEnvironmentResponse:
     tushare_service = TushareService()
+    return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service))
+
+
+@router.get("/diagnostics", response_model=TaskDiagnosticsResponse)
+async def get_task_diagnostics(db: Session = Depends(get_db)) -> TaskDiagnosticsResponse:
+    tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
-    sections = [
-        TaskEnvironmentSection(
-            key="service",
-            label="服务信息",
-            items={
-                "app_name": settings.app_name,
-                "debug": settings.debug,
-                "host": settings.host,
-                "port": settings.port,
-                "python_version": platform.python_version(),
-                "platform": platform.platform(),
-                "timezone": os.environ.get("TZ", "system-default"),
-            },
+    environment = _build_environment_sections(tushare_service)
+
+    running_tasks = (
+        db.query(Task)
+        .filter(Task.status.in_(["pending", "running"]))
+        .order_by(Task.created_at.desc())
+        .all()
+    )
+    latest_failed = (
+        db.query(Task)
+        .filter(Task.status == "failed")
+        .order_by(Task.completed_at.desc(), Task.id.desc())
+        .first()
+    )
+    latest_completed = (
+        db.query(Task)
+        .filter(Task.status == "completed")
+        .order_by(Task.completed_at.desc(), Task.id.desc())
+        .first()
+    )
+
+    db_access_ok = True
+    db_access_error = ""
+    try:
+        db.execute(select(func.count(Task.id)))
+    except Exception as exc:
+        db_access_ok = False
+        db_access_error = str(exc)
+
+    db_dir = settings.db_dir
+    db_dir_writable = os.access(db_dir, os.W_OK) if db_dir.exists() else False
+    data_ready = all(bool(data_status[key].get("exists")) for key in ["raw_data", "candidates", "analysis"])
+
+    checks = [
+        TaskDiagnosticCheck(
+            key="backend",
+            label="后端服务",
+            status="success",
+            summary=f"接口可访问，运行于 {platform.python_version()} / {platform.system()}。",
         ),
-        TaskEnvironmentSection(
-            key="paths",
-            label="运行路径",
-            items={
-                "data_dir": str(settings.data_dir),
-                "db_dir": str(settings.db_dir),
-                "raw_data_dir": str(settings.raw_data_dir),
-                "review_dir": str(settings.review_dir),
-                "logs_dir": str(settings.logs_dir),
-            },
+        TaskDiagnosticCheck(
+            key="database",
+            label="数据库可用性",
+            status="success" if db_access_ok and db_dir_writable else "error",
+            summary=(
+                f"数据库目录可写：{db_dir}"
+                if db_access_ok and db_dir_writable
+                else f"数据库检查失败：{db_access_error or f'目录不可写 {db_dir}'}"
+            ),
+            action="请检查 data/db 目录权限，或确认当前进程拥有本地写入权限。",
         ),
-        TaskEnvironmentSection(
-            key="integrations",
-            label="外部依赖",
-            items={
-                "tushare_configured": bool(settings.tushare_token),
-                "zhipuai_configured": bool(settings.zhipuai_api_key),
-                "dashscope_configured": bool(settings.dashscope_api_key),
-                "gemini_configured": bool(settings.gemini_api_key),
-                "default_reviewer": settings.default_reviewer,
-            },
+        TaskDiagnosticCheck(
+            key="tushare",
+            label="Tushare 配置",
+            status="success" if settings.tushare_token else "warning",
+            summary="已检测到 Tushare Token，可继续验证。"
+            if settings.tushare_token
+            else "尚未配置 Tushare Token，首次初始化无法启动。",
+            action="前往配置页填写并验证 Tushare Token。",
         ),
-        TaskEnvironmentSection(
-            key="data_status",
-            label="数据状态",
-            items=data_status,
+        TaskDiagnosticCheck(
+            key="initialization",
+            label="首次初始化",
+            status="success" if data_ready else ("warning" if running_tasks else "info"),
+            summary=(
+                "原始数据、候选结果和分析结果均已就绪。"
+                if data_ready
+                else f"当前缺少：{', '.join([name for key, name in [('raw_data', '原始数据'), ('candidates', '候选结果'), ('analysis', '分析结果')] if not data_status[key].get('exists')])}"
+            ),
+            action="去任务中心继续初始化或查看失败日志。" if not data_ready else "可以直接进入业务页面使用。",
+        ),
+        TaskDiagnosticCheck(
+            key="task_recovery",
+            label="任务恢复",
+            status="warning" if latest_failed else ("info" if running_tasks else "success"),
+            summary=(
+                f"存在 {len(running_tasks)} 个运行中任务，可在任务中心恢复查看。"
+                if running_tasks
+                else f"最近一次失败任务 #{latest_failed.id} 可查看日志恢复。"
+                if latest_failed
+                else "当前没有运行中任务，也没有待处理失败任务。"
+            ),
+            action="任务中心支持查看日志、重新发起初始化和导出诊断信息。",
         ),
     ]
-    return TaskEnvironmentResponse(sections=sections)
+
+    return TaskDiagnosticsResponse(
+        generated_at=datetime.now().isoformat(),
+        checks=checks,
+        running_tasks=[TaskItem.model_validate(task, from_attributes=True) for task in running_tasks],
+        latest_failed_task=TaskItem.model_validate(latest_failed, from_attributes=True) if latest_failed else None,
+        latest_completed_task=TaskItem.model_validate(latest_completed, from_attributes=True) if latest_completed else None,
+        environment=environment,
+        data_status=data_status,
+    )
 
 
 @router.get("/", response_model=TaskListResponse)
@@ -342,7 +457,11 @@ async def get_tasks(
     query = db.query(Task)
 
     if status:
-        query = query.filter(Task.status == status)
+        status_values = [item.strip() for item in status.split(",") if item.strip()]
+        if len(status_values) == 1:
+            query = query.filter(Task.status == status_values[0])
+        elif status_values:
+            query = query.filter(Task.status.in_(status_values))
 
     # 先获取总数（在应用limit之前）
     total = query.count()

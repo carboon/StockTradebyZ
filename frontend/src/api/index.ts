@@ -16,6 +16,7 @@ import type {
   SaveEnvResponse,
   StockInfo,
   Task,
+  TaskDiagnosticsResponse,
   TaskEnvironmentResponse,
   TaskListResponse,
   TaskLogListResponse,
@@ -33,11 +34,28 @@ import type {
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
+type RequestOptions = {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+const TIMEOUTS = {
+  short: 10000,
+  standard: 20000,
+  long: 45000,
+}
+
+function withRequestOptions(options: RequestOptions | undefined, timeoutMs: number) {
+  return {
+    ...options,
+    timeout: options?.timeoutMs ?? timeoutMs,
+  }
+}
 
 // 创建 axios 实例
 const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: TIMEOUTS.standard,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -59,10 +77,20 @@ api.interceptors.response.use(
     return response.data
   },
   (error: AxiosError<{ message?: string; detail?: string }>) => {
+    if (error.code === 'ERR_CANCELED' || axios.isCancel(error)) {
+      return Promise.reject(error)
+    }
+    if (error.code === 'ECONNABORTED') {
+      return Promise.reject(new Error('请求超时。若你刚启动了初始化或分析任务，它可能仍在后台运行，请前往任务中心继续查看。'))
+    }
     const message = error.response?.data?.detail || error.response?.data?.message || error.message || '请求失败'
     return Promise.reject(new Error(message))
   }
 )
+
+export function isRequestCanceled(error: unknown): boolean {
+  return axios.isCancel(error) || (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_CANCELED')
+}
 
 // API 方法
 export const apiConfig = {
@@ -84,49 +112,60 @@ export const apiConfig = {
 
 export const apiStock = {
   // 获取股票信息
-  getInfo: (code: string) => api.get<never, StockInfo>(`/v1/stock/${code}`),
+  getInfo: (code: string, options?: RequestOptions) => api.get<never, StockInfo>(`/v1/stock/${code}`, withRequestOptions(options, TIMEOUTS.short)),
 
   // 获取 K线数据
-  getKline: (code: string, days: number = 120, includeWeekly: boolean = true) =>
-    api.post<{ code: string; days: number; include_weekly: boolean }, KLineData>('/v1/stock/kline', { code, days, include_weekly: includeWeekly }),
+  getKline: (code: string, days: number = 120, includeWeekly: boolean = true, options?: RequestOptions) =>
+    api.post<{ code: string; days: number; include_weekly: boolean }, KLineData>(
+      '/v1/stock/kline',
+      { code, days, include_weekly: includeWeekly },
+      withRequestOptions(options, TIMEOUTS.long),
+    ),
 }
 
 export const apiAnalysis = {
   // 获取明日之星数据新鲜度
-  getFreshness: () => api.get<never, FreshnessResponse>('/v1/analysis/tomorrow-star/freshness'),
+  getFreshness: (options?: RequestOptions) => api.get<never, FreshnessResponse>('/v1/analysis/tomorrow-star/freshness', withRequestOptions(options, TIMEOUTS.short)),
 
   // 获取明日之星历史日期
-  getDates: () => api.get<never, TomorrowStarDatesResponse>('/v1/analysis/tomorrow-star/dates'),
+  getDates: (options?: RequestOptions) => api.get<never, TomorrowStarDatesResponse>('/v1/analysis/tomorrow-star/dates', withRequestOptions(options, TIMEOUTS.short)),
 
   // 获取候选列表
-  getCandidates: (date?: string) => api.get<never, CandidatesResponse>('/v1/analysis/tomorrow-star/candidates', { params: { date } }),
+  getCandidates: (date?: string, options?: RequestOptions) =>
+    api.get<never, CandidatesResponse>('/v1/analysis/tomorrow-star/candidates', { ...withRequestOptions(options, TIMEOUTS.standard), params: { date } }),
 
   // 获取分析结果
-  getResults: (date?: string) => api.get<never, AnalysisResultsResponse>('/v1/analysis/tomorrow-star/results', { params: { date } }),
+  getResults: (date?: string, options?: RequestOptions) =>
+    api.get<never, AnalysisResultsResponse>('/v1/analysis/tomorrow-star/results', { ...withRequestOptions(options, TIMEOUTS.standard), params: { date } }),
 
   // 生成明日之星
   generate: (reviewer: string = 'quant') =>
     api.post<null, { task_id: number }>('/v1/analysis/tomorrow-star/generate', null, { params: { reviewer } }),
 
   // 获取单股诊断历史
-  getDiagnosisHistory: (code: string, days: number = 30) =>
-    api.get<never, DiagnosisHistoryResponse>(`/v1/analysis/diagnosis/${code}/history`, { params: { days } }),
+  getDiagnosisHistory: (code: string, days: number = 30, options?: RequestOptions) =>
+    api.get<never, DiagnosisHistoryResponse>(`/v1/analysis/diagnosis/${code}/history`, { ...withRequestOptions(options, TIMEOUTS.long), params: { days } }),
 
   // 获取历史数据生成状态
-  getHistoryStatus: (code: string) =>
-    api.get<never, DiagnosisHistoryStatusResponse>(`/v1/analysis/diagnosis/${code}/history-status`),
+  getHistoryStatus: (code: string, options?: RequestOptions) =>
+    api.get<never, DiagnosisHistoryStatusResponse>(`/v1/analysis/diagnosis/${code}/history-status`, withRequestOptions(options, TIMEOUTS.short)),
 
   // 重新刷新单股诊断历史数据
-  refreshHistory: (code: string, days: number = 30) =>
-    api.post<null, { status: string; message: string; code: string; days: number }>(`/v1/analysis/diagnosis/${code}/generate-history`, null, { params: { days, clean: true } }),
+  refreshHistory: (code: string, days: number = 30, options?: RequestOptions) =>
+    api.post<null, { status: string; message: string; code: string; days: number }>(
+      `/v1/analysis/diagnosis/${code}/generate-history`,
+      null,
+      { ...withRequestOptions(options, TIMEOUTS.long), params: { days, clean: true } },
+    ),
 
   // 启动单股分析
-  analyze: (code: string) => api.post<{ code: string }, DiagnosisAnalyzeResponse>('/v1/analysis/diagnosis/analyze', { code }),
+  analyze: (code: string, options?: RequestOptions) =>
+    api.post<{ code: string }, DiagnosisAnalyzeResponse>('/v1/analysis/diagnosis/analyze', { code }, withRequestOptions(options, TIMEOUTS.long)),
 }
 
 export const apiWatchlist = {
   // 获取观察列表
-  getAll: () => api.get<never, WatchlistResponse>('/v1/watchlist/'),
+  getAll: (options?: RequestOptions) => api.get<never, WatchlistResponse>('/v1/watchlist/', withRequestOptions(options, TIMEOUTS.standard)),
 
   // 添加到观察列表
   add: (code: string, reason?: string, priority: number = 0, entry_price?: number, position_ratio?: number) =>
@@ -139,54 +178,57 @@ export const apiWatchlist = {
   delete: (id: number) => api.delete<never, { status: string; message: string }>(`/v1/watchlist/${id}`),
 
   // 获取观察项分析历史
-  getAnalysis: (id: number) => api.get<never, WatchlistAnalysisResponse>(`/v1/watchlist/${id}/analysis`),
+  getAnalysis: (id: number, options?: RequestOptions) => api.get<never, WatchlistAnalysisResponse>(`/v1/watchlist/${id}/analysis`, withRequestOptions(options, TIMEOUTS.standard)),
 
   // 立即分析观察项
-  analyze: (id: number) => api.post<null, WatchlistAnalyzeResponse>(`/v1/watchlist/${id}/analyze`),
+  analyze: (id: number, options?: RequestOptions) => api.post<null, WatchlistAnalyzeResponse>(`/v1/watchlist/${id}/analyze`, null, withRequestOptions(options, TIMEOUTS.long)),
 
   // 获取观察项图表数据
-  getChart: (id: number) => api.get<never, WatchlistChartResponse>(`/v1/watchlist/${id}/chart`),
+  getChart: (id: number, options?: RequestOptions) => api.get<never, WatchlistChartResponse>(`/v1/watchlist/${id}/chart`, withRequestOptions(options, TIMEOUTS.long)),
 }
 
 export const apiTasks = {
   // 获取任务总览
-  getOverview: () => api.get<never, TaskOverviewResponse>('/v1/tasks/overview'),
+  getOverview: () => api.get<never, TaskOverviewResponse>('/v1/tasks/overview', { timeout: TIMEOUTS.short }),
 
   // 获取运行中任务
-  getRunning: () => api.get<never, TaskRunningResponse>('/v1/tasks/running'),
+  getRunning: () => api.get<never, TaskRunningResponse>('/v1/tasks/running', { timeout: TIMEOUTS.short }),
 
   // 获取环境信息
-  getEnvironment: () => api.get<never, TaskEnvironmentResponse>('/v1/tasks/environment'),
+  getEnvironment: () => api.get<never, TaskEnvironmentResponse>('/v1/tasks/environment', { timeout: TIMEOUTS.short }),
+
+  // 获取本机诊断快照
+  getDiagnostics: () => api.get<never, TaskDiagnosticsResponse>('/v1/tasks/diagnostics', { timeout: TIMEOUTS.short }),
 
   // 获取数据状态
-  getStatus: () => api.get<never, DataStatus>('/v1/tasks/status'),
+  getStatus: () => api.get<never, DataStatus>('/v1/tasks/status', { timeout: TIMEOUTS.short }),
 
   // 启动更新
   startUpdate: (reviewer: string = 'quant', skipFetch: boolean = false, startFrom: number = 1) =>
-    api.post<{ reviewer: string; skip_fetch: boolean; start_from: number }, TaskResponse>('/v1/tasks/start', { reviewer, skip_fetch: skipFetch, start_from: startFrom }),
+    api.post<{ reviewer: string; skip_fetch: boolean; start_from: number }, TaskResponse>('/v1/tasks/start', { reviewer, skip_fetch: skipFetch, start_from: startFrom }, { timeout: TIMEOUTS.short }),
 
   // 启动增量更新
   startIncrementalUpdate: (endDate?: string) =>
     api.post<null, IncrementalUpdateResponse>('/v1/tasks/start-incremental', null, { params: { end_date: endDate } }),
 
   // 获取增量更新状态
-  getIncrementalStatus: () => api.get<never, IncrementalUpdateStatus>('/v1/tasks/incremental-status'),
+  getIncrementalStatus: (options?: RequestOptions) => api.get<never, IncrementalUpdateStatus>('/v1/tasks/incremental-status', withRequestOptions(options, TIMEOUTS.short)),
 
   // 获取任务列表
   getAll: (status?: string, limit: number = 20) =>
-    api.get<never, TaskListResponse>('/v1/tasks/', { params: { status, limit } }),
+    api.get<never, TaskListResponse>('/v1/tasks/', { params: { status, limit }, timeout: TIMEOUTS.short }),
 
   // 获取任务详情
-  get: (id: number) => api.get<never, Task>(`/v1/tasks/${id}`),
+  get: (id: number) => api.get<never, Task>(`/v1/tasks/${id}`, { timeout: TIMEOUTS.short }),
 
   // 获取任务日志
-  getLogs: (id: number, limit: number = 300) => api.get<never, TaskLogListResponse>(`/v1/tasks/${id}/logs`, { params: { limit } }),
+  getLogs: (id: number, limit: number = 300) => api.get<never, TaskLogListResponse>(`/v1/tasks/${id}/logs`, { params: { limit }, timeout: TIMEOUTS.standard }),
 
   // 取消任务
-  cancel: (id: number) => api.post<null, { status: string; message: string }>(`/v1/tasks/${id}/cancel`),
+  cancel: (id: number) => api.post<null, { status: string; message: string }>(`/v1/tasks/${id}/cancel`, null, { timeout: TIMEOUTS.short }),
 
   // 清空历史任务
-  clearTasks: () => api.delete<never, { status: string; message: string }>('/v1/tasks/clear'),
+  clearTasks: () => api.delete<never, { status: string; message: string }>('/v1/tasks/clear', { timeout: TIMEOUTS.short }),
 }
 
 export default api

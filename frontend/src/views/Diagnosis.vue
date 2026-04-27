@@ -268,36 +268,20 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
-import { apiAnalysis, apiStock, apiWatchlist } from '@/api'
+import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
-import { BarChart, CandlestickChart, LineChart } from 'echarts/charts'
-import {
-  DataZoomComponent,
-  GridComponent,
-  LegendComponent,
-  TooltipComponent,
-} from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
-import { use, init, type ECharts, type EChartsCoreOption } from 'echarts/core'
+import type { ECharts, EChartsCoreOption } from 'echarts/core'
 import type { B1Check, DiagnosisAnalysisDetails, KLineData, WatchlistItem } from '@/types'
 import { useConfigStore } from '@/store/config'
-
-use([
-  BarChart,
-  CandlestickChart,
-  LineChart,
-  TooltipComponent,
-  LegendComponent,
-  GridComponent,
-  DataZoomComponent,
-  CanvasRenderer,
-])
 
 const route = useRoute()
 const router = useRouter()
 const configStore = useConfigStore()
 const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state'
+const DIAGNOSIS_CHART_CACHE_KEY = 'stocktrade:diagnosis:chart-cache'
+const DIAGNOSIS_CHART_CACHE_TTL_MS = 30 * 60 * 1000
 const AUTO_HISTORY_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+const DIAGNOSIS_INITIAL_CHART_DAYS = 60
 
 const searchForm = ref({ code: '' })
 const stockCode = ref('')
@@ -381,6 +365,38 @@ const emptyDescription = computed(() => {
 })
 
 let chartInstance: ECharts | null = null
+let chartRuntimePromise: Promise<{ init: (dom: HTMLElement, theme?: string | object, opts?: object) => ECharts }> | null = null
+const diagnosisChartCache = new Map<string, KLineData>()
+const diagnosisChartCacheDays = new Map<string, number>()
+const requestControllers = new Map<string, AbortController>()
+let searchSequence = 0
+
+function beginRequest(key: string): AbortSignal {
+  requestControllers.get(key)?.abort()
+  const controller = new AbortController()
+  requestControllers.set(key, controller)
+  return controller.signal
+}
+
+function finishRequest(key: string, signal?: AbortSignal) {
+  const controller = requestControllers.get(key)
+  if (controller && (!signal || controller.signal === signal)) {
+    requestControllers.delete(key)
+  }
+}
+
+function cancelRequest(key: string) {
+  const controller = requestControllers.get(key)
+  if (controller) {
+    controller.abort()
+    requestControllers.delete(key)
+  }
+}
+
+function cancelDiagnosisPageRequests() {
+  requestControllers.forEach((controller) => controller.abort())
+  requestControllers.clear()
+}
 
 onMounted(() => {
   configStore.checkTushareStatus()
@@ -415,14 +431,18 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+  searchSequence += 1
   if (pollingTimer) {
     clearInterval(pollingTimer)
     pollingTimer = null
   }
+  cancelDiagnosisPageRequests()
   refreshingHistory.value = false
+  analyzing.value = false
 })
 
 onUnmounted(() => {
+  searchSequence += 1
   if (chartInstance) {
     chartInstance.dispose()
   }
@@ -431,13 +451,14 @@ onUnmounted(() => {
     clearInterval(pollingTimer)
     pollingTimer = null
   }
+  cancelDiagnosisPageRequests()
 })
 
 function handleResize() {
   chartInstance?.resize()
 }
 
-async function searchStock() {
+async function searchStock(requestId: number) {
   if (!configStore.tushareReady) {
     ElMessage.warning('请先完成 Tushare 配置')
     return
@@ -449,21 +470,35 @@ async function searchStock() {
     return
   }
 
+  cancelRequest('stockInfo')
+  cancelRequest('watchlistStatus')
+  cancelRequest('kline')
+  cancelRequest('klineExtended')
+  cancelRequest('historyLoad')
+  cancelRequest('historyRefresh')
+  cancelRequest('historyStatus')
+  cancelRequest('analyze')
   stockCode.value = code.padStart(6, '0')
   analysisResult.value = null
 
   await loadStockInfo()
+  if (requestId !== searchSequence) return
   await loadWatchlistStatus()
+  if (requestId !== searchSequence) return
   // 加载 K线数据
   await loadKlineData()
+  if (requestId !== searchSequence) return
 
   // 加载历史检查记录
   await loadHistoryData()
+  if (requestId !== searchSequence) return
   persistDiagnosisState()
   await maybeAutoRefreshHistory()
 }
 
 async function searchAndAnalyze() {
+  const requestId = ++searchSequence
+
   // 如果状态还没加载过，先加载一次
   if (!configStore.tushareStatus) {
     await configStore.checkTushareStatus()
@@ -475,7 +510,8 @@ async function searchAndAnalyze() {
     return
   }
 
-  await searchStock()
+  await searchStock(requestId)
+  if (requestId !== searchSequence) return
 
   // 自动开始分析
   if (stockCode.value) {
@@ -486,24 +522,32 @@ async function searchAndAnalyze() {
 async function loadStockInfo() {
   if (!stockCode.value) return
 
+  const signal = beginRequest('stockInfo')
   try {
-    const data = await apiStock.getInfo(stockCode.value)
+    const data = await apiStock.getInfo(stockCode.value, { signal })
     stockName.value = data.name || ''
     persistDiagnosisState()
-  } catch {
+  } catch (error) {
+    if (isRequestCanceled(error)) return
     stockName.value = ''
+  } finally {
+    finishRequest('stockInfo', signal)
   }
 }
 
 async function loadWatchlistStatus() {
   if (!stockCode.value) return
 
+  const signal = beginRequest('watchlistStatus')
   try {
-    const data = await apiWatchlist.getAll()
+    const data = await apiWatchlist.getAll({ signal })
     const items = data.items || []
     isInWatchlist.value = items.some((item: WatchlistItem) => item.code === stockCode.value)
-  } catch {
+  } catch (error) {
+    if (isRequestCanceled(error)) return
     isInWatchlist.value = false
+  } finally {
+    finishRequest('watchlistStatus', signal)
   }
   persistDiagnosisState()
 }
@@ -517,8 +561,9 @@ async function triggerHistoryRefresh(silent: boolean = false) {
 
   refreshingHistory.value = true
 
+  const signal = beginRequest('historyRefresh')
   try {
-    await apiAnalysis.refreshHistory(stockCode.value, 30)
+    await apiAnalysis.refreshHistory(stockCode.value, 30, { signal })
     lastAutoHistoryRefreshAt.value[stockCode.value] = Date.now()
     persistDiagnosisState()
     startPollingHistory(silent)
@@ -527,10 +572,13 @@ async function triggerHistoryRefresh(silent: boolean = false) {
       ElMessage.info('开始刷新历史数据，请稍候...')
     }
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     if (!silent) {
       ElMessage.error('刷新历史数据失败: ' + error.message)
     }
     refreshingHistory.value = false
+  } finally {
+    finishRequest('historyRefresh', signal)
   }
 }
 
@@ -559,8 +607,12 @@ function startPollingHistory(silent: boolean = false) {
 
   // 每2秒轮询一次
   pollingTimer = setInterval(async () => {
+    const currentCode = stockCode.value
+    if (!currentCode) return
+
+    const signal = beginRequest('historyStatus')
     try {
-      const status = await apiAnalysis.getHistoryStatus(stockCode.value)
+      const status = await apiAnalysis.getHistoryStatus(currentCode, { signal })
 
       // 加载最新数据
       await loadHistoryData()
@@ -575,7 +627,10 @@ function startPollingHistory(silent: boolean = false) {
         }
       }
     } catch (error) {
+      if (isRequestCanceled(error)) return
       // 忽略轮询错误
+    } finally {
+      finishRequest('historyStatus', signal)
     }
   }, 2000)
 }
@@ -591,26 +646,53 @@ function stopPollingHistory() {
 async function loadKlineData() {
   if (!stockCode.value) return
 
+  const requestedDays = chartDays.value
+  const signal = beginRequest('kline')
   try {
-    const data = await apiStock.getKline(stockCode.value, chartDays.value)
+    let data = diagnosisChartCache.get(stockCode.value)
+    let cachedDays = diagnosisChartCacheDays.get(stockCode.value) || 0
+
+    if (!data || cachedDays < Math.min(requestedDays, DIAGNOSIS_INITIAL_CHART_DAYS)) {
+      const persistent = loadDiagnosisChartCache(stockCode.value)
+      if (persistent) {
+        data = persistent.data
+        cachedDays = persistent.days
+        diagnosisChartCache.set(stockCode.value, persistent.data)
+        diagnosisChartCacheDays.set(stockCode.value, persistent.days)
+      }
+    }
+
+    const initialDays = requestedDays >= 120 ? DIAGNOSIS_INITIAL_CHART_DAYS : requestedDays
+    if (!data || cachedDays < initialDays) {
+      data = await apiStock.getKline(stockCode.value, initialDays, false, { signal })
+      cachedDays = initialDays
+      setDiagnosisChartCache(stockCode.value, data, initialDays)
+    }
+
     await nextTick()
-    renderChart(data)
+    await renderChart(data)
     // 确保图表在容器渲染完成后有正确的尺寸
     setTimeout(() => {
       chartInstance?.resize()
     }, 100)
     persistDiagnosisState()
+    queueDiagnosisFullChartRefresh(stockCode.value, requestedDays, cachedDays)
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load kline:', error)
     ElMessage.error('加载K线数据失败: ' + error.message)
+  } finally {
+    finishRequest('kline', signal)
   }
 }
 
-function renderChart(data: KLineData) {
+async function renderChart(data: KLineData) {
   if (!chartRef.value) return
 
+  const { init } = await loadDiagnosisChartRuntime()
+
   if (!chartInstance) {
-    chartInstance = init(chartRef.value, { renderer: 'canvas' })
+    chartInstance = init(chartRef.value, undefined, { renderer: 'canvas' })
   }
 
   const dates = data.daily.map((d) => d.date)
@@ -756,15 +838,69 @@ function renderChart(data: KLineData) {
   })
 }
 
+function queueDiagnosisFullChartRefresh(code: string, requestedDays: number, currentDays: number) {
+  if (requestedDays < 120 || currentDays >= requestedDays) return
+  if (stockCode.value !== code) return
+  void refreshDiagnosisFullChartInBackground(code, requestedDays)
+}
+
+async function refreshDiagnosisFullChartInBackground(code: string, requestedDays: number) {
+  const signal = beginRequest('klineExtended')
+  try {
+    const fullData = await apiStock.getKline(code, requestedDays, false, { signal, timeoutMs: 20000 })
+    if (stockCode.value !== code || chartDays.value !== requestedDays) return
+    setDiagnosisChartCache(code, fullData, requestedDays)
+    await renderChart(fullData)
+    persistDiagnosisState()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to extend diagnosis kline:', error)
+  } finally {
+    finishRequest('klineExtended', signal)
+  }
+}
+
+async function loadDiagnosisChartRuntime() {
+  if (!chartRuntimePromise) {
+    chartRuntimePromise = (async () => {
+      const [{ use, init }, charts, components, renderers] = await Promise.all([
+        import('echarts/core'),
+        import('echarts/charts'),
+        import('echarts/components'),
+        import('echarts/renderers'),
+      ])
+
+      use([
+        charts.BarChart,
+        charts.CandlestickChart,
+        charts.LineChart,
+        components.TooltipComponent,
+        components.LegendComponent,
+        components.GridComponent,
+        components.DataZoomComponent,
+        renderers.CanvasRenderer,
+      ])
+
+      return { init }
+    })()
+  }
+
+  return chartRuntimePromise
+}
+
 async function loadHistoryData() {
   if (!stockCode.value) return
 
+  const signal = beginRequest('historyLoad')
   try {
-    const data = await apiAnalysis.getDiagnosisHistory(stockCode.value, 30)
+    const data = await apiAnalysis.getDiagnosisHistory(stockCode.value, 30, { signal })
     historyData.value = (data.history || []).slice(0, 30) // 限制30天
     persistDiagnosisState()
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     console.error('Failed to load history:', error)
+  } finally {
+    finishRequest('historyLoad', signal)
   }
 }
 
@@ -775,9 +911,10 @@ async function analyzeStock() {
   }
   if (!stockCode.value) return
 
+  const signal = beginRequest('analyze')
   analyzing.value = true
   try {
-    const data = await apiAnalysis.analyze(stockCode.value)
+    const data = await apiAnalysis.analyze(stockCode.value, { signal })
     stockName.value = data.name || stockName.value
     const analysis: DiagnosisAnalysisDetails = data.analysis || {}
     analysisResult.value = {
@@ -807,8 +944,10 @@ async function analyzeStock() {
 
     ElMessage.success('分析完成')
   } catch (error: any) {
+    if (isRequestCanceled(error)) return
     ElMessage.error('分析失败: ' + error.message)
   } finally {
+    finishRequest('analyze', signal)
     analyzing.value = false
   }
 }
@@ -909,6 +1048,57 @@ function persistDiagnosisState() {
   }
 
   sessionStorage.setItem(DIAGNOSIS_STATE_KEY, JSON.stringify(state))
+}
+
+function loadDiagnosisChartCache(code: string): { code: string; days: number; cachedAt: number; data: KLineData } | null {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
+
+  const raw = window.localStorage.getItem(DIAGNOSIS_CHART_CACHE_KEY)
+  if (!raw) return null
+
+  try {
+    const cache = JSON.parse(raw) as Record<string, { code: string; days: number; cachedAt: number; data: KLineData }>
+    const entry = cache[code]
+    if (!entry) return null
+    if (!entry.cachedAt || Date.now() - entry.cachedAt > DIAGNOSIS_CHART_CACHE_TTL_MS) {
+      delete cache[code]
+      window.localStorage.setItem(DIAGNOSIS_CHART_CACHE_KEY, JSON.stringify(cache))
+      return null
+    }
+    return entry
+  } catch {
+    window.localStorage.removeItem(DIAGNOSIS_CHART_CACHE_KEY)
+    return null
+  }
+}
+
+function setDiagnosisChartCache(code: string, data: KLineData, days: number) {
+  diagnosisChartCache.set(code, data)
+  diagnosisChartCacheDays.set(code, days)
+
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
+
+  let cache: Record<string, { code: string; days: number; cachedAt: number; data: KLineData }> = {}
+  try {
+    cache = JSON.parse(window.localStorage.getItem(DIAGNOSIS_CHART_CACHE_KEY) || '{}')
+  } catch {
+    cache = {}
+  }
+
+  cache[code] = {
+    code,
+    days,
+    cachedAt: Date.now(),
+    data,
+  }
+
+  const trimmed = Object.values(cache)
+    .sort((a, b) => b.cachedAt - a.cachedAt)
+    .slice(0, 20)
+  window.localStorage.setItem(
+    DIAGNOSIS_CHART_CACHE_KEY,
+    JSON.stringify(Object.fromEntries(trimmed.map((entry) => [entry.code, entry])))
+  )
 }
 
 function restoreDiagnosisState() {

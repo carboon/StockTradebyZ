@@ -4,6 +4,21 @@
       <!-- 任务管理 -->
       <el-tab-pane label="任务管理" name="tasks">
         <div class="tab-content">
+          <el-card class="connectivity-card">
+            <div class="connectivity-card__row">
+              <div class="connectivity-card__status">
+                <span class="connectivity-card__label">任务推送</span>
+                <el-tag :type="socketStatusTagType" size="small">{{ socketStatusLabel }}</el-tag>
+              </div>
+              <div class="connectivity-card__actions">
+                <el-button size="small" @click="reconnectSocketsNow">立即重连</el-button>
+                <el-button size="small" :loading="diagnosticsLoading" @click="loadDiagnostics">刷新诊断</el-button>
+                <el-button size="small" @click="copyDiagnostics">复制诊断摘要</el-button>
+              </div>
+            </div>
+            <div class="connectivity-card__desc">{{ socketStatusDescription }}</div>
+          </el-card>
+
           <!-- 首次初始化引导 -->
           <el-card v-if="showBootstrap" class="bootstrap-card">
             <template #header>
@@ -17,6 +32,21 @@
 
             <div class="bootstrap-content">
               <p class="bootstrap-desc">{{ bootstrapDescription }}</p>
+
+              <div class="bootstrap-notes">
+                <div class="bootstrap-note">
+                  <span class="bootstrap-note-label">预计耗时</span>
+                  <span class="bootstrap-note-value">首次全量初始化通常需要数分钟到十几分钟，期间页面可刷新。</span>
+                </div>
+                <div class="bootstrap-note">
+                  <span class="bootstrap-note-label">刷新恢复</span>
+                  <span class="bootstrap-note-value">页面会优先恢复你刚才查看的初始化任务和日志视图。</span>
+                </div>
+                <div class="bootstrap-note">
+                  <span class="bootstrap-note-label">功能限制</span>
+                  <span class="bootstrap-note-value">在原始数据、候选结果和分析结果都齐备前，业务页仍可能继续提示未完成初始化。</span>
+                </div>
+              </div>
 
               <div class="bootstrap-steps">
                 <div
@@ -42,11 +72,89 @@
                 >
                   {{ bootstrapButtonText }}
                 </el-button>
+                <el-button
+                  v-if="initializationRunningTask"
+                  @click="focusTask(initializationRunningTask, 'logs')"
+                >
+                  继续查看当前任务
+                </el-button>
+                <el-button
+                  v-if="showRetryBootstrap"
+                  @click="retryBootstrap"
+                >
+                  重新发起初始化
+                </el-button>
+                <el-button
+                  v-if="selectedRecoveryTask"
+                  text
+                  type="primary"
+                  @click="focusTask(selectedRecoveryTask, 'logs')"
+                >
+                  查看失败详情
+                </el-button>
+                <el-button
+                  v-if="!configStore.tushareReady || !configStore.apiAvailable"
+                  text
+                  type="primary"
+                  @click="goToConfig"
+                >
+                  去配置页处理
+                </el-button>
+                <el-button :icon="Refresh" @click="reloadTasks">刷新状态</el-button>
               </div>
+
+              <el-alert
+                v-if="recoveryAlert"
+                :title="recoveryAlert.title"
+                :description="recoveryAlert.description"
+                :type="recoveryAlert.type"
+                show-icon
+                :closable="false"
+              />
+              <el-alert
+                v-if="stalledBootstrapAlert"
+                :title="stalledBootstrapAlert.title"
+                :description="stalledBootstrapAlert.description"
+                type="warning"
+                show-icon
+                :closable="false"
+              />
             </div>
           </el-card>
 
-          <!-- 操作按钮 -->
+          <el-card class="diagnostics-card">
+            <template #header>
+              <div class="card-header">
+                <span>本机诊断</span>
+                <span class="diagnostics-generated-at">{{ diagnosticsGeneratedAt }}</span>
+              </div>
+            </template>
+
+            <el-collapse v-model="diagnosticsPanels" class="diagnostics-collapse">
+              <el-collapse-item name="diagnostics">
+                <template #title>
+                  <span class="collapse-title">展开本机诊断详情</span>
+                </template>
+
+                <div v-if="diagnosticChecks.length > 0" class="diagnostics-list">
+                  <div
+                    v-for="check in diagnosticChecks"
+                    :key="check.key"
+                    class="diagnostic-item"
+                  >
+                    <div class="diagnostic-item__header">
+                      <span class="diagnostic-item__title">{{ check.label }}</span>
+                      <el-tag :type="getStatusType(check.status)" size="small">{{ getCheckStatusLabel(check.status) }}</el-tag>
+                    </div>
+                    <div class="diagnostic-item__summary">{{ check.summary }}</div>
+                    <div v-if="check.action" class="diagnostic-item__action">{{ check.action }}</div>
+                  </div>
+                </div>
+                <el-empty v-else description="诊断信息暂不可用" :image-size="60" />
+              </el-collapse-item>
+            </el-collapse>
+          </el-card>
+
           <el-card v-if="bootstrapFinished" class="action-card">
             <div class="action-buttons">
               <el-button
@@ -165,7 +273,7 @@
                 <el-icon><Document /></el-icon>
                 <p>{{ selectedTask ? '该任务暂无日志' : '请选择任务查看日志，或切换到"全部日志"' }}</p>
               </div>
-              <div v-for="log in filteredLogs" :key="log.id || log.key" class="log-line" :class="`log-${log.level}`">
+              <div v-for="(log, index) in filteredLogs" :key="log.id || `${log.task_id}-${index}`" class="log-line" :class="`log-${log.level}`">
                 <span class="log-time">{{ formatLogTime(log.log_time) }}</span>
                 <span class="log-level">{{ log.level?.toUpperCase() }}</span>
                 <span class="log-message">{{ log.message }}</span>
@@ -300,6 +408,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import {
   Refresh,
   Loading,
@@ -309,20 +418,34 @@ import {
 } from '@element-plus/icons-vue'
 import { apiTasks } from '@/api'
 import { useConfigStore } from '@/store/config'
-import type { Task, TaskLogItem, DataStatus } from '@/types'
+import { useNoticeStore } from '@/store/notice'
+import type { Task, TaskDiagnosticCheck, TaskDiagnosticsResponse, TaskLogItem } from '@/types'
+import { loadInitTaskViewState, saveInitTaskViewState, clearInitTaskViewState } from '@/utils/initTaskViewState'
 
 const configStore = useConfigStore()
+const noticeStore = useNoticeStore()
+const router = useRouter()
 
 // Tab状态
-const activeTab = ref('tasks')
+const activeTab = ref<'tasks' | 'logs' | 'status'>('tasks')
 const logFilter = ref<'all' | 'task'>('task')
 const autoScroll = ref(true)
+const diagnosticsPanels = ref<string[]>([])
 
 // 数据状态
+function createEmptyDataStatus() {
+  return {
+    rawData: { exists: false, count: 0, latestDate: '' },
+    candidates: { exists: false, count: 0, latestDate: '' },
+    analysis: { exists: false, count: 0, latestDate: '' },
+    kline: { exists: false, count: 0, latestDate: '' },
+    dbSize: '-',
+    environment: [] as Array<{ key: string; label: string; items: Record<string, any> }>,
+  }
+}
+
 const dataStatus = ref({
-  rawData: { exists: false, count: 0, latestDate: '' },
-  dbSize: '-',
-  environment: [] as Array<{ key: string; label: string; items: Record<string, any> }>,
+  ...createEmptyDataStatus(),
 })
 
 // 任务状态
@@ -341,55 +464,125 @@ const bootstrapStarting = ref(false)
 const startingUpdate = ref(false)
 const startingFullUpdate = ref(false)
 const checkingData = ref(false)
-const cleaningCache = ref(false)
+const diagnosticsLoading = ref(false)
+const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
 
 // WebSocket
 let ws: WebSocket | null = null
 let opsWs: WebSocket | null = null
+type SocketState = 'connected' | 'reconnecting' | 'polling' | 'disconnected'
+const opsSocketState = ref<SocketState>('disconnected')
+const taskSocketState = ref<SocketState>('disconnected')
+const socketReconnectAttempts = ref(0)
+let opsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+let taskReconnectTimer: ReturnType<typeof setTimeout> | null = null
+let lastTaskSocketId: number | null = null
 
 // 计算属性
 const runningTasksCount = computed(() => runningTasks.value.length)
+const initializationRunningTask = computed(() => runningTasks.value.find((task) => isBootstrapTask(task)) || null)
+const latestFailedBootstrapTask = computed(() => {
+  if (bootstrapFinished.value) return null
+  return historyTasks.value.find((task) => isBootstrapTask(task) && task.status === 'failed') || null
+})
+const selectedRecoveryTask = computed(() => selectedTask.value || initializationRunningTask.value || latestFailedBootstrapTask.value)
+const bootstrapInProgress = computed(() => bootstrapStarting.value || Boolean(initializationRunningTask.value))
 
 const bootstrapFinished = computed(() => {
-  return dataLoaded.value && dataStatus.value.rawData.exists
+  return dataLoaded.value
+    && dataStatus.value.rawData.exists
+    && dataStatus.value.candidates.exists
+    && dataStatus.value.analysis.exists
 })
 
 const showBootstrap = computed(() => {
-  return dataLoaded.value && !dataStatus.value.rawData.exists
+  return dataLoaded.value && !configStore.dataInitialized
 })
 
 const bootstrapStatusLabel = computed(() => {
   if (bootstrapFinished.value) return '已完成'
-  if (bootstrapStarting.value) return '进行中'
+  if (bootstrapInProgress.value) return '进行中'
+  if (!configStore.apiAvailable) return '服务异常'
+  if (latestFailedBootstrapTask.value) return '可恢复'
   if (!configStore.tushareReady) return '待配置'
   return '待执行'
 })
 
 const bootstrapStatusTagType = computed(() => {
   if (bootstrapFinished.value) return 'success'
-  if (bootstrapStarting.value) return 'warning'
+  if (bootstrapInProgress.value) return 'warning'
+  if (!configStore.apiAvailable || latestFailedBootstrapTask.value) return 'danger'
   if (!configStore.tushareReady) return 'info'
   return 'primary'
 })
 
 const bootstrapDescription = computed(() => {
   if (bootstrapFinished.value) {
-    return `原始数据已就绪，共 ${dataStatus.value.rawData.count} 只股票，最新日期 ${dataStatus.value.rawData.latestDate}`
+    return '首次初始化已完成，原始数据、候选结果和分析结果都已就绪。'
+  }
+  if (!configStore.apiAvailable) {
+    return configStore.statusError || '后端服务暂不可用，请先恢复服务，再回到任务中心继续初始化。'
+  }
+  if (initializationRunningTask.value) {
+    return `初始化任务 #${initializationRunningTask.value.id} 正在执行，当前阶段：${getStageLabel(initializationRunningTask.value.task_stage)}。`
+  }
+  if (latestFailedBootstrapTask.value) {
+    return `上一次初始化任务 #${latestFailedBootstrapTask.value.id} 失败。可查看日志定位失败点后重新发起。`
   }
   if (!configStore.tushareReady) {
-    return '请先进入配置页填写并验证 TUSHARE_TOKEN'
+    return '请先进入配置页填写并验证 Tushare Token；验证通过后才能启动首次初始化。'
   }
-  return '首次初始化将抓取原始行情数据，完成后即可使用明日之星和单股诊断功能'
+  return configStore.initializationMessage || '首次初始化会补齐原始数据、候选结果和分析结果。'
 })
 
 const canStartBootstrap = computed(() => {
-  return configStore.tushareReady && !bootstrapFinished.value && !bootstrapStarting.value
+  return configStore.apiAvailable && configStore.tushareReady && !bootstrapFinished.value && !bootstrapInProgress.value
 })
 
 const bootstrapButtonText = computed(() => {
   if (bootstrapFinished.value) return '数据已就绪'
-  if (bootstrapStarting.value) return '初始化中...'
+  if (bootstrapInProgress.value) return '初始化进行中'
+  if (!configStore.tushareReady || !configStore.apiAvailable) return '先处理配置'
+  if (latestFailedBootstrapTask.value) return '重新开始初始化'
   return '开始首次初始化'
+})
+
+const diagnosticChecks = computed<TaskDiagnosticCheck[]>(() => diagnostics.value?.checks || [])
+const diagnosticsGeneratedAt = computed(() => {
+  if (!diagnostics.value?.generated_at) return '尚未加载'
+  return `更新于 ${formatDateTime(diagnostics.value.generated_at)}`
+})
+const socketStatusLabel = computed(() => {
+  if (opsSocketState.value === 'connected' && (!selectedTask.value || taskSocketState.value === 'connected')) return '实时推送中'
+  if (opsSocketState.value === 'reconnecting' || taskSocketState.value === 'reconnecting') return '重连中'
+  if (opsSocketState.value === 'polling' || taskSocketState.value === 'polling') return '轮询兜底'
+  return '已断开'
+})
+const socketStatusTagType = computed(() => {
+  if (socketStatusLabel.value === '实时推送中') return 'success'
+  if (socketStatusLabel.value === '重连中') return 'warning'
+  if (socketStatusLabel.value === '轮询兜底') return 'info'
+  return 'danger'
+})
+const socketStatusDescription = computed(() => {
+  if (socketStatusLabel.value === '实时推送中') return '任务状态和日志会自动推送更新。'
+  if (socketStatusLabel.value === '重连中') return '检测到连接中断，系统会自动重连，同时保留轮询刷新。'
+  if (socketStatusLabel.value === '轮询兜底') return 'WebSocket 暂不可用，当前退回到定时轮询。任务仍可继续查看。'
+  return '当前未连接到任务推送通道，请手动重连或刷新页面。'
+})
+const stalledBootstrapAlert = computed(() => {
+  const task = initializationRunningTask.value
+  if (!task?.started_at) return null
+
+  const elapsedMs = Date.now() - new Date(task.started_at).getTime()
+  const elapsedMinutes = Math.max(1, Math.floor(elapsedMs / 60000))
+  if (elapsedMinutes < 15) return null
+
+  const stage = getStageLabel(task.task_stage)
+  return {
+    title: '初始化耗时明显偏长',
+    description: `任务 #${task.id} 已持续约 ${elapsedMinutes} 分钟，当前阶段为“${stage}”。若日志长时间没有新内容，可先复制诊断摘要，再尝试刷新状态或重连推送。`,
+  }
 })
 
 const bootstrapSteps = computed(() => [
@@ -409,7 +602,66 @@ const bootstrapSteps = computed(() => [
       : '待抓取',
     done: dataStatus.value.rawData.exists,
   },
+  {
+    key: 'candidates',
+    index: 3,
+    title: '生成候选结果',
+    meta: dataStatus.value.candidates.exists
+      ? `${dataStatus.value.candidates.count}条结果`
+      : '待生成',
+    done: dataStatus.value.candidates.exists,
+  },
+  {
+    key: 'analysis',
+    index: 4,
+    title: '生成分析结果',
+    meta: dataStatus.value.analysis.exists
+      ? `${dataStatus.value.analysis.count}条结果`
+      : '待生成',
+    done: dataStatus.value.analysis.exists,
+  },
 ])
+
+const showRetryBootstrap = computed(() => {
+  return Boolean(configStore.apiAvailable && configStore.tushareReady && latestFailedBootstrapTask.value && !bootstrapInProgress.value)
+})
+
+const recoveryAlert = computed(() => {
+  if (!showBootstrap.value) return null
+  if (!configStore.apiAvailable) {
+    return {
+      type: 'error' as const,
+      title: '后端未就绪',
+      description: '先恢复后端服务，再刷新本页继续查看初始化任务。',
+    }
+  }
+  if (!configStore.tushareReady) {
+    return {
+      type: 'warning' as const,
+      title: 'Token 未验证',
+      description: '请去配置页完成 Token 验证，验证成功后回到此页启动初始化。',
+    }
+  }
+  if (initializationRunningTask.value) {
+    return {
+      type: 'info' as const,
+      title: '初始化仍在运行',
+      description: '可以继续留在任务中心查看日志，或刷新页面后恢复到当前任务。',
+    }
+  }
+  if (latestFailedBootstrapTask.value) {
+    return {
+      type: 'error' as const,
+      title: '初始化失败，可直接恢复',
+      description: latestFailedBootstrapTask.value.error_message || latestFailedBootstrapTask.value.summary || '建议先查看失败日志，再点击重新发起初始化。',
+    }
+  }
+  return {
+    type: 'info' as const,
+    title: '初始化尚未完成',
+    description: '请发起首次初始化；如果你刚刷新页面，任务列表会在下方自动恢复。',
+  }
+})
 
 const filteredLogs = computed(() => {
   if (logFilter.value === 'task' && selectedTask.value) {
@@ -418,19 +670,30 @@ const filteredLogs = computed(() => {
   return allLogs.value
 })
 
-// 监听选中任务变化
 watch(selectedTask, (newTask) => {
   if (newTask) {
-    loadTaskLogs(newTask.id)
     if (logFilter.value === 'all') {
       logFilter.value = 'task'
     }
   }
+  persistViewState()
+})
+
+watch(activeTab, () => {
+  persistViewState()
 })
 
 // 生命周期
 onMounted(async () => {
-  await configStore.checkTushareStatus()
+  const restoredState = loadInitTaskViewState()
+  if (restoredState.activeTab) {
+    activeTab.value = restoredState.activeTab
+  }
+  try {
+    await configStore.checkTushareStatus()
+  } catch (error) {
+    console.error('Failed to check tushare status:', error)
+  }
   await reloadAll()
   connectOpsSocket()
   startPoller()
@@ -438,19 +701,22 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPoller()
+  clearReconnectTimers()
   disconnectSockets()
 })
 
 // 核心方法
 async function reloadAll() {
   try {
-    const [runningResp, statusResp, envResp] = await Promise.all([
+    const [runningResp, statusResp, envResp, diagnosticsResp] = await Promise.all([
       apiTasks.getRunning(),
       apiTasks.getStatus(),
       apiTasks.getEnvironment(),
+      apiTasks.getDiagnostics(),
     ])
 
     runningTasks.value = runningResp.tasks
+    diagnostics.value = diagnosticsResp
 
     // 获取历史任务（已完成的）
     try {
@@ -461,20 +727,38 @@ async function reloadAll() {
     }
 
     dataStatus.value = {
+      ...createEmptyDataStatus(),
       rawData: {
         exists: statusResp.raw_data.exists,
         count: statusResp.raw_data.count,
         latestDate: formatLatestDate(statusResp.raw_data.latest_date),
       },
-      dbSize: '-',
+      candidates: {
+        exists: statusResp.candidates?.exists || false,
+        count: statusResp.candidates?.count || 0,
+        latestDate: formatLatestDate(statusResp.candidates?.latest_date),
+      },
+      analysis: {
+        exists: statusResp.analysis?.exists || false,
+        count: statusResp.analysis?.count || 0,
+        latestDate: formatLatestDate(statusResp.analysis?.latest_date),
+      },
+      kline: {
+        exists: statusResp.kline?.exists || false,
+        count: statusResp.kline?.count || 0,
+        latestDate: formatLatestDate(statusResp.kline?.latest_date),
+      },
       environment: envResp.sections || [],
     }
 
     dataLoaded.value = true
-
-    if (runningTasks.value.length > 0 && !selectedTask.value) {
-      selectTask(runningTasks.value[0])
+    try {
+      await configStore.checkTushareStatus()
+    } catch (error) {
+      console.error('Failed to refresh tushare status:', error)
     }
+    await restoreTaskSelection()
+    persistViewState()
   } catch (error) {
     console.error('Failed to reload:', error)
     dataLoaded.value = true
@@ -487,13 +771,22 @@ async function startBootstrap() {
   bootstrapStarting.value = true
   try {
     const result = await apiTasks.startUpdate('quant', false, 1)
+    rememberBootstrapTask(result.task)
     ElMessage.success(`初始化任务已启动 #${result.task.id}`)
+    await focusTask(result.task, 'logs')
     await reloadAll()
   } catch (error: any) {
-    ElMessage.error(error.message || '启动失败')
+    const recovered = await recoverInitializationTask()
+    if (!recovered) {
+      ElMessage.error(error.message || '启动失败')
+    }
   } finally {
     bootstrapStarting.value = false
   }
+}
+
+async function retryBootstrap() {
+  await startBootstrap()
 }
 
 async function startDataUpdate() {
@@ -527,10 +820,43 @@ async function reloadTasks() {
   ElMessage.success('已刷新')
 }
 
+async function loadDiagnostics() {
+  diagnosticsLoading.value = true
+  try {
+    diagnostics.value = await apiTasks.getDiagnostics()
+  } catch (error) {
+    console.error('Failed to load diagnostics:', error)
+    noticeStore.setNotice({
+      type: 'warning',
+      title: '诊断信息刷新失败',
+      message: error instanceof Error ? error.message : '请稍后重试。',
+      actionLabel: '去配置',
+      actionRoute: '/config',
+    })
+  } finally {
+    diagnosticsLoading.value = false
+  }
+}
+
+async function copyDiagnostics() {
+  const summary = buildDiagnosticsSummary()
+  try {
+    await navigator.clipboard.writeText(summary)
+    ElMessage.success('诊断摘要已复制')
+  } catch {
+    ElMessage.warning('复制失败，请检查浏览器剪贴板权限')
+  }
+}
+
 async function selectTask(task: Task) {
   selectedTask.value = task
   await loadTaskLogs(task.id)
   connectTaskSocket(task.id)
+}
+
+async function focusTask(task: Task, tab: 'tasks' | 'logs' = 'tasks') {
+  activeTab.value = tab
+  await selectTask(task)
 }
 
 async function loadTaskLogs(taskId: number) {
@@ -574,8 +900,7 @@ async function clearTasks() {
 }
 
 function viewTaskDetail(task: Task) {
-  selectTask(task)
-  activeTab.value = 'logs'
+  void focusTask(task, 'logs')
 }
 
 function filterLogs() {
@@ -602,20 +927,6 @@ async function checkDataFresh() {
   }
 }
 
-async function cleanCache() {
-  cleaningCache.value = true
-  try {
-    // 清理缓存的逻辑
-    ElMessage.success('缓存已清理')
-  } finally {
-    cleaningCache.value = false
-  }
-}
-
-function checkIntegrity() {
-  ElMessage.info('完整性检查功能开发中')
-}
-
 function handleLogScroll() {
   const el = logRef.value
   if (!el) return
@@ -631,11 +942,16 @@ function scrollToBottom() {
 
 // WebSocket 连接
 function connectTaskSocket(taskId: number) {
+  lastTaskSocketId = taskId
   disconnectTaskSocket()
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws/tasks/${taskId}`
+  const wsUrl = buildWebSocketUrl(`/ws/tasks/${taskId}`)
   ws = new WebSocket(wsUrl)
+  taskSocketState.value = 'reconnecting'
 
+  ws.onopen = () => {
+    taskSocketState.value = 'connected'
+    socketReconnectAttempts.value = 0
+  }
   ws.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data)
@@ -656,21 +972,38 @@ function connectTaskSocket(taskId: number) {
       // ignore
     }
   }
+  ws.onclose = () => {
+    if (!lastTaskSocketId) {
+      taskSocketState.value = 'disconnected'
+      return
+    }
+    taskSocketState.value = 'polling'
+    scheduleTaskReconnect(lastTaskSocketId)
+  }
+  ws.onerror = () => {
+    taskSocketState.value = 'polling'
+  }
 }
 
 function disconnectTaskSocket() {
   if (ws) {
+    ws.onclose = null
     ws.close()
     ws = null
   }
+  taskSocketState.value = lastTaskSocketId ? 'polling' : 'disconnected'
 }
 
 function connectOpsSocket() {
   disconnectOpsSocket()
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws/ops`
+  const wsUrl = buildWebSocketUrl('/ws/ops')
   opsWs = new WebSocket(wsUrl)
+  opsSocketState.value = 'reconnecting'
 
+  opsWs.onopen = () => {
+    opsSocketState.value = 'connected'
+    socketReconnectAttempts.value = 0
+  }
   opsWs.onmessage = (event) => {
     try {
       const message = JSON.parse(event.data)
@@ -681,18 +1014,35 @@ function connectOpsSocket() {
       // ignore
     }
   }
+  opsWs.onclose = () => {
+    opsSocketState.value = 'polling'
+    scheduleOpsReconnect()
+  }
+  opsWs.onerror = () => {
+    opsSocketState.value = 'polling'
+  }
 }
 
 function disconnectOpsSocket() {
   if (opsWs) {
+    opsWs.onclose = null
     opsWs.close()
     opsWs = null
   }
+  opsSocketState.value = 'disconnected'
 }
 
 function disconnectSockets() {
   disconnectTaskSocket()
   disconnectOpsSocket()
+}
+
+function reconnectSocketsNow() {
+  clearReconnectTimers()
+  connectOpsSocket()
+  if (selectedTask.value) {
+    connectTaskSocket(selectedTask.value.id)
+  }
 }
 
 function applyTaskUpdate(task: Task) {
@@ -712,6 +1062,16 @@ function applyTaskUpdate(task: Task) {
   if (selectedTask.value?.id === task.id) {
     selectedTask.value = task
   }
+
+  if (isBootstrapTask(task) && isRunning) {
+    rememberBootstrapTask(task)
+  }
+
+  if (bootstrapFinished.value) {
+    clearInitTaskViewState()
+  } else {
+    persistViewState()
+  }
 }
 
 let poller: ReturnType<typeof setInterval> | null = null
@@ -722,8 +1082,7 @@ function startPoller() {
     if (document.visibilityState === 'hidden') return
     if (opsWs?.readyState === WebSocket.OPEN && runningTasks.value.length > 0) return
 
-    const runningData = await apiTasks.getRunning()
-    runningTasks.value = runningData.tasks
+    await reloadAll()
   }, 5000)
 }
 
@@ -732,6 +1091,112 @@ function stopPoller() {
     clearInterval(poller)
     poller = null
   }
+}
+
+function scheduleOpsReconnect() {
+  if (opsReconnectTimer) return
+  socketReconnectAttempts.value += 1
+  opsSocketState.value = 'reconnecting'
+  opsReconnectTimer = setTimeout(() => {
+    opsReconnectTimer = null
+    connectOpsSocket()
+  }, getReconnectDelay())
+}
+
+function scheduleTaskReconnect(taskId: number) {
+  if (taskReconnectTimer) return
+  socketReconnectAttempts.value += 1
+  taskSocketState.value = 'reconnecting'
+  taskReconnectTimer = setTimeout(() => {
+    taskReconnectTimer = null
+    connectTaskSocket(taskId)
+  }, getReconnectDelay())
+}
+
+function clearReconnectTimers() {
+  if (opsReconnectTimer) {
+    clearTimeout(opsReconnectTimer)
+    opsReconnectTimer = null
+  }
+  if (taskReconnectTimer) {
+    clearTimeout(taskReconnectTimer)
+    taskReconnectTimer = null
+  }
+}
+
+function getReconnectDelay() {
+  return Math.min(15000, 1000 * Math.max(1, socketReconnectAttempts.value))
+}
+
+function goToConfig() {
+  router.push('/config')
+}
+
+function isBootstrapTask(task: Task | null | undefined) {
+  return Boolean(task && task.task_type === 'full_update')
+}
+
+function rememberBootstrapTask(task: Task | null | undefined) {
+  if (!task) return
+  saveInitTaskViewState({
+    activeTab: activeTab.value,
+    selectedTaskId: task.id,
+    bootstrapTaskId: task.id,
+  })
+}
+
+function persistViewState() {
+  if (bootstrapFinished.value) {
+    clearInitTaskViewState()
+    return
+  }
+
+  saveInitTaskViewState({
+    activeTab: activeTab.value,
+    selectedTaskId: selectedTask.value?.id || null,
+    bootstrapTaskId: initializationRunningTask.value?.id || latestFailedBootstrapTask.value?.id || null,
+  })
+}
+
+async function restoreTaskSelection() {
+  const state = loadInitTaskViewState()
+  const candidates = [...runningTasks.value, ...historyTasks.value]
+  const targetId = state.selectedTaskId || state.bootstrapTaskId
+
+  const target = (
+    candidates.find((task) => task.id === targetId) ||
+    initializationRunningTask.value ||
+    latestFailedBootstrapTask.value ||
+    runningTasks.value[0] ||
+    null
+  )
+
+  if (!target) {
+    selectedTask.value = null
+    lastTaskSocketId = null
+    disconnectTaskSocket()
+    return
+  }
+
+  if (selectedTask.value?.id === target.id) return
+  await selectTask(target)
+}
+
+async function recoverInitializationTask() {
+  try {
+    const runningResp = await apiTasks.getRunning()
+    runningTasks.value = runningResp.tasks
+    const target = runningTasks.value.find((task) => isBootstrapTask(task))
+    if (target) {
+      rememberBootstrapTask(target)
+      await focusTask(target, 'logs')
+      ElMessage.warning(`检测到已有初始化任务 #${target.id}，已恢复到日志视图`)
+      return true
+    }
+  } catch (error) {
+    console.error('Failed to recover initialization task:', error)
+  }
+  return false
 }
 
 // 格式化方法
@@ -746,6 +1211,10 @@ function getTaskTypeLabel(taskType: string): string {
 
 function getStatusType(status: string): string {
   const types: Record<string, string> = {
+    success: 'success',
+    warning: 'warning',
+    error: 'danger',
+    info: 'info',
     completed: 'success',
     running: 'primary',
     failed: 'danger',
@@ -774,6 +1243,7 @@ function getStageLabel(stage?: string | null): string {
 function formatDateTime(dateStr?: string): string {
   if (!dateStr) return '-'
   return new Date(dateStr).toLocaleString('zh-CN', {
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -790,7 +1260,7 @@ function formatLogTime(dateStr?: string): string {
   })
 }
 
-function formatLatestDate(date?: string | number): string {
+function formatLatestDate(date?: string | number | null): string {
   if (!date) return '-'
   if (typeof date === 'number') {
     return new Date(date * 1000).toLocaleDateString('zh-CN')
@@ -840,6 +1310,42 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
   }
   return result
 }
+
+function getCheckStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    success: '正常',
+    warning: '待处理',
+    error: '异常',
+    info: '未完成',
+  }
+  return labels[status] || status
+}
+
+function buildDiagnosticsSummary() {
+  const lines = [
+    `生成时间: ${diagnostics.value?.generated_at || new Date().toISOString()}`,
+    `推送状态: ${socketStatusLabel.value}`,
+    `运行中任务: ${runningTasks.value.length}`,
+  ]
+  for (const check of diagnosticChecks.value) {
+    lines.push(`[${getCheckStatusLabel(check.status)}] ${check.label}: ${check.summary}`)
+    if (check.action) {
+      lines.push(`建议: ${check.action}`)
+    }
+  }
+  if (initializationRunningTask.value) {
+    lines.push(`初始化任务: #${initializationRunningTask.value.id} / ${getStageLabel(initializationRunningTask.value.task_stage)} / ${initializationRunningTask.value.progress}%`)
+  }
+  if (latestFailedBootstrapTask.value?.error_message) {
+    lines.push(`最近失败: ${latestFailedBootstrapTask.value.error_message}`)
+  }
+  return lines.join('\n')
+}
+
+function buildWebSocketUrl(path: string) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}${path}`
+}
 </script>
 
 <style scoped lang="scss">
@@ -881,6 +1387,113 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
     gap: 12px;
   }
 
+  .connectivity-card,
+  .diagnostics-card,
+  .next-actions-card {
+    border-radius: 14px;
+  }
+
+  .connectivity-card__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .connectivity-card__status,
+  .connectivity-card__actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .connectivity-card__label {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .connectivity-card__desc {
+    margin-top: 10px;
+    color: var(--color-text-secondary);
+    line-height: 1.7;
+  }
+
+  .diagnostics-generated-at {
+    font-size: 12px;
+    color: var(--color-text-light);
+  }
+
+  .diagnostics-list {
+    display: grid;
+    gap: 12px;
+  }
+
+  .diagnostic-item {
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
+    background: #f8fafc;
+  }
+
+  .diagnostic-item__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .diagnostic-item__title {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .diagnostic-item__summary,
+  .diagnostic-item__action {
+    line-height: 1.7;
+    color: var(--color-text-secondary);
+  }
+
+  .diagnostic-item__action {
+    margin-top: 6px;
+    font-size: 13px;
+  }
+
+  .next-actions-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .next-action-card {
+    padding: 16px;
+    border: 1px solid #dbeafe;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    text-align: left;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+
+  .next-action-card:hover {
+    transform: translateY(-1px);
+    border-color: #60a5fa;
+    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.08);
+  }
+
+  .next-action-card__title {
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .next-action-card__desc {
+    color: var(--color-text-secondary);
+    line-height: 1.7;
+    font-size: 13px;
+  }
+
   // 首次初始化卡片
   .bootstrap-card {
     .bootstrap-content {
@@ -895,10 +1508,38 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
       line-height: 1.7;
     }
 
+    .bootstrap-notes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .bootstrap-note {
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+
+    .bootstrap-note-label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-text-secondary);
+    }
+
+    .bootstrap-note-value {
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--color-text-primary);
+    }
+
     .bootstrap-steps {
       display: flex;
       gap: 16px;
       justify-content: center;
+      flex-wrap: wrap;
     }
 
     .bootstrap-step {
@@ -951,6 +1592,8 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
     .bootstrap-actions {
       display: flex;
       justify-content: center;
+      flex-wrap: wrap;
+      gap: 12px;
     }
   }
 
@@ -1304,6 +1947,15 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
   .ops-page {
     padding: 16px;
 
+    .connectivity-card__row {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .next-actions-grid {
+      grid-template-columns: 1fr;
+    }
+
     .health-summary {
       grid-template-columns: 1fr;
     }
@@ -1320,6 +1972,10 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
       flex-direction: column;
     }
 
+    .bootstrap-notes {
+      grid-template-columns: 1fr;
+    }
+
     .action-buttons {
       flex-direction: column;
     }
@@ -1327,8 +1983,14 @@ function getPrimitiveItems(items: Record<string, any>): Record<string, any> {
 }
 
 @media (max-width: 480px) {
-  .detail-grid {
-    grid-template-columns: 1fr;
+  .ops-page {
+    .detail-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .connectivity-card__actions {
+      width: 100%;
+    }
   }
 }
 </style>
