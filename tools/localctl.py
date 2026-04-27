@@ -605,12 +605,26 @@ def _remove_directory_with_retry(dir_path: Path, max_retries: int = 3) -> None:
     
     for attempt in range(max_retries):
         try:
-            shutil.rmtree(dir_path, ignore_errors=False)
+            # Windows下使用cmd的rmdir命令可能更可靠
+            if os.name == 'nt':
+                import subprocess
+                result = subprocess.run(
+                    ['cmd', '/c', 'rmdir', '/s', '/q', str(dir_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    return
+                else:
+                    raise OSError(f"rmdir failed: {result.stderr}")
+            else:
+                shutil.rmtree(dir_path, ignore_errors=False)
             return
         except (PermissionError, OSError) as e:
             if attempt < max_retries - 1:
                 log(f"[WARN] 删除 {dir_path} 第{attempt + 1}次尝试失败，等待后重试...")
-                time.sleep(1)
+                time.sleep(2)
             else:
                 raise
 
