@@ -584,14 +584,35 @@ def uninstall() -> None:
         ROOT / "deploy",
     ]:
         if target.exists():
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=False)
-            else:
-                target.unlink()
-            log(f"已删除: {target}")
+            try:
+                if target.is_dir():
+                    # Windows下删除大目录可能需要重试
+                    _remove_directory_with_retry(target)
+                else:
+                    target.unlink()
+                log(f"已删除: {target}")
+            except Exception as e:
+                log(f"[WARN] 删除 {target} 失败: {e}")
+                log(f"       请手动删除: {target}")
 
     log("")
     log("卸载完成。")
+
+
+def _remove_directory_with_retry(dir_path: Path, max_retries: int = 3) -> None:
+    """在Windows下安全删除目录，带重试机制"""
+    import time
+    
+    for attempt in range(max_retries):
+        try:
+            shutil.rmtree(dir_path, ignore_errors=False)
+            return
+        except (PermissionError, OSError) as e:
+            if attempt < max_retries - 1:
+                log(f"[WARN] 删除 {dir_path} 第{attempt + 1}次尝试失败，等待后重试...")
+                time.sleep(1)
+            else:
+                raise
 
 
 def bootstrap(skip_init_data: bool = False) -> None:
