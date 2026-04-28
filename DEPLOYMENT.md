@@ -1,188 +1,193 @@
 # StockTrader 2.0 部署运行指南
 
-## 项目结构
+相关文档：
 
-```
-StockTradebyZ/
-├── backend/                 # FastAPI 后端
-│   ├── app/
-│   │   ├── api/            # API 路由
-│   │   ├── models/         # 数据模型
-│   │   ├── schemas/        # Pydantic 模式
-│   │   ├── services/       # 业务逻辑
-│   │   ├── websocket/      # WebSocket 工具
-│   │   ├── config.py       # 配置
-│   │   ├── database.py     # 数据库
-│   │   └── main.py         # 入口
-│   └── requirements.txt
-│
-├── frontend/               # Vue 3 前端
-│   ├── src/
-│   │   ├── api/           # API 调用
-│   │   ├── components/    # 组件
-│   │   ├── stores/        # Pinia 状态
-│   │   ├── views/         # 页面
-│   │   └── main.ts
-│   ├── index.html
-│   ├── package.json
-│   └── vite.config.ts
-│
-├── data/                   # 数据目录 (本地开发)
-├── pipeline/              # 选股流程
-├── agent/                 # AI 代理
-├── config/                # 配置文件
-├── docker-compose.yml     # Docker 编排
-├── Dockerfile             # 后端镜像
-├── Dockerfile.frontend    # 前端镜像
-├── .env.example           # 环境变量模板
-└── run_all.py            # 主流程脚本
-```
+- [README.md](README.md): 项目入口与快速开始
+- [ARCHITECTURE.md](ARCHITECTURE.md): 当前真实架构、任务中心、进度与恢复机制
+- [README.dev.md](README.dev.md): 开发者入口
+- [WINDOWS_DEPLOYMENT.md](WINDOWS_DEPLOYMENT.md): Windows 详细说明
 
----
+## 1. 推荐模式
 
-## 一、非 Docker 一键部署（推荐给 macOS / Linux 用户）
+对个人电脑用户，当前推荐只有一个：
 
-项目根目录已经提供了一组脚本，适合单机部署：
+- 本地部署模式
+- 后端统一提供前端页面
+- 单机 SQLite
+- 本地 `data/` 目录持久化
+
+默认访问地址：
+
+- 应用首页: `http://127.0.0.1:8000`
+- API 文档: `http://127.0.0.1:8000/docs`
+
+## 2. macOS / Linux 本地部署
+
+### 2.1 一键启动
 
 ```bash
-# 0. 最简一键方式
 ./bootstrap-local.sh
+```
 
-# 1. 如需分步执行：安装依赖（自动创建 .venv，默认使用国内镜像）
+这会调用共享控制器 `tools/localctl.py`，完成：
+
+- 安装 Python 依赖和前端依赖
+- 准备 `.venv`
+- 生成前端本地环境配置
+- 启动后端
+- 如果已经配置好 `TUSHARE_TOKEN`，自动发起首次初始化
+
+### 2.2 分步执行
+
+```bash
+# 安装依赖
 ./install-local.sh
 
-# 如需连系统依赖一起自动安装
-AUTO_INSTALL_SYSTEM_DEPS=1 ./install-local.sh
-
-# 2. 编辑 .env，至少填入 TUSHARE_TOKEN
-vi .env
-
-# 3. 启动前预检（推荐）
+# 启动前预检
 ./preflight-local.sh
 
-# 4. 首次初始化数据
-./init-data.sh
-
-# 5. 启动前后端
+# 启动本地服务
 ./start-local.sh
 
-# 6. 查看状态
+# 首次初始化
+./init-data.sh
+
+# 查看状态
 ./status-local.sh
 
-# 7. 停止服务
+# 停止服务
 ./stop-local.sh
 
-# 8. 完整卸载本地部署
-./uninstall-local.sh
-
-# 9. 生成系统守护配置（可选）
-./generate-service.sh
-```
-
-`bootstrap-local.sh` 的行为：
-
-- 首次执行时自动安装依赖
-- 若 `TUSHARE_TOKEN` 未配置，仍会启动前后端，并在页面中强提示先完成配置
-- 已配置 Token 时自动执行预检、初始化数据、启动前后端
-
-### 1.1 完整卸载
-
-如需彻底移除本地部署，可直接执行：
-
-```bash
+# 卸载本地部署
 ./uninstall-local.sh
 ```
 
-会清理以下内容：
+### 2.3 首次进入时未配置 Token
 
-- 停止 `start-local.sh` 启动的前后端进程
-- 卸载用户级 `systemd` / `LaunchAgent` 服务（如已安装）
-- 删除数据库和本地业务数据：`data/`
-- 删除本地配置：`.env`、`frontend/.env.local`
-- 删除本地依赖与构建产物：`.venv`、`frontend/node_modules`、`frontend/dist`
-- 删除守护模板目录：`deploy/`
+如果还没有 `TUSHARE_TOKEN`，系统也允许先启动。
 
-### 1.2 国内环境优化
+这时推荐路径是：
 
-脚本默认内置以下加速源：
+1. 执行 `./start-local.sh`
+2. 打开 `http://127.0.0.1:8000`
+3. 进入“配置管理”页面填写并验证 Token
+4. 进入“运维管理”页面启动首次初始化
 
-- pip: `https://pypi.tuna.tsinghua.edu.cn/simple`
-- npm: `https://registry.npmmirror.com`
+### 2.4 常用入口脚本和真实行为
 
-如需覆盖，可在执行时自行指定：
+当前这些脚本本质上都是 `tools/localctl.py` 的薄包装：
 
-```bash
-PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
-NPM_REGISTRY=https://registry.npmmirror.com \
-./install-local.sh
+- `bootstrap-local.sh`
+- `install-local.sh`
+- `preflight-local.sh`
+- `start-local.sh`
+- `init-data.sh`
+- `status-local.sh`
+- `stop-local.sh`
+- `uninstall-local.sh`
+
+这意味着：
+
+- macOS / Linux 和 Windows 的行为已经尽量统一
+- CLI 和页面不是两套独立逻辑，而是共用同一套后端 API 和本地控制器
+
+## 3. 初始化、进度与恢复
+
+### 3.1 首次初始化做什么
+
+首次初始化对应全量流程：
+
+1. Tushare 抓取原始日线到 `data/raw/`
+2. 量化初选
+3. 导出候选图
+4. quant 程序化复核
+5. 导出 PASS 图表
+6. 生成推荐结果
+
+发起方式：
+
+- 页面：运维管理页
+- API：`POST /api/v1/tasks/start`
+- CLI：`./init-data.sh`
+
+### 3.2 进度展示
+
+当前最重要的进度是第 1 步远端抓数。
+
+系统会在这些位置显示：
+
+- 页面右上角全局进度卡
+- 运维管理页任务中心
+- `init-data.sh` 的命令行输出
+
+抓数阶段会重点显示：
+
+- `当前/总数`
+- `ETA`
+- `当前代码`
+- `失败数量`
+- `已恢复数量`
+
+### 3.3 恢复机制
+
+当前真实恢复能力如下：
+
+- 第 1 步远端抓数支持断点恢复
+- 最新交易日增量更新支持断点恢复
+- 第 2 步到第 6 步没有再做细粒度任务快照恢复
+
+这意味着：
+
+- 如果抓数中断，再次发起初始化会优先继续抓剩余股票
+- 如果后续步骤中断，重新发起任务会基于已抓好的 `data/raw/` 重新生成
+
+### 3.4 任务互斥
+
+系统当前会避免同时跑多套大任务：
+
+- 同一时间只允许一个全量类任务
+- 增量更新和全量初始化互斥
+
+这样做是为了：
+
+- 避免重复占用 Tushare 配额
+- 避免并发写同一批本地数据文件
+- 保证前端进度展示只有一套主状态
+
+## 4. 本地数据与迁移
+
+默认数据目录：
+
+```text
+data/
+├─ db/          SQLite 数据库
+├─ raw/         原始 K 线 CSV
+├─ candidates/  候选结果
+├─ review/      评分结果
+├─ kline/       导出的图表
+├─ logs/        日志
+├─ run/         pid 文件与断点文件
+└─ cache/       本地缓存
 ```
 
-如机器尚未安装 `python/node/npm/pip/venv/lsof`，`install-local.sh` 会先检查系统依赖：
+默认数据库文件：
 
-- 默认模式：给出当前系统对应的安装命令，不直接改系统环境
-- 自动安装模式：执行 `AUTO_INSTALL_SYSTEM_DEPS=1 ./install-local.sh`
+- `data/db/stocktrade.db`
 
-当前已内置的系统包管理器识别：
+如果你要迁移到另一台个人电脑，最稳妥的做法通常是一起迁移：
 
-- macOS: `brew`
-- Debian / Ubuntu: `apt-get`
-- Fedora / Rocky / AlmaLinux: `dnf`
-- CentOS: `yum`
+- `.env`
+- `data/`
 
-### 1.3 预检脚本
+## 5. Windows 本地部署
 
-`preflight-local.sh` 会检查：
+Windows 不走 `*.sh`，而是走：
 
-- Python / Node / npm 是否可用
-- `.env` 是否存在
-- `TUSHARE_TOKEN` 是否已配置（未配置时给出警告，不阻止启动）
-- 数据目录是否就绪
-- 前后端端口是否被占用
-- `tushare.pro`、pip 镜像、npm 镜像是否可访问
+- `*.bat`
+- `*.ps1`
+- 共享控制器 `tools/localctl.py`
 
-推荐在首次启动前执行：
-
-```bash
-./preflight-local.sh
-```
-
-### 1.4 守护服务配置
-
-如果希望用户登录后长期运行，可生成本机守护模板：
-
-```bash
-./generate-service.sh
-```
-
-- Linux: 生成 `systemd --user` 服务文件
-- macOS: 生成 `LaunchAgent` plist
-- 会自动读取当前 `.env` 中的端口和 `VITE_API_BASE_URL`
-
-生成文件位于：
-
-- `deploy/systemd/`
-- `deploy/launchd/`
-
-### 1.5 默认端口
-
-- 后端: `8000`
-- 前端: `5173`
-
-可在 `.env` 中修改：
-
-```bash
-BACKEND_PORT=8000
-FRONTEND_PORT=5173
-VITE_API_BASE_URL=http://127.0.0.1:8000/api
-```
-
----
-
-## 一点五、Windows 本地一键部署
-
-Windows 不复用 `*.sh` 脚本，改用 `PowerShell + Python CLI` 入口。
-
-推荐直接执行：
+推荐入口：
 
 ```powershell
 .\bootstrap-local.bat
@@ -193,316 +198,144 @@ Windows 不复用 `*.sh` 脚本，改用 `PowerShell + Python CLI` 入口。
 ```powershell
 .\install-local.bat
 .\preflight-local.bat
-.\init-data.bat
 .\start-local.bat
+.\init-data.bat
 .\status-local.bat
 .\stop-local.bat
 .\uninstall-local.bat
 ```
 
+详细步骤看 [WINDOWS_DEPLOYMENT.md](WINDOWS_DEPLOYMENT.md)。
+
+## 6. 本地开发模式
+
+如果你是开发者，需要前后端分开调试，可使用：
+
+```bash
+./start-dev.sh
+```
+
+它会启动：
+
+- 后端: `http://127.0.0.1:8000`
+- 前端 Vite: `http://127.0.0.1:5173`
+
+注意：
+
+- 这是开发模式，不是推荐给普通用户的部署模式
+- 普通用户只需要关心 `http://127.0.0.1:8000`
+
+## 7. Docker 模式
+
+仓库仍保留 Docker 方案，适合你明确希望用容器运行时使用。
+
+### 7.1 启动
+
+```bash
+./start-docker.sh up
+```
+
+或者：
+
+```bash
+docker compose up -d --build
+```
+
+### 7.2 停止和日志
+
+```bash
+./start-docker.sh down
+./start-docker.sh logs
+./start-docker.sh backend
+./start-docker.sh frontend
+```
+
+### 7.3 Docker 默认地址
+
+- 前端: `http://localhost:3000`
+- 后端: `http://localhost:8000`
+- API 文档: `http://localhost:8000/docs`
+
+当前 Docker 仍是前后端双容器模式，这和本地部署模式不同。
+
+## 8. 环境变量
+
+至少需要：
+
+```bash
+TUSHARE_TOKEN=你的token
+```
+
+可选：
+
+```bash
+DEFAULT_REVIEWER=quant
+MIN_SCORE_THRESHOLD=4.0
+BACKEND_PORT=8000
+VITE_API_BASE_URL=/api
+```
+
 说明：
 
-- `*.bat` 会自动调用同名 `*.ps1`
-- `*.ps1` 再调用共享控制器 `tools/localctl.py`
-- 现有 macOS / Linux 的 `*.sh` 入口保持不变
+- Web 当前默认主路径是 `quant`
+- LLM 脚本仍在仓库中，但页面配置和主流程默认都围绕 `quant`
+- 在本地部署模式下，`VITE_API_BASE_URL=/api` 就够了，不需要手写完整域名
 
-详细说明请看 [WINDOWS_DEPLOYMENT.md](WINDOWS_DEPLOYMENT.md)。
+## 9. 故障排查
 
----
-
-## 二、本地开发模式
-
-### 2.0 本地数据库说明
-
-当前默认使用 SQLite，本地数据库文件为：
-
-- `data/db/stocktrade.db`
-
-特点：
-
-- 无需单独安装数据库服务，适合单机部署
-- 备份方式直接复制该文件即可
-- 若迁移到另一台机器，连同 `data/` 目录一起迁移最稳妥
-
-常用管理方式：
+### 9.1 后端是否启动
 
 ```bash
-# 查看表
-sqlite3 data/db/stocktrade.db ".tables"
-
-# 进入数据库
-sqlite3 data/db/stocktrade.db
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/docs
 ```
 
-### 2.1 环境准备
+### 9.2 页面路由和 API 混淆
+
+当前要分清：
+
+- 页面路由：`/update`
+- API 路由：`/api/v1/tasks/*`
+
+例如：
 
 ```bash
-# Python 3.12+
-python --version
-
-# Node.js 18+
-node --version
-npm --version
+curl http://127.0.0.1:8000/api/v1/tasks/overview
 ```
 
-### 2.2 配置环境变量
+不要把 `/update` 当作 JSON 接口来调。
+
+### 9.3 初始化失败后怎么看
+
+优先查看：
+
+- 页面“运维管理”里的任务日志
+- `data/logs/backend.log`
+- `data/run/` 下是否保留了断点文件
+
+### 9.4 端口冲突
 
 ```bash
-# 复制环境变量模板
-cp .env.example .env
-
-# 编辑 .env 文件，填入必要配置
-# 至少需要配置 TUSHARE_TOKEN
-```
-
-**必需配置**:
-```bash
-# Tushare Token (必需)
-TUSHARE_TOKEN=你的token
-
-# 可选 LLM API Key
-ZHIPUAI_API_KEY=
-DASHSCOPE_API_KEY=
-GEMINI_API_KEY=
-```
-
-### 2.3 启动后端
-
-```bash
-# 方式一: 使用虚拟环境
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate  # Windows
-
-pip install -r requirements.txt
-pip install -r backend/requirements.txt
-
-# 启动后端
-cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-```bash
-# 方式二: 直接安装
-pip install -r requirements.txt
-pip install -r backend/requirements.txt
-
-cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-后端启动后访问: http://localhost:8000/docs
-
-### 2.4 启动前端
-
-```bash
-cd frontend
-
-# 首次运行需要安装依赖
-npm install
-
-# 创建本地环境变量 (可选)
-cat > .env << EOF
-VITE_API_BASE_URL=http://127.0.0.1:8000/api
-EOF
-
-# 启动开发服务器
-npm run dev
-```
-
-前端启动后访问: http://localhost:5173
-
----
-
-## 三、Docker 部署模式
-
-### 3.1 配置环境变量
-
-```bash
-# 确保项目根目录有 .env 文件
-cp .env.example .env
-vi .env  # 编辑配置
-```
-
-### 3.2 构建并启动
-
-```bash
-# 构建镜像并启动服务
-docker-compose up -d
-
-# 查看日志
-docker-compose logs -f
-
-# 查看特定服务日志
-docker-compose logs -f backend
-docker-compose logs -f frontend
-```
-
-### 3.3 服务地址
-
-| 服务 | 地址 |
-|------|------|
-| 前端 | http://localhost:3000 |
-| 后端 API | http://localhost:8000 |
-| API 文档 | http://localhost:8000/docs |
-| Nginx (生产) | http://localhost:80 |
-
-### 3.4 常用命令
-
-```bash
-# 停止服务
-docker-compose down
-
-# 重启服务
-docker-compose restart
-
-# 重新构建镜像
-docker-compose build --no-cache
-
-# 进入后端容器
-docker-compose exec backend bash
-
-# 查看数据目录
-docker-compose exec backend ls -la /app/data
-```
-
----
-
-## 四、首次运行配置
-
-### 4.1 初始化数据
-
-首次运行需要拉取股票数据：
-
-```bash
-# 进入后端容器 (Docker 模式)
-docker-compose exec backend bash
-
-# 或本地开发模式
-cd /path/to/StockTradebyZ
-
-# 拉取基础数据
-python run_all.py --reviewer quant --start-from 1
-```
-
-### 4.2 通过 Web UI 操作
-
-1. 访问 http://localhost:3000
-2. 进入 **"全量更新"** 页面
-3. 选择评分模式（量化评分免费）
-4. 点击 **"开始全量更新"**
-5. 等待数据抓取和分析完成
-
----
-
-## 五、数据目录说明
-
-```
-data/
-├── db/                    # SQLite 数据库
-│   └── stocktrade.db
-├── raw/                   # 原始 K 线数据
-├── candidates/            # 候选股票
-├── review/                # 分析结果
-├── kline/                 # K 线图表
-└── logs/                  # 日志文件
-```
-
----
-
-## 六、故障排查
-
-### 6.1 后端启动失败
-
-```bash
-# 检查端口占用
 lsof -i :8000
-
-# 检查数据库权限
-mkdir -p data/db
-chmod 755 data/db
 ```
 
-### 6.2 前端连接不上后端
-
-检查 `frontend/.env` 或 `.env.local`:
-```bash
-VITE_API_BASE_URL=http://127.0.0.1:8000/api
-```
-
-### 6.3 Docker 日志查看
+如果需要，先停止旧进程，再重新执行：
 
 ```bash
-# 查看所有容器状态
-docker-compose ps
-
-# 查看后端日志
-docker-compose logs backend
-
-# 查看前端日志
-docker-compose logs frontend
+./stop-local.sh
+./start-local.sh
 ```
 
-### 6.4 WebSocket 连接失败
+## 10. 当前最适合新人的操作路径
 
-确保后端 CORS 配置正确，检查 `.env`:
-```bash
-BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
-```
+推荐你按这个顺序使用：
 
----
+1. `./bootstrap-local.sh`
+2. 打开 `http://127.0.0.1:8000`
+3. 如果未配置 Token，先去“配置管理”
+4. 去“运维管理”执行首次初始化
+5. 初始化完成后，先看“明日之星”，再看“单股诊断”和“重点观察”
 
-## 七、生产环境部署
+如果只记一件事：
 
-### 7.1 使用 Nginx 反向代理
-
-```bash
-# 启用生产模式 Nginx
-docker-compose --profile production up -d
-```
-
-### 7.2 环境变量建议
-
-生产环境建议配置:
-```bash
-# 使用外部数据库 (可选)
-DATABASE_URL=postgresql://user:pass@host:5432/dbname
-
-# 配置 CORS 为实际域名
-BACKEND_CORS_ORIGINS=https://yourdomain.com
-
-# 使用 Redis 做缓存 (可选)
-REDIS_URL=redis://redis:6379/0
-```
-
----
-
-## 八、快速启动脚本
-
-### 本地开发快速启动
-
-```bash
-# 完整启动（包含依赖安装）
-./start-dev.sh
-
-# 跳过依赖安装（快速启动）
-./start-dev.sh --skip-deps
-```
-
-启动脚本功能:
-- 自动创建虚拟环境
-- 自动安装 Python/Node 依赖
-- 同时启动后端 (8000) 和前端 (5173)
-- Ctrl+C 优雅停止所有服务
-
-### Docker 快速启动
-
-```bash
-#!/bin/bash
-# start-docker.sh
-
-docker-compose up -d
-echo "服务已启动"
-echo "前端: http://localhost:3000"
-echo "后端: http://localhost:8000"
-```
+- 个人部署模式下，系统入口就是 `http://127.0.0.1:8000`

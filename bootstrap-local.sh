@@ -41,12 +41,12 @@ EOF
 
   ./preflight-local.sh
 
+  ./start-local.sh
+
   if [[ "${SKIP_INIT_DATA:-0}" != "1" ]]; then
-    log "执行首次数据初始化..."
+    log "通过应用 API 执行首次数据初始化..."
     ./init-data.sh
   fi
-
-  ./start-local.sh
 }
 
 main "$@"

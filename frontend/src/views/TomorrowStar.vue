@@ -41,6 +41,15 @@
         />
       </div>
     </el-card>
+    <el-alert
+      v-else-if="incrementalUpdate.status === 'failed'"
+      class="page-alert"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="增量更新上次未完成"
+      :description="incrementalUpdate.last_error || incrementalUpdate.message || '可前往任务中心重新发起，系统会尽量从已完成位置继续。'"
+    />
 
     <el-row :gutter="20" class="top-row">
       <!-- 左侧：历史记录 -->
@@ -282,12 +291,24 @@ const CACHE_TTL_MS = 5 * 60 * 1000  // 缓存5分钟
 
 // 增量更新状态
 const incrementalUpdate = ref<IncrementalUpdateStatus>({
+  status: 'idle',
   running: false,
   progress: 0,
+  current: 0,
   total: 0,
+  current_code: '',
   updated_count: 0,
   skipped_count: 0,
   failed_count: 0,
+  started_at: '',
+  completed_at: '',
+  eta_seconds: null,
+  elapsed_seconds: 0,
+  resume_supported: true,
+  initial_completed: 0,
+  completed_in_run: 0,
+  checkpoint_path: null,
+  last_error: null,
   message: '',
 })
 
@@ -708,7 +729,12 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     }
 
     // 如果需要更新且没有正在运行的增量更新，自动启动
-    if (freshness.needs_update && !incrementalUpdate.value.running) {
+    if (
+      freshness.needs_update
+      && !incrementalUpdate.value.running
+      && !freshness.running_task_id
+      && freshness.incremental_update?.status !== 'failed'
+    ) {
       await startIncrementalUpdate()
     }
 

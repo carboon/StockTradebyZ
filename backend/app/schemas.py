@@ -221,6 +221,7 @@ class TaskItem(BaseModel):
     task_stage: Optional[str] = None
     progress: int
     params_json: Optional[Dict[str, Any]] = None
+    progress_meta_json: Optional[Dict[str, Any]] = None
     result_json: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
     summary: Optional[str] = None

@@ -1,7 +1,7 @@
 <template>
   <PageLayout />
   <el-dialog
-    v-model="showStatusGate"
+    :model-value="showStatusGate"
     :title="gateTitle"
     width="520px"
     :show-close="false"
@@ -12,7 +12,7 @@
     <p class="gate-text gate-text-muted">{{ gateMessage }}</p>
     <template #footer>
       <el-button @click="refreshStatus">重新检查</el-button>
-      <el-button v-if="configStore.apiAvailable" type="primary" @click="goConfig">{{ gateActionLabel }}</el-button>
+      <el-button type="primary" @click="goConfig">{{ gateActionLabel }}</el-button>
     </template>
   </el-dialog>
 </template>

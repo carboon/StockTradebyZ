@@ -91,9 +91,29 @@ export interface Task {
   result_json?: Record<string, any>
   error_message?: string
   summary?: string
+  progress_meta_json?: TaskProgressMeta
   started_at?: string
   completed_at?: string
   created_at: string
+}
+
+export interface TaskProgressMeta {
+  kind?: string
+  stage?: string
+  stage_label?: string
+  stage_index?: number | null
+  stage_total?: number | null
+  percent?: number | null
+  message?: string | null
+  eta_seconds?: number | null
+  eta_label?: string | null
+  current?: number | null
+  total?: number | null
+  current_code?: string | null
+  initial_completed?: number | null
+  completed_in_run?: number | null
+  failed_count?: number | null
+  resume_supported?: boolean
 }
 
 export interface DataStatus {
@@ -338,14 +358,24 @@ export interface TaskDiagnosticsResponse {
 }
 
 export interface IncrementalUpdateStatus {
+  status?: 'idle' | 'running' | 'completed' | 'failed' | string
   running: boolean
   progress: number
+  current: number
   total: number
   current_code?: string
   updated_count: number
   skipped_count: number
   failed_count: number
   started_at?: string
+  completed_at?: string
+  eta_seconds?: number | null
+  elapsed_seconds?: number
+  resume_supported?: boolean
+  initial_completed?: number
+  completed_in_run?: number
+  checkpoint_path?: string | null
+  last_error?: string | null
   message: string
 }
 

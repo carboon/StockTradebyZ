@@ -160,25 +160,53 @@
               <el-button
                 type="primary"
                 :loading="startingUpdate"
-                :disabled="runningTasksCount > 0"
+                :disabled="hasActiveBackgroundWork"
                 @click="startDataUpdate"
               >
                 更新最新交易日数据
               </el-button>
               <el-button
                 :loading="startingFullUpdate"
-                :disabled="runningTasksCount > 0"
+                :disabled="hasActiveBackgroundWork"
                 @click="startFullUpdate"
               >
-                重新获取历史数据
+                重新执行全量初始化
               </el-button>
               <el-button :icon="Refresh" @click="reloadTasks">刷新</el-button>
             </div>
-            <div v-if="runningTasksCount > 0" class="running-hint">
+            <div v-if="hasActiveBackgroundWork" class="running-hint">
               <el-icon class="is-loading"><Loading /></el-icon>
-              当前有 {{ runningTasksCount }} 个任务正在运行
+              {{ activeWorkHint }}
             </div>
           </el-card>
+
+          <el-card v-if="incrementalStatus.running" class="incremental-progress-card">
+            <div class="incremental-progress-card__header">
+              <div>
+                <div class="incremental-progress-card__title">最新交易日增量更新进行中</div>
+                <div class="incremental-progress-card__meta">
+                  进度 {{ incrementalStatus.current }}/{{ incrementalStatus.total }}
+                  <span v-if="incrementalStatus.eta_seconds != null"> / 预计剩余 {{ formatSeconds(incrementalStatus.eta_seconds) }}</span>
+                  <span v-if="incrementalStatus.current_code"> / 当前 {{ incrementalStatus.current_code }}</span>
+                </div>
+              </div>
+              <div class="incremental-progress-card__counts">
+                {{ incrementalStatus.updated_count }} 更新 / {{ incrementalStatus.skipped_count }} 跳过 / {{ incrementalStatus.failed_count }} 失败
+              </div>
+            </div>
+            <el-progress
+              :percentage="incrementalStatus.progress"
+              :stroke-width="10"
+            />
+          </el-card>
+          <el-alert
+            v-else-if="hasFailedIncrementalUpdate"
+            title="增量更新上次未完成"
+            :description="incrementalStatus.last_error || incrementalStatus.message || '可稍后重新发起，系统会尽量从已完成位置继续。'"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
 
           <!-- 运行中任务 -->
           <el-card class="tasks-card">
@@ -207,8 +235,10 @@
                     <span class="task-type">{{ getTaskTypeLabel(task.task_type) }}</span>
                     <el-tag :type="getStatusType(task.status)" size="small">{{ task.status }}</el-tag>
                   </div>
-                  <div class="task-stage">{{ getStageLabel(task.task_stage) }}</div>
-                  <el-progress :percentage="task.progress" :stroke-width="6" :show-text="false" />
+                  <div class="task-stage">{{ getTaskStageText(task) }}</div>
+                  <div class="task-progress-primary">{{ getTaskProgressPrimary(task) }}</div>
+                  <div v-if="getTaskProgressSecondary(task)" class="task-progress-secondary">{{ getTaskProgressSecondary(task) }}</div>
+                  <el-progress :percentage="task.progress_meta_json?.percent ?? task.progress" :stroke-width="6" :show-text="false" />
                 </div>
                 <el-button text type="danger" size="small" @click.stop="cancelTask(task)">取消</el-button>
               </div>
@@ -419,8 +449,9 @@ import {
 import { apiTasks } from '@/api'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
-import type { Task, TaskDiagnosticCheck, TaskDiagnosticsResponse, TaskLogItem } from '@/types'
+import type { IncrementalUpdateStatus, Task, TaskDiagnosticCheck, TaskDiagnosticsResponse, TaskLogItem, TaskProgressMeta } from '@/types'
 import { loadInitTaskViewState, saveInitTaskViewState, clearInitTaskViewState } from '@/utils/initTaskViewState'
+import { formatDuration } from '@/utils'
 
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
@@ -444,9 +475,34 @@ function createEmptyDataStatus() {
   }
 }
 
+function createEmptyIncrementalStatus(): IncrementalUpdateStatus {
+  return {
+    status: 'idle',
+    running: false,
+    progress: 0,
+    current: 0,
+    total: 0,
+    current_code: '',
+    updated_count: 0,
+    skipped_count: 0,
+    failed_count: 0,
+    started_at: '',
+    completed_at: '',
+    eta_seconds: null,
+    elapsed_seconds: 0,
+    resume_supported: true,
+    initial_completed: 0,
+    completed_in_run: 0,
+    checkpoint_path: null,
+    last_error: null,
+    message: '',
+  }
+}
+
 const dataStatus = ref({
   ...createEmptyDataStatus(),
 })
+const incrementalStatus = ref<IncrementalUpdateStatus>(createEmptyIncrementalStatus())
 
 // 任务状态
 const runningTasks = ref<Task[]>([])
@@ -480,6 +536,8 @@ let lastTaskSocketId: number | null = null
 
 // 计算属性
 const runningTasksCount = computed(() => runningTasks.value.length)
+const hasActiveBackgroundWork = computed(() => runningTasksCount.value > 0 || incrementalStatus.value.running)
+const hasFailedIncrementalUpdate = computed(() => incrementalStatus.value.status === 'failed')
 const initializationRunningTask = computed(() => runningTasks.value.find((task) => isBootstrapTask(task)) || null)
 const latestFailedBootstrapTask = computed(() => {
   if (bootstrapFinished.value) return null
@@ -487,6 +545,18 @@ const latestFailedBootstrapTask = computed(() => {
 })
 const selectedRecoveryTask = computed(() => selectedTask.value || initializationRunningTask.value || latestFailedBootstrapTask.value)
 const bootstrapInProgress = computed(() => bootstrapStarting.value || Boolean(initializationRunningTask.value))
+const activeWorkHint = computed(() => {
+  if (initializationRunningTask.value) {
+    return `当前有 ${runningTasksCount.value} 个全量任务正在运行`
+  }
+  if (incrementalStatus.value.running) {
+    return `增量更新进行中：${incrementalStatus.value.current}/${incrementalStatus.value.total || '-'}`
+  }
+  if (runningTasksCount.value > 0) {
+    return `当前有 ${runningTasksCount.value} 个任务正在运行`
+  }
+  return ''
+})
 
 const bootstrapFinished = computed(() => {
   return dataLoaded.value
@@ -524,7 +594,7 @@ const bootstrapDescription = computed(() => {
     return configStore.statusError || '后端服务暂不可用，请先恢复服务，再回到任务中心继续初始化。'
   }
   if (initializationRunningTask.value) {
-    return `初始化任务 #${initializationRunningTask.value.id} 正在执行，当前阶段：${getStageLabel(initializationRunningTask.value.task_stage)}。`
+    return `初始化任务 #${initializationRunningTask.value.id} 正在执行，当前阶段：${getTaskStageText(initializationRunningTask.value)}。`
   }
   if (latestFailedBootstrapTask.value) {
     return `上一次初始化任务 #${latestFailedBootstrapTask.value.id} 失败。可查看日志定位失败点后重新发起。`
@@ -578,7 +648,7 @@ const stalledBootstrapAlert = computed(() => {
   const elapsedMinutes = Math.max(1, Math.floor(elapsedMs / 60000))
   if (elapsedMinutes < 15) return null
 
-  const stage = getStageLabel(task.task_stage)
+  const stage = getTaskStageText(task)
   return {
     title: '初始化耗时明显偏长',
     description: `任务 #${task.id} 已持续约 ${elapsedMinutes} 分钟，当前阶段为“${stage}”。若日志长时间没有新内容，可先复制诊断摘要，再尝试刷新状态或重连推送。`,
@@ -708,15 +778,17 @@ onUnmounted(() => {
 // 核心方法
 async function reloadAll() {
   try {
-    const [runningResp, statusResp, envResp, diagnosticsResp] = await Promise.all([
+    const [runningResp, statusResp, envResp, diagnosticsResp, incrementalResp] = await Promise.all([
       apiTasks.getRunning(),
       apiTasks.getStatus(),
       apiTasks.getEnvironment(),
       apiTasks.getDiagnostics(),
+      apiTasks.getIncrementalStatus(),
     ])
 
     runningTasks.value = runningResp.tasks
     diagnostics.value = diagnosticsResp
+    incrementalStatus.value = incrementalResp
 
     // 获取历史任务（已完成的）
     try {
@@ -792,8 +864,17 @@ async function retryBootstrap() {
 async function startDataUpdate() {
   startingUpdate.value = true
   try {
-    const result = await apiTasks.startUpdate('quant', false, 1)
-    ElMessage.success(`数据更新任务已启动 #${result.task.id}`)
+    const result = await apiTasks.startIncrementalUpdate()
+    if (!result.success) {
+      if (result.running || result.state?.running) {
+        ElMessage.warning(result.message || '检测到已有增量更新，已恢复当前进度')
+      } else {
+        ElMessage.error(result.message || '增量更新启动失败')
+      }
+      await reloadAll()
+      return
+    }
+    ElMessage.success(result.message || '最新交易日增量更新已启动')
     await reloadAll()
   } catch (error: any) {
     ElMessage.error(error.message || '启动失败')
@@ -805,8 +886,9 @@ async function startDataUpdate() {
 async function startFullUpdate() {
   startingFullUpdate.value = true
   try {
-    const result = await apiTasks.startUpdate('quant', false, 1000)
-    ElMessage.success(`历史数据更新任务已启动 #${result.task.id}`)
+    const result = await apiTasks.startUpdate('quant', false, 1)
+    ElMessage.success(`全量初始化任务已启动 #${result.task.id}`)
+    await focusTask(result.task, 'logs')
     await reloadAll()
   } catch (error: any) {
     ElMessage.error(error.message || '启动失败')
@@ -1229,15 +1311,65 @@ function getStageLabel(stage?: string | null): string {
     queued: '排队中',
     starting: '启动中',
     preparing: '准备中',
-    fetch_data: '抓取数据',
-    build_pool: '构建流动池',
-    build_candidates: '生成候选',
-    pre_filter: '前置过滤',
-    score_review: '量化复核',
-    finalize: '收尾输出',
+    fetch_data: '抓取原始数据',
+    build_pool: '量化初选',
+    build_candidates: '导出候选图表',
+    pre_filter: '生成评分结果',
+    score_review: '导出 PASS 图表',
+    finalize: '输出推荐结果',
     completed: '已完成',
+    failed: '执行失败',
+    cancelled: '已取消',
   }
   return stage ? (labels[stage] || stage) : '-'
+}
+
+function getTaskMeta(task: Task): TaskProgressMeta | undefined {
+  return task.progress_meta_json
+}
+
+function getTaskStageText(task: Task): string {
+  const meta = getTaskMeta(task)
+  return meta?.stage_label || getStageLabel(meta?.stage || task.task_stage)
+}
+
+function getElapsedSeconds(startedAt?: string): number {
+  if (!startedAt) return 0
+  const elapsedMs = Date.now() - new Date(startedAt).getTime()
+  return elapsedMs > 0 ? Math.floor(elapsedMs / 1000) : 0
+}
+
+function formatSeconds(seconds?: number | null): string {
+  if (seconds == null) return '-'
+  return formatDuration(seconds)
+}
+
+function getTaskProgressPrimary(task: Task): string {
+  const meta = getTaskMeta(task)
+  if (meta?.current != null && meta?.total != null) {
+    return `进度 ${meta.current}/${meta.total}`
+  }
+  if (meta?.stage_index != null && meta?.stage_total != null) {
+    return `阶段 ${meta.stage_index}/${meta.stage_total}`
+  }
+  return `进度 ${meta?.percent ?? task.progress}%`
+}
+
+function getTaskProgressSecondary(task: Task): string {
+  const meta = getTaskMeta(task)
+  const parts: string[] = []
+  if (meta?.eta_seconds != null) {
+    parts.push(`预计剩余 ${formatSeconds(meta.eta_seconds)}`)
+  } else if (task.status === 'running' && task.started_at) {
+    parts.push(`已运行 ${formatSeconds(getElapsedSeconds(task.started_at))}`)
+  }
+  if (meta?.current_code) {
+    parts.push(`当前 ${meta.current_code}`)
+  }
+  if (meta?.failed_count) {
+    parts.push(`失败 ${meta.failed_count}`)
+  }
+  return parts.join(' / ')
 }
 
 function formatDateTime(dateStr?: string): string {
@@ -1327,6 +1459,11 @@ function buildDiagnosticsSummary() {
     `推送状态: ${socketStatusLabel.value}`,
     `运行中任务: ${runningTasks.value.length}`,
   ]
+  if (incrementalStatus.value.running) {
+    lines.push(
+      `增量更新: ${incrementalStatus.value.current}/${incrementalStatus.value.total} / 预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}`
+    )
+  }
   for (const check of diagnosticChecks.value) {
     lines.push(`[${getCheckStatusLabel(check.status)}] ${check.label}: ${check.summary}`)
     if (check.action) {
@@ -1334,7 +1471,7 @@ function buildDiagnosticsSummary() {
     }
   }
   if (initializationRunningTask.value) {
-    lines.push(`初始化任务: #${initializationRunningTask.value.id} / ${getStageLabel(initializationRunningTask.value.task_stage)} / ${initializationRunningTask.value.progress}%`)
+    lines.push(`初始化任务: #${initializationRunningTask.value.id} / ${getTaskStageText(initializationRunningTask.value)} / ${initializationRunningTask.value.progress}%`)
   }
   if (latestFailedBootstrapTask.value?.error_message) {
     lines.push(`最近失败: ${latestFailedBootstrapTask.value.error_message}`)
@@ -1580,6 +1717,39 @@ function buildWebSocketUrl(path: string) {
     }
   }
 
+  .incremental-progress-card {
+    border: 1px solid #bfdbfe;
+    background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+
+    .incremental-progress-card__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .incremental-progress-card__title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1d4ed8;
+    }
+
+    .incremental-progress-card__meta,
+    .incremental-progress-card__counts {
+      margin-top: 6px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #475569;
+    }
+
+    .incremental-progress-card__counts {
+      margin-top: 0;
+      text-align: right;
+      white-space: nowrap;
+    }
+  }
+
   // 任务卡片
   .tasks-card {
     :deep(.el-card__body) {
@@ -1639,6 +1809,19 @@ function buildWebSocketUrl(path: string) {
   .task-stage {
     font-size: 13px;
     color: var(--color-text-secondary);
+    margin-bottom: 6px;
+  }
+
+  .task-progress-primary {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin-bottom: 4px;
+  }
+
+  .task-progress-secondary {
+    font-size: 12px;
+    color: #64748b;
     margin-bottom: 8px;
   }
 
@@ -1939,6 +2122,15 @@ function buildWebSocketUrl(path: string) {
 
     .action-buttons {
       flex-direction: column;
+    }
+
+    .incremental-progress-card__header {
+      flex-direction: column;
+    }
+
+    .incremental-progress-card__counts {
+      text-align: left;
+      white-space: normal;
     }
   }
 }

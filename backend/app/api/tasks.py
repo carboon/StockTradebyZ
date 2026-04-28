@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Task, TaskLog
+from app.models import Config, Task, TaskLog
 from app.services.task_service import TaskService
 from app.services.tushare_service import TushareService
 from app.schemas import (
@@ -40,6 +40,19 @@ OVERVIEW_CACHE_TTL_SECONDS = 20
 _overview_cache: dict = {"data": None, "expires_at": 0.0}
 
 
+def _is_failure_resolved(
+    latest_failed: Task | None,
+    latest_success: Task | None,
+    *,
+    data_ready: bool,
+) -> bool:
+    if not data_ready or latest_failed is None or latest_success is None:
+        return False
+    if latest_failed.completed_at is None or latest_success.completed_at is None:
+        return False
+    return latest_success.completed_at > latest_failed.completed_at
+
+
 def _ensure_tushare_ready() -> None:
     service = TushareService()
     valid, message = service.verify_token()
@@ -47,8 +60,24 @@ def _ensure_tushare_ready() -> None:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
 
 
-def _build_environment_sections(tushare_service: TushareService) -> list[TaskEnvironmentSection]:
+def _resolve_runtime_config_value(db: Session, key: str) -> str:
+    env_key = key.upper()
+    env_value = os.environ.get(env_key, "").strip()
+    if env_value and env_value != "your_tushare_token_here":
+        return env_value
+
+    db_key = key.lower()
+    db_config = db.query(Config).filter(Config.key == db_key).first()
+    return str(db_config.value).strip() if db_config and db_config.value is not None else ""
+
+
+def _build_environment_sections(tushare_service: TushareService, db: Session) -> list[TaskEnvironmentSection]:
     data_status = tushare_service.check_data_status()
+    runtime_tushare_token = _resolve_runtime_config_value(db, "TUSHARE_TOKEN")
+    runtime_zhipuai_api_key = _resolve_runtime_config_value(db, "ZHIPUAI_API_KEY")
+    runtime_dashscope_api_key = _resolve_runtime_config_value(db, "DASHSCOPE_API_KEY")
+    runtime_gemini_api_key = _resolve_runtime_config_value(db, "GEMINI_API_KEY")
+    runtime_default_reviewer = _resolve_runtime_config_value(db, "DEFAULT_REVIEWER") or settings.default_reviewer
     return [
         TaskEnvironmentSection(
             key="service",
@@ -78,11 +107,11 @@ def _build_environment_sections(tushare_service: TushareService) -> list[TaskEnv
             key="integrations",
             label="外部依赖",
             items={
-                "tushare_configured": bool(settings.tushare_token),
-                "zhipuai_configured": bool(settings.zhipuai_api_key),
-                "dashscope_configured": bool(settings.dashscope_api_key),
-                "gemini_configured": bool(settings.gemini_api_key),
-                "default_reviewer": settings.default_reviewer,
+                "tushare_configured": bool(runtime_tushare_token),
+                "zhipuai_configured": bool(runtime_zhipuai_api_key),
+                "dashscope_configured": bool(runtime_dashscope_api_key),
+                "gemini_configured": bool(runtime_gemini_api_key),
+                "default_reviewer": runtime_default_reviewer,
             },
         ),
         TaskEnvironmentSection(
@@ -114,6 +143,7 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
     """启动全量更新"""
     # 导入 manager 实例
     from app.main import manager
+    from app.services.market_service import MarketService
     task_service = TaskService(db, manager=manager)
 
     existing_task = task_service.get_active_full_task()
@@ -121,6 +151,13 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
         return TaskResponse(
             task=TaskItem.model_validate(existing_task, from_attributes=True),
             ws_url=f"/ws/tasks/{existing_task.id}",
+        )
+
+    incremental_state = MarketService.get_update_state()
+    if incremental_state.get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail="当前有增量更新任务正在运行，请等待完成后再启动全量初始化。",
         )
 
     _ensure_tushare_ready()
@@ -154,6 +191,16 @@ async def start_incremental_update(
         end_date: 结束日期 (YYYY-MM-DD)，默认为今天
     """
     from app.services.market_service import market_service, MarketService
+    task_service = TaskService(db)
+
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        return {
+            "success": False,
+            "message": f"当前有全量初始化任务 #{active_full_task.id} 正在运行，请稍后再执行增量更新。",
+            "running": False,
+            "blocking_task_id": active_full_task.id,
+        }
 
     # 检查是否已有更新在运行
     update_state = MarketService.get_update_state()
@@ -176,19 +223,23 @@ async def start_incremental_update(
     async def run_incremental_update():
         try:
             # 定义进度回调
-            def progress_cb(current, total, code, status):
-                MarketService.update_progress(current, total, code, status)
+            def progress_cb(payload):
+                MarketService.update_progress(payload)
 
             result = market_service.incremental_update(
                 end_date=end_date,
                 progress_callback=progress_cb,
             )
 
-            MarketService.finish_update()
-        except Exception as e:
+            if result.get("ok"):
+                MarketService.finish_update("增量更新完成")
+            else:
+                failed_count = result.get("failed", 0)
+                MarketService.fail_update(f"增量更新失败，仍有 {failed_count} 只股票未完成，可稍后继续恢复。")
+        except Exception:
             import traceback
             traceback.print_exc()
-            MarketService.finish_update()
+            MarketService.fail_update("增量更新异常中断，可稍后继续恢复。")
 
     # 在后台运行
     import asyncio
@@ -208,14 +259,24 @@ async def get_incremental_status() -> dict:
 
     state = MarketService.get_update_state()
     return {
+        "status": state["status"],
         "running": state["running"],
         "progress": state["progress"],
+        "current": state["current"],
         "total": state["total"],
         "current_code": state["current_code"],
         "updated_count": state["updated_count"],
         "skipped_count": state["skipped_count"],
         "failed_count": state["failed_count"],
         "started_at": state["started_at"],
+        "completed_at": state["completed_at"],
+        "eta_seconds": state["eta_seconds"],
+        "elapsed_seconds": state["elapsed_seconds"],
+        "resume_supported": state["resume_supported"],
+        "initial_completed": state["initial_completed"],
+        "completed_in_run": state["completed_in_run"],
+        "checkpoint_path": state["checkpoint_path"],
+        "last_error": state["last_error"],
         "message": state["message"],
     }
 
@@ -247,6 +308,7 @@ async def get_task_overview(db: Session = Depends(get_db)) -> TaskOverviewRespon
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
     data_ready = all(bool(data_status[key].get("exists")) for key in ["raw_data", "candidates", "analysis"])
+    failure_resolved = _is_failure_resolved(latest_failed, latest_success, data_ready=data_ready)
 
     cards = [
         TaskOverviewCard(
@@ -260,8 +322,8 @@ async def get_task_overview(db: Session = Depends(get_db)) -> TaskOverviewRespon
             key="failed",
             label="失败任务",
             value=str(failed_count),
-            status="danger" if failed_count else "success",
-            meta="历史累计",
+            status="warning" if failed_count and failure_resolved else ("danger" if failed_count else "success"),
+            meta="历史累计（当前已恢复）" if failed_count and failure_resolved else "历史累计",
         ),
         TaskOverviewCard(
             key="latest_success",
@@ -290,9 +352,13 @@ async def get_task_overview(db: Session = Depends(get_db)) -> TaskOverviewRespon
     if failed_count:
         alerts.append(
             TaskAlertItem(
-                level="error",
-                title="存在失败任务",
-                message=f"当前共有 {failed_count} 个失败任务，请优先检查最近失败记录。",
+                level="warning" if failure_resolved else "error",
+                title="存在历史失败记录" if failure_resolved else "存在失败任务",
+                message=(
+                    f"当前共有 {failed_count} 个失败任务，但最新一次初始化已成功完成，可按需查看历史失败记录。"
+                    if failure_resolved
+                    else f"当前共有 {failed_count} 个失败任务，请优先检查最近失败记录。"
+                ),
             )
         )
     if latest_failed and latest_failed.error_message:
@@ -343,14 +409,14 @@ async def get_running_tasks(db: Session = Depends(get_db)) -> TaskRunningRespons
 @router.get("/environment", response_model=TaskEnvironmentResponse)
 async def get_task_environment(db: Session = Depends(get_db)) -> TaskEnvironmentResponse:
     tushare_service = TushareService()
-    return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service))
+    return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service, db))
 
 
 @router.get("/diagnostics", response_model=TaskDiagnosticsResponse)
 async def get_task_diagnostics(db: Session = Depends(get_db)) -> TaskDiagnosticsResponse:
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
-    environment = _build_environment_sections(tushare_service)
+    environment = _build_environment_sections(tushare_service, db)
 
     running_tasks = (
         db.query(Task)
@@ -382,6 +448,7 @@ async def get_task_diagnostics(db: Session = Depends(get_db)) -> TaskDiagnostics
     db_dir = settings.db_dir
     db_dir_writable = os.access(db_dir, os.W_OK) if db_dir.exists() else False
     data_ready = all(bool(data_status[key].get("exists")) for key in ["raw_data", "candidates", "analysis"])
+    failure_resolved = _is_failure_resolved(latest_failed, latest_completed, data_ready=data_ready)
 
     checks = [
         TaskDiagnosticCheck(
@@ -404,9 +471,9 @@ async def get_task_diagnostics(db: Session = Depends(get_db)) -> TaskDiagnostics
         TaskDiagnosticCheck(
             key="tushare",
             label="Tushare 配置",
-            status="success" if settings.tushare_token else "warning",
+            status="success" if tushare_service.token else "warning",
             summary="已检测到 Tushare Token，可继续验证。"
-            if settings.tushare_token
+            if tushare_service.token
             else "尚未配置 Tushare Token，首次初始化无法启动。",
             action="前往配置页填写并验证 Tushare Token。",
         ),
@@ -424,10 +491,12 @@ async def get_task_diagnostics(db: Session = Depends(get_db)) -> TaskDiagnostics
         TaskDiagnosticCheck(
             key="task_recovery",
             label="任务恢复",
-            status="warning" if latest_failed else ("info" if running_tasks else "success"),
+            status="success" if failure_resolved else ("warning" if latest_failed else ("info" if running_tasks else "success")),
             summary=(
                 f"存在 {len(running_tasks)} 个运行中任务，可在任务中心恢复查看。"
                 if running_tasks
+                else "最近一次初始化已成功完成，历史失败记录不影响当前使用。"
+                if failure_resolved
                 else f"最近一次失败任务 #{latest_failed.id} 可查看日志恢复。"
                 if latest_failed
                 else "当前没有运行中任务，也没有待处理失败任务。"
@@ -516,7 +585,9 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db)) -> dict:
         if task.status in ["running", "pending"]:
             task.status = "cancelled"
             task.task_stage = "cancelled"
-            db.add(TaskLog(task_id=task.id, level="warning", stage="cancelled", message="任务已取消"))
+            task.progress_meta_json = TaskService._build_stage_meta("cancelled", progress=task.progress, message="任务已取消")
+            if not success:
+                db.add(TaskLog(task_id=task.id, level="warning", stage="cancelled", message="任务已取消"))
             db.commit()
             _overview_cache["expires_at"] = 0.0
             return {"status": "ok", "message": "任务已取消"}

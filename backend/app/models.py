@@ -139,6 +139,7 @@ class Task(Base):
     task_stage: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     params_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
+    progress_meta_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

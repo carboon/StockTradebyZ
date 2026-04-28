@@ -5,211 +5,221 @@
         <span>配置管理</span>
       </template>
 
-      <div class="startup-panel">
-        <div class="startup-panel__header">
-          <div>
-            <div class="startup-panel__title">首次启动自检</div>
-            <div class="startup-panel__subtitle">先确认本机环境、Token、数据库和初始化状态，再决定下一步。</div>
+      <el-tabs v-model="activeTab">
+        <!-- Tab 1: 参数配置 -->
+        <el-tab-pane label="参数配置" name="config">
+          <el-form :model="configs" label-width="140px" class="config-form">
+            <el-alert
+              v-if="!configStore.apiAvailable"
+              title="后端服务暂不可用"
+              :description="configStore.statusError || '当前无法连接后端服务，请确认后端已启动后再重试。'"
+              type="error"
+              show-icon
+              :closable="false"
+              class="status-alert"
+            />
+
+            <!-- Tushare 配置 -->
+            <el-divider content-position="left">Tushare 配置</el-divider>
+
+            <el-form-item label="API Token">
+              <el-input
+                v-model="configs.tushare_token"
+                type="password"
+                show-password
+                placeholder="请输入 Tushare API Token"
+                style="width: 400px"
+              />
+              <el-button
+                type="primary"
+                class="verify-button"
+                style="margin-left: 12px"
+                :loading="verifying"
+                @click="verifyTushare"
+              >
+                验证
+              </el-button>
+              <div class="form-tip">
+                获取地址: <a href="https://tushare.pro/user/token" target="_blank">https://tushare.pro/user/token</a>
+              </div>
+            </el-form-item>
+
+            <!-- LLM 配置 -->
+            <el-divider content-position="left" class="llm-divider">LLM API 配置 (待完善)</el-divider>
+
+            <el-form-item label="GLM API Key">
+              <el-input
+                v-model="configs.zhipuai_api_key"
+                type="password"
+                show-password
+                placeholder="智谱 GLM-4V-Flash (免费)"
+                style="width: 400px"
+                disabled
+              />
+              <div class="form-tip form-tip-disabled">
+                获取地址: <a href="https://open.bigmodel.cn/usercenter/apikeys" target="_blank">https://open.bigmodel.cn</a>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="通义千问 Key">
+              <el-input
+                v-model="configs.dashscope_api_key"
+                type="password"
+                show-password
+                placeholder="阿里云通义千问 VL"
+                style="width: 400px"
+                disabled
+              />
+              <div class="form-tip form-tip-disabled">
+                获取地址: <a href="https://dashscope.console.aliyun.com/apiKey" target="_blank">阿里云控制台</a>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="Gemini Key">
+              <el-input
+                v-model="configs.gemini_api_key"
+                type="password"
+                show-password
+                placeholder="Google Gemini"
+                style="width: 400px"
+                disabled
+              />
+              <div class="form-tip form-tip-disabled">
+                获取地址: <a href="https://ai.google.dev/" target="_blank">https://ai.google.dev/</a>
+              </div>
+            </el-form-item>
+
+            <!-- 其他配置 -->
+            <el-divider content-position="left">其他配置</el-divider>
+
+            <el-form-item label="默认评分器">
+              <el-radio-group v-model="configs.default_reviewer">
+                <el-radio value="quant">量化评分</el-radio>
+                <el-radio value="glm" disabled>GLM</el-radio>
+                <el-radio value="qwen" disabled>通义千问</el-radio>
+                <el-radio value="gemini" disabled>Gemini</el-radio>
+              </el-radio-group>
+            </el-form-item>
+
+            <el-form-item label="推荐分数阈值">
+              <el-input-number
+                v-model="configs.min_score_threshold"
+                :min="0"
+                :max="5"
+                :step="0.1"
+                :precision="1"
+              />
+              <span class="form-tip">分数 >= 此值的股票将被推荐</span>
+              <el-tooltip
+                effect="dark"
+                placement="top"
+                content="来自对目标股票的趋势结构、价格位置、量价行为、历史异动，四个维度进行的经验评价，详见单股诊断。"
+              >
+                <el-icon class="question-icon"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </el-form-item>
+
+            <!-- 保存按钮 -->
+            <el-form-item>
+              <el-button type="primary" :loading="saving" @click="saveConfigs(false)">
+                保存配置
+              </el-button>
+              <el-button type="success" :loading="savingAndInitializing" @click="saveConfigs(true)">
+                保存并初始化
+              </el-button>
+              <el-button @click="loadConfigs">重置</el-button>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+
+        <!-- Tab 2: 系统自检 -->
+        <el-tab-pane label="系统自检" name="diagnostics">
+          <div class="startup-panel">
+            <div class="startup-panel__header">
+              <div>
+                <div class="startup-panel__title">首次启动自检</div>
+                <div class="startup-panel__subtitle">先确认本机环境、Token、数据库和初始化状态，再决定下一步。</div>
+              </div>
+              <div class="startup-panel__actions">
+                <el-button :loading="diagnosticsLoading" @click="loadDiagnostics">重新检查</el-button>
+                <el-button v-if="diagnosticsPrimaryAction" type="primary" @click="handleDiagnosticsAction">
+                  {{ diagnosticsPrimaryAction }}
+                </el-button>
+              </div>
+            </div>
+
+            <div class="startup-checklist">
+              <div
+                v-for="check in startupChecks"
+                :key="check.key"
+                class="startup-check"
+                :class="`is-${check.status}`"
+              >
+                <div class="startup-check__main">
+                  <div class="startup-check__title-row">
+                    <span class="startup-check__title">{{ check.label }}</span>
+                    <el-tag :type="checkTagType(check.status)" size="small">{{ checkStatusLabel(check.status) }}</el-tag>
+                  </div>
+                  <div class="startup-check__summary">{{ check.summary }}</div>
+                  <div v-if="check.action" class="startup-check__action">{{ check.action }}</div>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="startup-panel__actions">
-            <el-button :loading="diagnosticsLoading" @click="loadDiagnostics">重新检查</el-button>
-            <el-button v-if="diagnosticsPrimaryAction" type="primary" @click="handleDiagnosticsAction">
-              {{ diagnosticsPrimaryAction }}
+
+          <el-alert
+            v-if="statusSummary"
+            :title="statusSummary.title"
+            :description="statusSummary.description"
+            :type="statusSummary.type"
+            show-icon
+            :closable="false"
+            class="status-alert"
+          />
+          <el-alert
+            v-if="initGuide"
+            :title="initGuide.title"
+            :description="initGuide.description"
+            :type="initGuide.type"
+            show-icon
+            :closable="false"
+            class="status-alert"
+          />
+
+          <div class="init-guide-panel">
+            <div class="init-guide-copy">
+              <div class="init-guide-title">首次使用建议路径</div>
+              <div class="init-guide-text">
+                1. 填写并验证 Tushare Token。2. 点击"保存并初始化"启动全量初始化。3. 系统会跳转到任务中心查看进度；刷新页面后会尽量恢复到当前任务视图。
+              </div>
+            </div>
+            <el-button
+              v-if="showTaskCenterShortcut"
+              text
+              type="primary"
+              @click="goToTaskCenter"
+            >
+              {{ taskCenterShortcutText }}
             </el-button>
           </div>
-        </div>
 
-        <div class="startup-checklist">
-          <div
-            v-for="check in startupChecks"
-            :key="check.key"
-            class="startup-check"
-            :class="`is-${check.status}`"
-          >
-            <div class="startup-check__main">
-              <div class="startup-check__title-row">
-                <span class="startup-check__title">{{ check.label }}</span>
-                <el-tag :type="checkTagType(check.status)" size="small">{{ checkStatusLabel(check.status) }}</el-tag>
-              </div>
-              <div class="startup-check__summary">{{ check.summary }}</div>
-              <div v-if="check.action" class="startup-check__action">{{ check.action }}</div>
+          <div v-if="nextStepCards.length > 0" class="next-steps-panel">
+            <div class="next-steps-panel__title">初始化完成后的推荐入口</div>
+            <div class="next-steps-grid">
+              <button
+                v-for="item in nextStepCards"
+                :key="item.title"
+                type="button"
+                class="next-step-card"
+                @click="router.push(item.route)"
+              >
+                <div class="next-step-card__title">{{ item.title }}</div>
+                <div class="next-step-card__desc">{{ item.description }}</div>
+              </button>
             </div>
           </div>
-        </div>
-      </div>
-
-        <el-form :model="configs" label-width="140px" class="config-form">
-        <el-alert
-          v-if="!configStore.apiAvailable"
-          title="后端服务暂不可用"
-          :description="configStore.statusError || '当前无法连接后端服务，请确认后端已启动后再重试。'"
-          type="error"
-          show-icon
-          :closable="false"
-          class="status-alert"
-        />
-        <el-alert
-          v-if="statusSummary"
-          :title="statusSummary.title"
-          :description="statusSummary.description"
-          :type="statusSummary.type"
-          show-icon
-          :closable="false"
-          class="status-alert"
-        />
-        <el-alert
-          v-if="initGuide"
-          :title="initGuide.title"
-          :description="initGuide.description"
-          :type="initGuide.type"
-          show-icon
-          :closable="false"
-          class="status-alert"
-        />
-        <div class="init-guide-panel">
-          <div class="init-guide-copy">
-            <div class="init-guide-title">首次使用建议路径</div>
-            <div class="init-guide-text">
-              1. 填写并验证 Tushare Token。2. 点击“保存并初始化”启动全量初始化。3. 系统会跳转到任务中心查看进度；刷新页面后会尽量恢复到当前任务视图。
-            </div>
-          </div>
-          <el-button
-            v-if="showTaskCenterShortcut"
-            text
-            type="primary"
-            @click="goToTaskCenter"
-          >
-            {{ taskCenterShortcutText }}
-          </el-button>
-        </div>
-
-        <div v-if="nextStepCards.length > 0" class="next-steps-panel">
-          <div class="next-steps-panel__title">初始化完成后的推荐入口</div>
-          <div class="next-steps-grid">
-            <button
-              v-for="item in nextStepCards"
-              :key="item.title"
-              type="button"
-              class="next-step-card"
-              @click="router.push(item.route)"
-            >
-              <div class="next-step-card__title">{{ item.title }}</div>
-              <div class="next-step-card__desc">{{ item.description }}</div>
-            </button>
-          </div>
-        </div>
-
-        <!-- Tushare 配置 -->
-        <el-divider content-position="left">Tushare 配置</el-divider>
-
-        <el-form-item label="API Token">
-          <el-input
-            v-model="configs.tushare_token"
-            type="password"
-            show-password
-            placeholder="请输入 Tushare API Token"
-            style="width: 400px"
-          />
-          <el-button
-            type="primary"
-            class="verify-button"
-            style="margin-left: 12px"
-            :loading="verifying"
-            @click="verifyTushare"
-          >
-            验证
-          </el-button>
-          <div class="form-tip">
-            获取地址: <a href="https://tushare.pro/user/token" target="_blank">https://tushare.pro/user/token</a>
-          </div>
-        </el-form-item>
-
-        <!-- LLM 配置 -->
-        <el-divider content-position="left" class="llm-divider">LLM API 配置 (待完善)</el-divider>
-
-        <el-form-item label="GLM API Key">
-          <el-input
-            v-model="configs.zhipuai_api_key"
-            type="password"
-            show-password
-            placeholder="智谱 GLM-4V-Flash (免费)"
-            style="width: 400px"
-            disabled
-          />
-          <div class="form-tip form-tip-disabled">
-            获取地址: <a href="https://open.bigmodel.cn/usercenter/apikeys" target="_blank">https://open.bigmodel.cn</a>
-          </div>
-        </el-form-item>
-
-        <el-form-item label="通义千问 Key">
-          <el-input
-            v-model="configs.dashscope_api_key"
-            type="password"
-            show-password
-            placeholder="阿里云通义千问 VL"
-            style="width: 400px"
-            disabled
-          />
-          <div class="form-tip form-tip-disabled">
-            获取地址: <a href="https://dashscope.console.aliyun.com/apiKey" target="_blank">阿里云控制台</a>
-          </div>
-        </el-form-item>
-
-        <el-form-item label="Gemini Key">
-          <el-input
-            v-model="configs.gemini_api_key"
-            type="password"
-            show-password
-            placeholder="Google Gemini"
-            style="width: 400px"
-            disabled
-          />
-          <div class="form-tip form-tip-disabled">
-            获取地址: <a href="https://ai.google.dev/" target="_blank">https://ai.google.dev/</a>
-          </div>
-        </el-form-item>
-
-        <!-- 其他配置 -->
-        <el-divider content-position="left">其他配置</el-divider>
-
-        <el-form-item label="默认评分器">
-          <el-radio-group v-model="configs.default_reviewer">
-            <el-radio value="quant">量化评分</el-radio>
-            <el-radio value="glm" disabled>GLM</el-radio>
-            <el-radio value="qwen" disabled>通义千问</el-radio>
-            <el-radio value="gemini" disabled>Gemini</el-radio>
-          </el-radio-group>
-        </el-form-item>
-
-        <el-form-item label="推荐分数阈值">
-          <el-input-number
-            v-model="configs.min_score_threshold"
-            :min="0"
-            :max="5"
-            :step="0.1"
-            :precision="1"
-          />
-          <span class="form-tip">分数 >= 此值的股票将被推荐</span>
-          <el-tooltip
-            effect="dark"
-            placement="top"
-            content="来自对目标股票的趋势结构、价格位置、量价行为、历史异动，四个维度进行的经验评价，详见单股诊断。"
-          >
-            <el-icon class="question-icon"><InfoFilled /></el-icon>
-          </el-tooltip>
-        </el-form-item>
-
-        <!-- 保存按钮 -->
-        <el-form-item>
-          <el-button type="primary" :loading="saving" @click="saveConfigs(false)">
-            保存配置
-          </el-button>
-          <el-button type="success" :loading="savingAndInitializing" @click="saveConfigs(true)">
-            保存并初始化
-          </el-button>
-          <el-button @click="loadConfigs">重置</el-button>
-        </el-form-item>
-      </el-form>
+        </el-tab-pane>
+      </el-tabs>
     </el-card>
   </div>
 </template>
@@ -228,6 +238,8 @@ import type { TaskDiagnosticCheck, TaskDiagnosticsResponse } from '@/types'
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
 const router = useRouter()
+
+const activeTab = ref('config')
 
 const configs = ref({
   tushare_token: '',
@@ -285,7 +297,7 @@ const initGuide = computed(() => {
     return {
       type: 'warning' as const,
       title: 'Token 未验证，初始化入口暂不可用',
-      description: '只有验证通过后，“保存并初始化”才会启动任务。验证成功后会自动进入任务中心查看进度。',
+      description: '只有验证通过后，"保存并初始化"才会启动任务。验证成功后会自动进入任务中心查看进度。',
     }
   }
 
@@ -630,99 +642,99 @@ async function saveConfigs(startInitialization: boolean) {
     font-size: 13px;
   }
 
-  .verify-button {
-    border-color: #0284c7;
-    background: #0284c7;
-    color: #fff;
+  .status-alert {
+    margin-bottom: 20px;
+  }
 
-    &:hover,
-    &:focus {
-      border-color: #0369a1;
-      background: #0369a1;
-      color: #fff;
-    }
+  .init-guide-panel {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0 0 24px;
+    padding: 16px 18px;
+    border-radius: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+  }
+
+  .init-guide-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .init-guide-title {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .init-guide-text {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--color-text-secondary);
+  }
+
+  .next-steps-panel {
+    margin: 0 0 24px;
+    padding: 18px;
+    border-radius: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+  }
+
+  .next-steps-panel__title {
+    margin-bottom: 14px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .next-steps-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .next-step-card {
+    padding: 14px;
+    border: 1px solid #dbeafe;
+    border-radius: 12px;
+    background: #fff;
+    text-align: left;
+    cursor: pointer;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .next-step-card:hover {
+    transform: translateY(-1px);
+    border-color: #60a5fa;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  }
+
+  .next-step-card__title {
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #0f172a;
+  }
+
+  .next-step-card__desc {
+    font-size: 13px;
+    line-height: 1.7;
+    color: #475569;
   }
 
   .config-form {
-    .status-alert {
-      margin-bottom: 20px;
-    }
+    .verify-button {
+      border-color: #0284c7;
+      background: #0284c7;
+      color: #fff;
 
-    .init-guide-panel {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 16px;
-      margin: 0 0 24px;
-      padding: 16px 18px;
-      border-radius: 12px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-    }
-
-    .next-steps-panel {
-      margin: 0 0 24px;
-      padding: 18px;
-      border-radius: 12px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-    }
-
-    .next-steps-panel__title {
-      margin-bottom: 14px;
-      font-weight: 600;
-      color: var(--color-text-primary);
-    }
-
-    .next-steps-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .next-step-card {
-      padding: 14px;
-      border: 1px solid #dbeafe;
-      border-radius: 12px;
-      background: #fff;
-      text-align: left;
-      cursor: pointer;
-      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-    }
-
-    .next-step-card:hover {
-      transform: translateY(-1px);
-      border-color: #60a5fa;
-      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-    }
-
-    .next-step-card__title {
-      margin-bottom: 8px;
-      font-weight: 600;
-      color: #0f172a;
-    }
-
-    .next-step-card__desc {
-      font-size: 13px;
-      line-height: 1.7;
-      color: #475569;
-    }
-
-    .init-guide-copy {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .init-guide-title {
-      font-weight: 600;
-      color: var(--color-text-primary);
-    }
-
-    .init-guide-text {
-      font-size: 13px;
-      line-height: 1.7;
-      color: var(--color-text-secondary);
+      &:hover,
+      &:focus {
+        border-color: #0369a1;
+        background: #0369a1;
+        color: #fff;
+      }
     }
 
     .form-tip {
@@ -783,15 +795,13 @@ async function saveConfigs(startInitialization: boolean) {
       flex-wrap: wrap;
     }
 
-    .config-form {
-      .init-guide-panel {
-        flex-direction: column;
-        align-items: stretch;
-      }
+    .init-guide-panel {
+      flex-direction: column;
+      align-items: stretch;
+    }
 
-      .next-steps-grid {
-        grid-template-columns: 1fr;
-      }
+    .next-steps-grid {
+      grid-template-columns: 1fr;
     }
   }
 }

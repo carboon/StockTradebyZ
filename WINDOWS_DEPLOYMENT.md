@@ -29,8 +29,9 @@ winget install OpenJS.NodeJS.LTS
 - 首次执行会自动创建 `.venv`
 - 自动安装 Python 和前端依赖
 - 自动从 `.env.example` 复制 `.env`
-- 如果尚未配置 `TUSHARE_TOKEN`，会先启动前后端，等待你在页面内完成配置
-- 如果已配置 `TUSHARE_TOKEN`，会自动执行初始化数据并启动前后端
+- 如果尚未配置 `TUSHARE_TOKEN`，会先启动应用，等待你在页面内完成配置
+- 如果已配置 `TUSHARE_TOKEN`，会自动启动服务，再通过任务中心 API 执行初始化数据
+- 初始化和增量更新过程中，CLI 和页面右上角都会显示进度、总数和预计剩余时间
 
 ## 分步执行
 
@@ -54,8 +55,7 @@ winget install OpenJS.NodeJS.LTS
 
 ## 默认地址
 
-- 前端: `http://127.0.0.1:5173`
-- 后端: `http://127.0.0.1:8000`
+- 应用首页: `http://127.0.0.1:8000`
 - API 文档: `http://127.0.0.1:8000/docs`
 
 ## 配置文件
@@ -113,9 +113,13 @@ TUSHARE_TOKEN=你的token
 
 ```env
 BACKEND_PORT=8000
-FRONTEND_PORT=5173
-VITE_API_BASE_URL=http://127.0.0.1:8000/api
+VITE_API_BASE_URL=/api
 ```
+
+说明：
+
+- 本地个人部署由后端统一提供前端页面，不再依赖 `5173` 开发服务器
+- `FRONTEND_PORT` 仅对前端开发调试场景有意义
 
 ### 安装目录包含空格或中文
 

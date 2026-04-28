@@ -4,10 +4,7 @@ Task Service
 后台任务服务，集成 run_all.py
 """
 import asyncio
-import json
 import locale
-import os
-import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -24,10 +21,27 @@ class TaskService:
     ACTIVE_STATUSES = ("pending", "running")
     FULL_TASK_TYPES = ("full_update", "tomorrow_star")
     _creation_lock = threading.Lock()
+    _running_tasks: Dict[int, asyncio.subprocess.Process] = {}
+    _cancelled_tasks: set[int] = set()
+    STAGE_INFO = {
+        "queued": {"label": "排队中", "index": 0, "total": 6, "percent": 0},
+        "starting": {"label": "启动中", "index": 0, "total": 6, "percent": 0},
+        "preparing": {"label": "准备中", "index": 0, "total": 6, "percent": 2},
+        "fetch_data": {"label": "抓取原始数据", "index": 1, "total": 6, "percent": 10},
+        "build_pool": {"label": "量化初选", "index": 2, "total": 6, "percent": 35},
+        "build_candidates": {"label": "导出候选图表", "index": 3, "total": 6, "percent": 55},
+        "pre_filter": {"label": "生成评分结果", "index": 4, "total": 6, "percent": 72},
+        "score_review": {"label": "导出 PASS 图表", "index": 5, "total": 6, "percent": 88},
+        "finalize": {"label": "输出推荐结果", "index": 6, "total": 6, "percent": 96},
+        "analysis": {"label": "单股分析", "index": 1, "total": 1, "percent": 100},
+        "completed": {"label": "已完成", "index": 6, "total": 6, "percent": 100},
+        "failed": {"label": "执行失败", "index": 6, "total": 6, "percent": 100},
+        "cancelled": {"label": "已取消", "index": 6, "total": 6, "percent": 100},
+    }
 
     def __init__(self, db: Session, manager=None):
         self.db = db
-        self.running_tasks: Dict[int, subprocess.Popen] = {}
+        self.running_tasks = self.__class__._running_tasks
         self.manager = manager
 
     async def create_task(self, task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -51,6 +65,7 @@ class TaskService:
                 task_stage="queued",
                 params_json=params,
                 progress=0,
+                progress_meta_json=self._build_stage_meta("queued", progress=0, message="任务已进入队列"),
                 summary=self._build_summary(task_type, params),
             )
             self.db.add(task)
@@ -94,6 +109,7 @@ class TaskService:
         task.started_at = utc_now()
         task.progress = 0
         task.task_stage = "starting"
+        task.progress_meta_json = self._build_stage_meta("starting", progress=0, message="任务启动中")
         db.commit()
         self._record_task_log(db, task, "任务已启动", "info")
         await self._publish_ops_task_event(task, "task_started")
@@ -106,18 +122,30 @@ class TaskService:
             elif task.task_type == "tomorrow_star":
                 await self._run_tomorrow_star(task, db)
 
+            if task_id in self._cancelled_tasks:
+                raise asyncio.CancelledError()
+
             task.status = "completed"
             task.progress = 100
             task.task_stage = "completed"
             task.completed_at = utc_now()
+            task.progress_meta_json = self._build_stage_meta("completed", progress=100, message="任务执行完成")
             self._record_task_log(db, task, "任务执行完成", "success")
             await self._publish_ops_task_event(task, "task_completed")
 
+        except asyncio.CancelledError:
+            task.status = "cancelled"
+            task.task_stage = "cancelled"
+            task.completed_at = utc_now()
+            task.progress_meta_json = self._build_stage_meta("cancelled", progress=task.progress, message="任务已取消")
+            self._record_task_log(db, task, "任务已取消", "warning")
+            await self._publish_ops_task_event(task, "task_cancelled")
         except Exception as e:
             task.status = "failed"
             task.error_message = str(e)
             task.task_stage = "failed"
             task.completed_at = utc_now()
+            task.progress_meta_json = self._build_stage_meta("failed", progress=task.progress, message=f"任务执行失败: {str(e)}")
             self._record_task_log(db, task, f"任务执行失败: {str(e)}", "error")
             await self._publish_ops_task_event(task, "task_failed")
 
@@ -125,6 +153,7 @@ class TaskService:
             db.commit()
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
+            self._cancelled_tasks.discard(task_id)
 
     async def _run_full_update(self, task: Any, db: Session):
         """运行全量更新"""
@@ -133,6 +162,7 @@ class TaskService:
         skip_fetch = params.get("skip_fetch", False)
         start_from = params.get("start_from", 1)
         task.task_stage = "preparing"
+        task.progress_meta_json = self._build_stage_meta("preparing", progress=2, message="正在准备全量初始化任务")
         db.commit()
 
         # 构建命令
@@ -157,7 +187,13 @@ class TaskService:
         self.running_tasks[task.id] = process
 
         # 读取输出
-        from app.websocket.utils import send_log, parse_progress, parse_log_type
+        from app.websocket.utils import (
+            is_progress_line,
+            parse_log_type,
+            parse_progress,
+            parse_progress_payload,
+            send_log,
+        )
 
         while True:
             line = await process.stdout.readline()
@@ -176,11 +212,23 @@ class TaskService:
                 stage = self._parse_stage(line)
                 if stage and stage != task.task_stage:
                     task.task_stage = stage
+                    task.progress_meta_json = self._build_stage_meta(stage, progress=task.progress, message=line)
                 # 解析并更新进度
                 progress = parse_progress(line)
                 if progress is not None:
                     task.progress = progress
-                self._record_task_log(db, task, line, log_type, stage=stage)
+                progress_payload = parse_progress_payload(line)
+                if progress_payload:
+                    task.progress_meta_json = self._merge_progress_meta(task, progress_payload)
+                    payload_stage = progress_payload.get("stage")
+                    if payload_stage:
+                        task.task_stage = str(payload_stage)
+                elif stage and (not task.progress_meta_json or task.progress_meta_json.get("stage") != stage):
+                    task.progress_meta_json = self._build_stage_meta(stage, progress=task.progress, message=line)
+
+                # 结构化进度行只更新状态，不写日志表（避免膨胀）
+                if not is_progress_line(line):
+                    self._record_task_log(db, task, line, log_type, stage=stage)
                 db.commit()
                 await self._publish_ops_task_event(task, "task_progress")
 
@@ -188,6 +236,8 @@ class TaskService:
         return_code = await process.wait()
 
         if return_code != 0:
+            if task.id in self._cancelled_tasks:
+                raise asyncio.CancelledError()
             raise Exception(f"命令执行失败，返回码: {return_code}")
 
         # 保存结果
@@ -217,6 +267,7 @@ class TaskService:
         task.result_json = result
         task.task_stage = "analysis"
         task.progress = 100
+        task.progress_meta_json = self._build_stage_meta("analysis", progress=100, message=f"单股分析完成: {code}")
 
     async def _run_tomorrow_star(self, task: Any, db: Session):
         """生成明日之星"""
@@ -227,6 +278,7 @@ class TaskService:
         """取消任务"""
         if task_id in self.running_tasks:
             process = self.running_tasks[task_id]
+            self._cancelled_tasks.add(task_id)
             try:
                 process.terminate()
                 try:
@@ -254,6 +306,7 @@ class TaskService:
                 "status": task.status,
                 "task_stage": task.task_stage,
                 "progress": task.progress,
+                "progress_meta_json": task.progress_meta_json,
                 "result": task.result_json,
                 "error": task.error_message
             }
@@ -274,6 +327,7 @@ class TaskService:
                 "status": task.status,
                 "task_stage": task.task_stage,
                 "progress": task.progress,
+                "progress_meta_json": task.progress_meta_json,
                 "summary": task.summary,
                 "started_at": task.started_at.isoformat() if task.started_at else None,
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -316,6 +370,40 @@ class TaskService:
         if "推荐" in line or "recommend" in line_lower:
             return "finalize"
         return None
+
+    @classmethod
+    def _build_stage_meta(
+        cls,
+        stage: str,
+        progress: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> dict[str, Any]:
+        info = cls.STAGE_INFO.get(stage, {})
+        percent = progress if progress is not None else int(info.get("percent", 0))
+        return {
+            "kind": "stage",
+            "stage": stage,
+            "stage_label": info.get("label", stage),
+            "stage_index": info.get("index"),
+            "stage_total": info.get("total"),
+            "percent": max(0, min(100, int(percent))),
+            "message": message or info.get("label", stage),
+            "eta_seconds": None,
+            "current": None,
+            "total": None,
+            "current_code": None,
+        }
+
+    @classmethod
+    def _merge_progress_meta(cls, task: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        stage = str(payload.get("stage") or task.task_stage or "starting")
+        meta = cls._build_stage_meta(stage, progress=payload.get("percent"), message=payload.get("message"))
+        meta.update(payload)
+        if meta.get("stage_label") in (None, ""):
+            meta["stage_label"] = cls.STAGE_INFO.get(stage, {}).get("label", stage)
+        if meta.get("percent") is None:
+            meta["percent"] = task.progress
+        return meta
 
     @staticmethod
     def _record_task_log(db: Session, task: Any, message: str, level: str, stage: Optional[str] = None) -> None:

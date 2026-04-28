@@ -3,9 +3,13 @@ WebSocket 工具函数
 ~~~~~~~~~~~~~~~~~~
 提供 WebSocket 日志推送和进度解析功能
 """
+import json
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
+
+
+PROGRESS_JSON_PREFIX = "[PROGRESS_JSON]"
 
 
 async def send_log(manager, task_id: int, message: str, log_type: str = "info"):
@@ -18,8 +22,6 @@ async def send_log(manager, task_id: int, message: str, log_type: str = "info"):
         message: 日志消息
         log_type: 日志类型 (info, warning, error, success)
     """
-    import json
-
     payload = json.dumps({
         "type": "log",
         "task_id": task_id,
@@ -56,6 +58,10 @@ def parse_progress(line: str) -> Optional[int]:
     Returns:
         进度百分比 (0-100)，如果无法解析则返回 None
     """
+    payload = parse_progress_payload(line)
+    if payload and isinstance(payload.get("percent"), int):
+        return max(0, min(100, int(payload["percent"])))
+
     line_lower = line.lower()
 
     # 步骤匹配
@@ -81,6 +87,44 @@ def parse_progress(line: str) -> Optional[int]:
             pass
 
     return None
+
+
+def parse_progress_payload(line: str) -> Optional[dict[str, Any]]:
+    """
+    从结构化进度日志解析进度元数据。
+    """
+    if line.startswith(PROGRESS_JSON_PREFIX):
+        raw_payload = line[len(PROGRESS_JSON_PREFIX):].strip()
+        if not raw_payload:
+            return None
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    # 兼容旧的抓取进度格式: [PROGRESS] fetch 1599/5487
+    progress_match = re.match(r"\[PROGRESS\]\s+fetch\s+(\d+)/(\d+)", line)
+    if progress_match:
+        current = int(progress_match.group(1))
+        total = int(progress_match.group(2))
+        percent = 0
+        if total > 0:
+            percent = min(25, 5 + int((current / total) * 20))
+        return {
+            "kind": "fetch",
+            "stage": "fetch_data",
+            "current": current,
+            "total": total,
+            "percent": percent,
+            "message": f"抓取原始数据 {current}/{total}",
+        }
+
+    return None
+
+
+def is_progress_line(line: str) -> bool:
+    return line.startswith(PROGRESS_JSON_PREFIX) or line.startswith("[PROGRESS]")
 
 
 def parse_log_type(line: str) -> str:

@@ -272,15 +272,11 @@ install_with_npm_fallback() {
 }
 
 write_frontend_env() {
-  local backend_port backend_host api_base_url
-  backend_port="$(grep -E '^BACKEND_PORT=' .env | tail -n1 | cut -d'=' -f2- || true)"
-  backend_host="$(grep -E '^BACKEND_HOST=' .env | tail -n1 | cut -d'=' -f2- || true)"
+  local api_base_url
   api_base_url="$(grep -E '^VITE_API_BASE_URL=' .env | tail -n1 | cut -d'=' -f2- || true)"
 
-  backend_port="${backend_port:-8000}"
-  backend_host="${backend_host:-127.0.0.1}"
   if [[ -z "$api_base_url" ]]; then
-    api_base_url="http://${backend_host}:${backend_port}/api"
+    api_base_url="/api"
   fi
 
   cat > frontend/.env.local <<EOF

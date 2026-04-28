@@ -34,10 +34,12 @@ vi.mock('@/api', () => ({
     getStatus: vi.fn(),
     getEnvironment: vi.fn(),
     getDiagnostics: vi.fn(),
+    getIncrementalStatus: vi.fn(),
     getLogs: vi.fn(),
     cancel: vi.fn(),
     clearTasks: vi.fn(),
     startUpdate: vi.fn(),
+    startIncrementalUpdate: vi.fn(),
     getOverview: vi.fn(),
   },
   apiConfig: {
@@ -126,6 +128,31 @@ function buildTask(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function buildIncrementalStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    status: 'idle',
+    running: false,
+    progress: 0,
+    current: 0,
+    total: 0,
+    current_code: '',
+    updated_count: 0,
+    skipped_count: 0,
+    failed_count: 0,
+    started_at: '',
+    completed_at: '',
+    eta_seconds: null,
+    elapsed_seconds: 0,
+    resume_supported: true,
+    initial_completed: 0,
+    completed_in_run: 0,
+    checkpoint_path: null,
+    last_error: null,
+    message: '',
+    ...overrides,
+  }
+}
+
 function mountComponent() {
   return mount(Update, {
     global: {
@@ -176,6 +203,7 @@ describe('Update.vue', () => {
         kline: { exists: true, count: 100, latest_date: '2025-04-25' },
       },
     } as any)
+    vi.mocked(apiTasks.getIncrementalStatus).mockResolvedValue(buildIncrementalStatus() as any)
     vi.mocked(apiTasks.getLogs).mockResolvedValue({ logs: [] } as any)
     vi.mocked(apiTasks.getOverview).mockResolvedValue({} as any)
     mockTaskStatus()
@@ -258,5 +286,39 @@ describe('Update.vue', () => {
 
     expect(apiTasks.cancel).toHaveBeenCalledWith(45)
     expect(ElMessage.success).toHaveBeenCalledWith('任务已取消')
+  })
+
+  it('starts incremental update from the latest-trade-day action', async () => {
+    vi.mocked(apiTasks.startIncrementalUpdate).mockResolvedValue({
+      success: true,
+      message: '增量更新已启动',
+      running: false,
+    } as any)
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.vm.startDataUpdate()
+    await flushPromises()
+
+    expect(apiTasks.startIncrementalUpdate).toHaveBeenCalledTimes(1)
+    expect(apiTasks.startUpdate).not.toHaveBeenCalled()
+    expect(ElMessage.success).toHaveBeenCalledWith('增量更新已启动')
+  })
+
+  it('shows failed incremental warning when last run was interrupted', async () => {
+    vi.mocked(apiTasks.getIncrementalStatus).mockResolvedValue(buildIncrementalStatus({
+      status: 'failed',
+      failed_count: 3,
+      last_error: '网络波动，中断后可恢复',
+      message: '增量更新失败',
+    }) as any)
+
+    const wrapper = mountComponent()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('增量更新上次未完成')
+    expect(wrapper.text()).toContain('网络波动，中断后可恢复')
   })
 })

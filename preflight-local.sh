@@ -6,7 +6,6 @@ PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
 
 BACKEND_PORT_DEFAULT=8000
-FRONTEND_PORT_DEFAULT=5173
 OS_NAME=""
 PKG_MANAGER=""
 
@@ -121,7 +120,6 @@ load_env() {
   set +a
 
   BACKEND_PORT="${BACKEND_PORT:-$BACKEND_PORT_DEFAULT}"
-  FRONTEND_PORT="${FRONTEND_PORT:-$FRONTEND_PORT_DEFAULT}"
 }
 
 check_token() {
@@ -144,15 +142,11 @@ check_ports() {
     else
       ok "后端端口 $BACKEND_PORT 可用"
     fi
-    if lsof -i :"$FRONTEND_PORT" >/dev/null 2>&1; then
-      warn "前端端口 $FRONTEND_PORT 已被占用"
-    else
-      ok "前端端口 $FRONTEND_PORT 可用"
-    fi
   else
     warn "未检测到 lsof，跳过端口检查"
     print_install_hint
   fi
+  ok "本地部署模式将通过后端统一提供前端页面: http://127.0.0.1:${BACKEND_PORT}"
 }
 
 check_network() {

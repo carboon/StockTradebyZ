@@ -6,6 +6,9 @@ Market Service
 import json
 import os
 import pickle
+import hashlib
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
@@ -17,20 +20,33 @@ ROOT = Path(__file__).parent.parent.parent.parent
 CACHE_DIR = ROOT / "data" / "cache"
 MARKET_CACHE_FILE = ROOT / "data" / ".market_cache.json"
 PREPARED_CACHE_PREFIX = "prepared_data"
+RUN_DIR = ROOT / "data" / "run"
+INCREMENTAL_CHECKPOINT_VERSION = 1
 
 # 全局更新状态
 _update_state = {
+    "status": "idle",
     "running": False,
     "task_id": None,
     "progress": 0,
+    "current": 0,
     "total": 0,
     "current_code": None,
     "updated_count": 0,
     "skipped_count": 0,
     "failed_count": 0,
     "started_at": None,
+    "completed_at": None,
+    "eta_seconds": None,
+    "elapsed_seconds": 0,
+    "resume_supported": True,
+    "initial_completed": 0,
+    "completed_in_run": 0,
+    "checkpoint_path": None,
+    "last_error": None,
     "message": "",
 }
+_update_lock = threading.Lock()
 
 
 class MarketService:
@@ -48,47 +64,176 @@ class MarketService:
     @staticmethod
     def get_update_state() -> Dict[str, Any]:
         """获取增量更新状态"""
-        return _update_state.copy()
+        with _update_lock:
+            return _update_state.copy()
+
+    @staticmethod
+    def _normalize_end_date(end_date: Optional[str]) -> str:
+        if end_date:
+            return end_date.replace("-", "")
+        return datetime.now().strftime("%Y%m%d")
+
+    @staticmethod
+    def _build_incremental_checkpoint_path(codes: list[str], end_date: str, raw_dir: Path) -> Path:
+        identity = {
+            "version": INCREMENTAL_CHECKPOINT_VERSION,
+            "end_date": end_date,
+            "raw_dir": str(raw_dir.resolve()),
+            "codes_hash": hashlib.sha1(",".join(codes).encode("utf-8")).hexdigest(),
+        }
+        digest = hashlib.sha1(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return RUN_DIR / f"incremental_update_{digest}.json"
+
+    @staticmethod
+    def _load_incremental_checkpoint(path: Path) -> Optional[Dict[str, Any]]:
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _restore_incremental_checkpoint(checkpoint: Optional[Dict[str, Any]], codes: list[str]) -> tuple[set[str], dict[str, str]]:
+        if not checkpoint:
+            return set(), {}
+
+        code_set = set(codes)
+        completed = {
+            str(code)
+            for code in checkpoint.get("completed_codes", [])
+            if str(code) in code_set
+        }
+        failed_raw = checkpoint.get("failed_codes", {})
+        failed: dict[str, str] = {}
+        if isinstance(failed_raw, dict):
+            for code, reason in failed_raw.items():
+                code_str = str(code)
+                if code_str in code_set and code_str not in completed:
+                    failed[code_str] = str(reason or "更新失败")
+        return completed, failed
+
+    @staticmethod
+    def _save_incremental_checkpoint(
+        path: Path,
+        *,
+        codes: list[str],
+        end_date: str,
+        raw_dir: Path,
+        completed_codes: set[str],
+        failed_codes: dict[str, str],
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": INCREMENTAL_CHECKPOINT_VERSION,
+            "updated_at": datetime.now().isoformat(),
+            "end_date": end_date,
+            "raw_dir": str(raw_dir.resolve()),
+            "total": len(codes),
+            "completed_codes": sorted(completed_codes),
+            "failed_codes": failed_codes,
+            "resume_supported": True,
+        }
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+
+    @staticmethod
+    def _clear_incremental_checkpoint(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     @staticmethod
     def start_update(task_id: Optional[int] = None) -> bool:
         """开始更新，返回是否成功（如果已有任务在运行则返回 False）"""
-        global _update_state
-        if _update_state["running"]:
-            return False
-        _update_state["running"] = True
-        _update_state["task_id"] = task_id
-        _update_state["progress"] = 0
-        _update_state["total"] = 0
-        _update_state["current_code"] = None
-        _update_state["updated_count"] = 0
-        _update_state["skipped_count"] = 0
-        _update_state["failed_count"] = 0
-        _update_state["started_at"] = datetime.now().isoformat()
-        _update_state["message"] = "准备更新..."
-        return True
+        with _update_lock:
+            if _update_state["running"]:
+                return False
+            _update_state["status"] = "running"
+            _update_state["running"] = True
+            _update_state["task_id"] = task_id
+            _update_state["progress"] = 0
+            _update_state["current"] = 0
+            _update_state["total"] = 0
+            _update_state["current_code"] = None
+            _update_state["updated_count"] = 0
+            _update_state["skipped_count"] = 0
+            _update_state["failed_count"] = 0
+            _update_state["started_at"] = datetime.now().isoformat()
+            _update_state["completed_at"] = None
+            _update_state["eta_seconds"] = None
+            _update_state["elapsed_seconds"] = 0
+            _update_state["resume_supported"] = True
+            _update_state["initial_completed"] = 0
+            _update_state["completed_in_run"] = 0
+            _update_state["checkpoint_path"] = None
+            _update_state["last_error"] = None
+            _update_state["message"] = "准备更新..."
+            return True
 
     @staticmethod
-    def finish_update():
-        """结束更新"""
-        global _update_state
-        _update_state["running"] = False
-        _update_state["progress"] = 100
-        _update_state["message"] = "更新完成"
+    def finish_update(message: str = "更新完成") -> None:
+        """结束更新（成功）。"""
+        with _update_lock:
+            _update_state["status"] = "completed"
+            _update_state["running"] = False
+            _update_state["progress"] = 100
+            _update_state["current"] = _update_state["total"]
+            _update_state["eta_seconds"] = 0
+            _update_state["completed_at"] = datetime.now().isoformat()
+            if _update_state["started_at"]:
+                started_at = datetime.fromisoformat(_update_state["started_at"])
+                _update_state["elapsed_seconds"] = max(0, int((datetime.now() - started_at).total_seconds()))
+            _update_state["message"] = message
+            _update_state["last_error"] = None
 
     @staticmethod
-    def update_progress(current: int, total: int, code: str, status: str):
-        """更新进度"""
-        global _update_state
-        _update_state["progress"] = int(current / total * 100) if total > 0 else 0
-        _update_state["current_code"] = code
-        _update_state["total"] = total
-        if status == "updated":
-            _update_state["updated_count"] += 1
-        elif status == "skipped":
-            _update_state["skipped_count"] += 1
-        elif status == "failed":
-            _update_state["failed_count"] += 1
+    def fail_update(message: str) -> None:
+        """结束更新（失败）。"""
+        with _update_lock:
+            _update_state["status"] = "failed"
+            _update_state["running"] = False
+            _update_state["eta_seconds"] = None
+            _update_state["completed_at"] = datetime.now().isoformat()
+            if _update_state["started_at"]:
+                started_at = datetime.fromisoformat(_update_state["started_at"])
+                _update_state["elapsed_seconds"] = max(0, int((datetime.now() - started_at).total_seconds()))
+            _update_state["message"] = message
+            _update_state["last_error"] = message
+
+    @staticmethod
+    def update_progress(payload: Dict[str, Any]) -> None:
+        """更新进度。"""
+        with _update_lock:
+            started_at = None
+            if _update_state["started_at"]:
+                started_at = datetime.fromisoformat(_update_state["started_at"])
+            elapsed_seconds = max(0, int((datetime.now() - started_at).total_seconds())) if started_at else 0
+
+            _update_state["status"] = "running"
+            _update_state["running"] = True
+            _update_state["current"] = int(payload.get("current", _update_state["current"]) or 0)
+            _update_state["total"] = int(payload.get("total", _update_state["total"]) or 0)
+            _update_state["progress"] = int(payload.get("progress", _update_state["progress"]) or 0)
+            _update_state["current_code"] = payload.get("current_code")
+            _update_state["updated_count"] = int(payload.get("updated_count", _update_state["updated_count"]) or 0)
+            _update_state["skipped_count"] = int(payload.get("skipped_count", _update_state["skipped_count"]) or 0)
+            _update_state["failed_count"] = int(payload.get("failed_count", _update_state["failed_count"]) or 0)
+            _update_state["eta_seconds"] = payload.get("eta_seconds")
+            _update_state["elapsed_seconds"] = int(payload.get("elapsed_seconds", elapsed_seconds) or 0)
+            _update_state["resume_supported"] = bool(payload.get("resume_supported", True))
+            _update_state["initial_completed"] = int(payload.get("initial_completed", _update_state["initial_completed"]) or 0)
+            _update_state["completed_in_run"] = int(payload.get("completed_in_run", _update_state["completed_in_run"]) or 0)
+            _update_state["checkpoint_path"] = payload.get("checkpoint_path", _update_state["checkpoint_path"])
+            _update_state["message"] = str(payload.get("message") or _update_state["message"] or "增量更新进行中")
 
     @property
     def pro(self):
@@ -266,16 +411,10 @@ class MarketService:
         Returns:
             更新结果汇总
         """
-        import sys
-        import subprocess
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # 解析结束日期
-        if end_date:
-            if "-" in end_date:
-                end_date = end_date.replace("-", "")
-        else:
-            end_date = datetime.now().strftime("%Y%m%d")
+        end_date = self._normalize_end_date(end_date)
 
         # 获取股票列表
         import pandas as pd
@@ -296,16 +435,33 @@ class MarketService:
         if not token:
             return {"success": False, "error": "Tushare Token 未设置"}
 
-        # 使用子进程调用 pipeline 的增量更新功能
         workers = 8
 
         results = {
+            "ok": False,
             "total": len(codes),
             "success": 0,
             "failed": 0,
             "updated": 0,
             "skipped": 0,
+            "resume_supported": True,
         }
+        checkpoint_path = self._build_incremental_checkpoint_path(codes, end_date, raw_dir)
+        checkpoint = self._load_incremental_checkpoint(checkpoint_path)
+        completed_codes, failed_codes = self._restore_incremental_checkpoint(checkpoint, codes)
+        initial_completed = len(completed_codes)
+        remaining_codes = [code for code in codes if code not in completed_codes]
+        results["initial_completed"] = initial_completed
+        results["checkpoint_path"] = str(checkpoint_path)
+
+        self._save_incremental_checkpoint(
+            checkpoint_path,
+            codes=codes,
+            end_date=end_date,
+            raw_dir=raw_dir,
+            completed_codes=completed_codes,
+            failed_codes=failed_codes,
+        )
 
         def _get_latest_date_from_csv(csv_path: Path) -> Optional[str]:
             try:
@@ -396,43 +552,103 @@ class MarketService:
 
             return result
 
-        def update_wrapper(code: str, index: int):
-            result = update_single_code(code)
-            if result["success"]:
-                results["success"] += 1
-                if result["updated"]:
-                    results["updated"] += 1
-                    status = "updated"
-                else:
-                    results["skipped"] += 1
-                    status = "skipped"
-            else:
-                results["failed"] += 1
-                status = "failed"
+        run_started_at = time.time()
+        completed_in_run = 0
+        failed_in_run = 0
 
+        def emit_progress(current_code: Optional[str], status: str) -> None:
+            nonlocal completed_in_run, failed_in_run
+            current = len(completed_codes)
+            total = len(codes)
+            processed_in_run = completed_in_run + failed_in_run
+            elapsed_seconds = max(0, int(time.time() - run_started_at))
+            remaining = max(0, len(remaining_codes) - processed_in_run)
+            eta_seconds: Optional[int] = None
+            if processed_in_run > 0 and remaining > 0 and elapsed_seconds > 0:
+                eta_seconds = max(0, int((elapsed_seconds / processed_in_run) * remaining))
+            elif remaining == 0:
+                eta_seconds = 0
+
+            payload = {
+                "current": current,
+                "total": total,
+                "progress": int(current / total * 100) if total > 0 else 0,
+                "current_code": current_code,
+                "updated_count": results["updated"],
+                "skipped_count": results["skipped"],
+                "failed_count": len(failed_codes),
+                "eta_seconds": eta_seconds,
+                "elapsed_seconds": elapsed_seconds,
+                "resume_supported": True,
+                "initial_completed": initial_completed,
+                "completed_in_run": completed_in_run,
+                "checkpoint_path": str(checkpoint_path),
+                "message": (
+                    f"增量更新 {current}/{total}"
+                    + (f" | 当前 {current_code}" if current_code else "")
+                    + (f" | 预计剩余 {eta_seconds} 秒" if eta_seconds is not None and eta_seconds > 0 else "")
+                ),
+                "status": status,
+            }
             if progress_callback:
-                progress_callback(index + 1, len(codes), code, status)
+                progress_callback(payload)
 
-            return result
+        emit_progress(None, "starting")
 
         # 多线程更新
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(update_wrapper, code, i): code
-                for i, code in enumerate(codes)
+                executor.submit(update_single_code, code): code
+                for code in remaining_codes
             }
             for future in as_completed(futures):
+                code = futures[future]
                 try:
-                    future.result()
+                    result = future.result()
                 except Exception as e:
-                    print(f"增量更新异常: {e}")
+                    result = {"code": code, "success": False, "updated": False, "error": str(e)}
+
+                if result["success"]:
+                    completed_codes.add(code)
+                    completed_in_run += 1
+                    results["success"] += 1
+                    failed_codes.pop(code, None)
+                    if result["updated"]:
+                        results["updated"] += 1
+                        status = "updated"
+                    else:
+                        results["skipped"] += 1
+                        status = "skipped"
+                else:
+                    failed_in_run += 1
+                    results["failed"] += 1
+                    failed_codes[code] = str(result.get("error") or "更新失败")
+                    status = "failed"
+
+                self._save_incremental_checkpoint(
+                    checkpoint_path,
+                    codes=codes,
+                    end_date=end_date,
+                    raw_dir=raw_dir,
+                    completed_codes=completed_codes,
+                    failed_codes=failed_codes,
+                )
+                emit_progress(code, status)
+
+        if not remaining_codes:
+            emit_progress(None, "completed")
+
+        results["completed"] = len(completed_codes)
+        results["failed"] = len(failed_codes)
+        results["ok"] = len(failed_codes) == 0
 
         # 更新缓存
-        latest_trade = self.get_latest_trade_date()
-        if latest_trade:
-            self.update_cache(latest_trade)
+        if results["ok"]:
+            latest_trade = self.get_latest_trade_date()
+            if latest_trade:
+                self.update_cache(latest_trade)
+            self._clear_incremental_checkpoint(checkpoint_path)
 
-        results["success"] = True
         return results
 
 

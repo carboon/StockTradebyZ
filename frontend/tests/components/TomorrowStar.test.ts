@@ -78,6 +78,31 @@ const latestResults = [
   { code: 'D', verdict: 'FAIL', total_score: 4.9, signal_type: 'distribution_risk', comment: '4' },
 ]
 
+function buildIncrementalStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    status: 'idle',
+    running: false,
+    progress: 0,
+    current: 0,
+    total: 0,
+    current_code: '',
+    updated_count: 0,
+    skipped_count: 0,
+    failed_count: 0,
+    started_at: '',
+    completed_at: '',
+    eta_seconds: null,
+    elapsed_seconds: 0,
+    resume_supported: true,
+    initial_completed: 0,
+    completed_in_run: 0,
+    checkpoint_path: null,
+    last_error: null,
+    message: '',
+    ...overrides,
+  }
+}
+
 function mountComponent() {
   return mount(TomorrowStar, {
     global: {
@@ -129,17 +154,11 @@ describe('TomorrowStar.vue', () => {
       latest_result_date: '2024-01-15',
       needs_update: false,
       freshness_version: 'v1',
-      incremental_update: { running: false, progress: 0, total: 0, updated_count: 0, skipped_count: 0, failed_count: 0, message: '' },
+      running_task_id: null,
+      running_task_status: null,
+      incremental_update: buildIncrementalStatus(),
     } as any)
-    vi.mocked(apiTasks.getIncrementalStatus).mockResolvedValue({
-      running: false,
-      progress: 0,
-      total: 0,
-      updated_count: 0,
-      skipped_count: 0,
-      failed_count: 0,
-      message: '',
-    } as any)
+    vi.mocked(apiTasks.getIncrementalStatus).mockResolvedValue(buildIncrementalStatus() as any)
     vi.mocked(apiTasks.startIncrementalUpdate).mockResolvedValue({
       success: true,
       running: false,
@@ -194,7 +213,9 @@ describe('TomorrowStar.vue', () => {
       latest_result_date: '2024-01-15',
       needs_update: true,
       freshness_version: 'v2',
-      incremental_update: { running: false, progress: 0, total: 0, updated_count: 0, skipped_count: 0, failed_count: 0, message: '' },
+      running_task_id: null,
+      running_task_status: null,
+      incremental_update: buildIncrementalStatus(),
     } as any)
 
     const wrapper = mountComponent()
@@ -203,6 +224,33 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     expect(apiTasks.startIncrementalUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows failed incremental warning and does not auto-restart update', async () => {
+    vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
+      latest_trade_date: '2024-01-16',
+      local_latest_date: '2024-01-15',
+      latest_candidate_date: '2024-01-15',
+      latest_result_date: '2024-01-15',
+      needs_update: true,
+      freshness_version: 'v3',
+      running_task_id: null,
+      running_task_status: null,
+      incremental_update: buildIncrementalStatus({
+        status: 'failed',
+        failed_count: 5,
+        last_error: '任务中断，可恢复',
+        message: '增量更新失败',
+      }),
+    } as any)
+
+    const wrapper = mountComponent()
+    await flushPromises()
+    await wrapper.vm.ensureFreshDataAndLoad(true)
+    await flushPromises()
+
+    expect(apiTasks.startIncrementalUpdate).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('任务中断，可恢复')
   })
 
   it('hydrates cached view state from sessionStorage before reloading', async () => {

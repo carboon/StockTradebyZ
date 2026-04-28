@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # 项目根目录
 ROOT = Path(__file__).parent.parent.parent
@@ -131,6 +132,8 @@ def ensure_task_center_schema() -> None:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN task_stage VARCHAR(50)"))
         if "summary" not in task_columns:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN summary TEXT"))
+        if "progress_meta_json" not in task_columns:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN progress_meta_json JSON"))
 
 
 ensure_task_center_schema()
@@ -178,6 +181,21 @@ app.include_router(stock.router, prefix="/api/v1/stock", tags=["股票数据"])
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["分析"])
 app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["重点观察"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["任务调度"])
+
+
+class SPAStaticFiles(StaticFiles):
+    """为 Vue Router history 模式提供 index.html 回退。"""
+
+    async def get_response(self, path: str, scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            request = Request(scope)
+            if request.method != "GET":
+                raise
+            return await super().get_response("index.html", scope)
 
 
 # WebSocket 连接管理器
@@ -252,6 +270,15 @@ async def ops_websocket(websocket: WebSocket):
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         manager.disconnect(websocket, "ops")
+
+
+frontend_dist_dir = ROOT / "frontend" / "dist"
+if frontend_dist_dir.exists():
+    app.mount(
+        "/",
+        SPAStaticFiles(directory=str(frontend_dist_dir), html=True),
+        name="frontend",
+    )
 
 if __name__ == "__main__":
     import uvicorn

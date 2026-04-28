@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +67,31 @@ REVIEWERS = {
         "free": True,
     },
 }
+
+PROGRESS_JSON_PREFIX = "[PROGRESS_JSON]"
+STAGE_PROGRESS = {
+    "build_pool": {"label": "量化初选", "index": 2, "total": 6, "percent": 35},
+    "build_candidates": {"label": "导出候选图表", "index": 3, "total": 6, "percent": 55},
+    "pre_filter": {"label": "生成评分结果", "index": 4, "total": 6, "percent": 72},
+    "score_review": {"label": "导出 PASS 图表", "index": 5, "total": 6, "percent": 88},
+    "finalize": {"label": "输出推荐结果", "index": 6, "total": 6, "percent": 96},
+    "completed": {"label": "已完成", "index": 6, "total": 6, "percent": 100},
+}
+
+
+def _emit_stage_progress(stage: str, message: str, *, percent: int | None = None, eta_seconds: int | None = None) -> None:
+    info = STAGE_PROGRESS.get(stage, {})
+    payload = {
+        "kind": "stage",
+        "stage": stage,
+        "stage_label": info.get("label", stage),
+        "stage_index": info.get("index"),
+        "stage_total": info.get("total"),
+        "percent": percent if percent is not None else info.get("percent", 0),
+        "eta_seconds": eta_seconds,
+        "message": message,
+    }
+    print(f"{PROGRESS_JSON_PREFIX} {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
 
 def _detect_board(ts_code: str, symbol: str) -> str:
@@ -196,16 +222,24 @@ def _get_latest_trade_date() -> str | None:
         return None
 
 
-def _run(step_name: str, cmd: list[str]) -> None:
+def _run(step_name: str, cmd: list[str], *, stage: str | None = None) -> None:
     """运行子进程，失败时终止整个流程。"""
+    started_at = time.time()
+    if stage:
+        _emit_stage_progress(stage, f"{step_name} 开始")
     print(f"\n{'='*60}")
     print(f"[步骤] {step_name}")
     print(f"  命令: {' '.join(cmd)}")
     print(f"{'='*60}")
     result = subprocess.run(cmd, cwd=str(ROOT))
     if result.returncode != 0:
+        if stage:
+            elapsed_seconds = max(0, int(time.time() - started_at))
+            _emit_stage_progress(stage, f"{step_name} 失败，已在 {elapsed_seconds} 秒后中止", eta_seconds=None)
         print(f"\n[ERROR] 步骤「{step_name}」返回非零退出码 {result.returncode}，流程已中止。")
         sys.exit(result.returncode)
+    if stage:
+        _emit_stage_progress(stage, f"{step_name} 完成", eta_seconds=0)
 
 
 def _print_recommendations() -> None:
@@ -288,7 +322,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--start-from", type=int, default=1, metavar="N",
-        help="从第 N 步开始执行（1~4），跳过前面的步骤",
+        help="从第 N 步开始执行（1~5），跳过前面的步骤",
     )
     args = parser.parse_args()
 
@@ -351,6 +385,7 @@ def main() -> None:
         _run(
             "2  量化初选（cli preselect）",
             [PYTHON, "-m", "pipeline.cli", "preselect"],
+            stage="build_pool",
         )
 
     # ── 步骤 3：导出 K 线图（仅 LLM 模式） ──────────────────────────
@@ -358,6 +393,7 @@ def main() -> None:
         _run(
             "3  导出 K 线图（export_kline_charts）",
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
+            stage="build_candidates",
         )
 
     # ── 步骤 4：评分分析 ────────────────────────────────────────────
@@ -365,6 +401,7 @@ def main() -> None:
         _run(
             f"4  {reviewer_name}评分（{args.reviewer}_review）",
             [PYTHON, str(reviewer_script)],
+            stage="pre_filter",
         )
 
     # ── 步骤 5：quant 模式 — 仅对 PASS 股票生成 K 线图 ────────────
@@ -379,24 +416,28 @@ def main() -> None:
                     suggestion: dict = json.load(f)
                 pass_codes = [r["code"] for r in suggestion.get("recommendations", []) if r.get("verdict") == "PASS"]
                 if pass_codes:
-                    print(f"\n{'='*60}")
-                    print(f"[步骤] 5  导出 PASS 股票 K 线图（{len(pass_codes)} 只）")
-                    print(f"{'='*60}")
                     cmd = [
                         PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py"),
                         "--date", pick_date,
                         "--codes", *pass_codes,
                     ]
-                    subprocess.run(cmd, cwd=str(ROOT))
+                    _run(
+                        f"5  导出 PASS 股票 K 线图（{len(pass_codes)} 只）",
+                        cmd,
+                        stage="score_review",
+                    )
                 else:
                     print(f"\n{'='*60}")
                     print("[步骤] 5  导出 K 线图 — 已跳过（无 PASS 股票）")
                     print(f"{'='*60}")
+                    _emit_stage_progress("score_review", "5  导出 PASS 股票 K 线图已跳过（无 PASS 股票）", eta_seconds=0)
 
     # ── 最后一步：打印推荐结果 ───────────────────────────────────────
+    _emit_stage_progress("finalize", "6  输出推荐结果开始")
     print(f"\n{'='*60}")
     print("[步骤] 6  推荐购买的股票" if args.reviewer == "quant" else "[步骤] 5  推荐购买的股票")
     _print_recommendations()
+    _emit_stage_progress("completed", "全量初始化流程完成", eta_seconds=0)
 
 
 if __name__ == "__main__":

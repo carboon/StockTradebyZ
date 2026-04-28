@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
 import random
 import sys
@@ -8,13 +10,12 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 import os
 
 import pandas as pd
 import tushare as ts
 import yaml
-from tqdm import tqdm
 from backend.app.utils.tushare_rate_limit import acquire_tushare_slot, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS
 
 warnings.filterwarnings("ignore")
@@ -57,6 +58,9 @@ _pd.Series.fillna = _patched_series_fillna  # type: ignore[method-assign]
 # --------------------------- 全局日志配置 --------------------------- #
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_LOG_DIR = _PROJECT_ROOT / "data" / "logs"
+_RUN_STATE_DIR = _PROJECT_ROOT / "data" / "run"
+_CHECKPOINT_VERSION = 1
+_PROGRESS_JSON_PREFIX = "[PROGRESS_JSON]"
 
 def _resolve_cfg_path(path_like: str | Path, base_dir: Path = _PROJECT_ROOT) -> Path:
     """将配置中的路径统一解析为绝对路径：相对路径基于项目根目录。"""
@@ -189,6 +193,149 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("数据包含未来日期，可能抓取错误！")
     return df
 
+
+def _format_eta(seconds: Optional[int]) -> Optional[str]:
+    if seconds is None or seconds < 0:
+        return None
+    minutes, remain = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}小时{minutes}分"
+    if minutes > 0:
+        return f"{minutes}分{remain}秒"
+    return f"{remain}秒"
+
+
+def _calc_fetch_percent(current: int, total: int) -> int:
+    """将抓取进度映射到全流程的步骤 1 区间。"""
+    if total <= 0:
+        return 5
+    return min(30, 5 + int((current / total) * 25))
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def _build_checkpoint_path(codes: List[str], start: str, end: str, out_dir: Path) -> Path:
+    identity = {
+        "version": _CHECKPOINT_VERSION,
+        "start": start,
+        "end": end,
+        "out_dir": str(out_dir.resolve()),
+        "codes_hash": hashlib.sha1(",".join(codes).encode("utf-8")).hexdigest(),
+    }
+    digest = hashlib.sha1(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return _RUN_STATE_DIR / f"fetch_kline_{digest}.json"
+
+
+def _load_checkpoint(path: Path) -> Optional[dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("读取断点文件失败，将忽略并重新开始: %s | %s", path, exc)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _restore_checkpoint_state(
+    checkpoint: Optional[dict[str, Any]],
+    codes: List[str],
+    out_dir: Path,
+) -> tuple[set[str], dict[str, str]]:
+    if not checkpoint:
+        return set(), {}
+
+    code_set = set(codes)
+    completed: set[str] = set()
+    for code in checkpoint.get("completed_codes", []):
+        if code in code_set and (out_dir / f"{code}.csv").exists():
+            completed.add(code)
+
+    failed_raw = checkpoint.get("failed_codes", {})
+    failed: dict[str, str] = {}
+    if isinstance(failed_raw, dict):
+        for code, reason in failed_raw.items():
+            if code in code_set and code not in completed:
+                failed[str(code)] = str(reason or "抓取失败")
+
+    return completed, failed
+
+
+def _save_checkpoint(
+    path: Path,
+    *,
+    codes: List[str],
+    start: str,
+    end: str,
+    out_dir: Path,
+    completed_codes: set[str],
+    failed_codes: dict[str, str],
+) -> None:
+    payload = {
+        "version": _CHECKPOINT_VERSION,
+        "updated_at": dt.datetime.now().isoformat(),
+        "start": start,
+        "end": end,
+        "out_dir": str(out_dir.resolve()),
+        "total": len(codes),
+        "completed_codes": sorted(completed_codes),
+        "failed_codes": failed_codes,
+        "resume_supported": True,
+    }
+    _atomic_write_json(path, payload)
+
+
+def _clear_checkpoint(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("清理断点文件失败: %s | %s", path, exc)
+
+
+def _emit_progress(payload: dict[str, Any]) -> None:
+    print(f"{_PROGRESS_JSON_PREFIX} {json.dumps(payload, ensure_ascii=False)}", flush=True)
+
+
+def _build_fetch_progress_payload(
+    *,
+    current: int,
+    total: int,
+    current_code: Optional[str],
+    initial_completed: int,
+    completed_in_run: int,
+    failed_count: int,
+    eta_seconds: Optional[int],
+    message: str,
+) -> dict[str, Any]:
+    percent = _calc_fetch_percent(current, total)
+    return {
+        "kind": "fetch",
+        "stage": "fetch_data",
+        "stage_label": "抓取原始数据",
+        "current": current,
+        "total": total,
+        "current_code": current_code,
+        "initial_completed": initial_completed,
+        "completed_in_run": completed_in_run,
+        "failed_count": failed_count,
+        "resume_supported": True,
+        "eta_seconds": eta_seconds,
+        "eta_label": _format_eta(eta_seconds),
+        "percent": percent,
+        "message": message,
+    }
+
 # --------------------------- 读取 stocklist.csv & 过滤板块 --------------------------- #
 
 def _filter_by_boards(df: pd.DataFrame, include: set[str] | None = None, exclude: set[str] | None = None) -> pd.DataFrame:
@@ -244,18 +391,26 @@ def fetch_one(
     start: str,
     end: str,
     out_dir: Path,
-):
+) -> dict[str, Any]:
     csv_path = out_dir / f"{code}.csv"
+    result = {
+        "code": code,
+        "success": False,
+        "empty": False,
+        "error": None,
+    }
 
     for attempt in range(1, 4):
         try:
             new_df = _get_kline_tushare(code, start, end)
+            result["empty"] = bool(new_df.empty)
             if new_df.empty:
                 logger.debug("%s 无数据，生成空表。", code)
                 new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
             new_df = validate(new_df)
             new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
-            break
+            result["success"] = True
+            return result
         except Exception as e:
             if _looks_like_ip_ban(e):
                 logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
@@ -264,8 +419,189 @@ def fetch_one(
                 silent_seconds = 30 * attempt
                 logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
                 time.sleep(silent_seconds)
+
+    result["error"] = "三次抓取均失败"
+    logger.error("%s 三次抓取均失败，已跳过！", code)
+    return result
+
+
+def full_fetch(
+    codes: List[str],
+    start: str,
+    end: str,
+    out_dir: Path,
+    workers: int = 8,
+    checkpoint_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """全量抓取并支持断点恢复。"""
+    if not codes:
+        raise ValueError("股票代码列表为空")
+
+    total = len(codes)
+    checkpoint_path = checkpoint_path or _build_checkpoint_path(codes, start, end, out_dir)
+    checkpoint = _load_checkpoint(checkpoint_path)
+    completed_codes, failed_codes = _restore_checkpoint_state(checkpoint, codes, out_dir)
+    initial_completed = len(completed_codes)
+    remaining_codes = [code for code in codes if code not in completed_codes]
+
+    if initial_completed > 0:
+        logger.info(
+            "检测到可恢复的抓取进度 | 已完成:%d/%d | 剩余:%d | 断点文件:%s",
+            initial_completed,
+            total,
+            len(remaining_codes),
+            checkpoint_path.resolve(),
+        )
     else:
-        logger.error("%s 三次抓取均失败，已跳过！", code)
+        logger.info("未检测到历史断点，将从头开始抓取。")
+
+    _save_checkpoint(
+        checkpoint_path,
+        codes=codes,
+        start=start,
+        end=end,
+        out_dir=out_dir,
+        completed_codes=completed_codes,
+        failed_codes=failed_codes,
+    )
+
+    if not remaining_codes:
+        payload = _build_fetch_progress_payload(
+            current=total,
+            total=total,
+            current_code=None,
+            initial_completed=initial_completed,
+            completed_in_run=0,
+            failed_count=0,
+            eta_seconds=0,
+            message="抓取原始数据已全部完成",
+        )
+        _emit_progress(payload)
+        _clear_checkpoint(checkpoint_path)
+        return {
+            "success": True,
+            "total": total,
+            "completed": total,
+            "failed": 0,
+            "initial_completed": initial_completed,
+            "checkpoint_path": str(checkpoint_path),
+        }
+
+    run_started_at = time.time()
+    completed_in_run = 0
+    failed_in_run = 0
+    last_emit_at = 0.0
+    emit_interval = 2.0
+
+    def maybe_emit_progress(current_code: Optional[str], force: bool = False) -> None:
+        nonlocal last_emit_at
+        processed_in_run = completed_in_run + failed_in_run
+        current_completed = len(completed_codes)
+        now = time.time()
+        should_emit = force or (
+            processed_in_run > 0 and (
+                now - last_emit_at >= emit_interval
+                or processed_in_run == len(remaining_codes)
+                or processed_in_run % 100 == 0
+            )
+        )
+        if not should_emit:
+            return
+
+        elapsed_seconds = max(0.0, now - run_started_at)
+        remaining_to_process = max(0, len(remaining_codes) - processed_in_run)
+        eta_seconds: Optional[int] = None
+        if processed_in_run > 0 and remaining_to_process > 0 and elapsed_seconds > 0:
+            avg_seconds = elapsed_seconds / processed_in_run
+            eta_seconds = max(0, int(avg_seconds * remaining_to_process))
+        elif remaining_to_process == 0:
+            eta_seconds = 0
+
+        message = f"抓取原始数据 {current_completed}/{total}"
+        if current_code:
+            message += f" | 当前 {current_code}"
+        if failed_codes:
+            message += f" | 失败 {len(failed_codes)}"
+        eta_label = _format_eta(eta_seconds)
+        if eta_label:
+            message += f" | 预计剩余 {eta_label}"
+
+        payload = _build_fetch_progress_payload(
+            current=current_completed,
+            total=total,
+            current_code=current_code,
+            initial_completed=initial_completed,
+            completed_in_run=completed_in_run,
+            failed_count=len(failed_codes),
+            eta_seconds=eta_seconds,
+            message=message,
+        )
+        logger.info(message)
+        _emit_progress(payload)
+        last_emit_at = now
+
+    maybe_emit_progress(None, force=True)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(fetch_one, code, start, end, out_dir): code
+            for code in remaining_codes
+        }
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {
+                    "code": code,
+                    "success": False,
+                    "error": str(exc),
+                }
+
+            if result.get("success"):
+                completed_codes.add(code)
+                completed_in_run += 1
+                failed_codes.pop(code, None)
+            else:
+                failed_in_run += 1
+                failed_codes[code] = str(result.get("error") or "抓取失败")
+
+            _save_checkpoint(
+                checkpoint_path,
+                codes=codes,
+                start=start,
+                end=end,
+                out_dir=out_dir,
+                completed_codes=completed_codes,
+                failed_codes=failed_codes,
+            )
+            maybe_emit_progress(code)
+
+    maybe_emit_progress(None, force=True)
+
+    if failed_codes:
+        logger.error(
+            "本轮抓取结束，但仍有 %d 只股票未成功抓取；已保留断点文件，可重新执行继续。",
+            len(failed_codes),
+        )
+        return {
+            "success": False,
+            "total": total,
+            "completed": len(completed_codes),
+            "failed": len(failed_codes),
+            "initial_completed": initial_completed,
+            "checkpoint_path": str(checkpoint_path),
+        }
+
+    _clear_checkpoint(checkpoint_path)
+    return {
+        "success": True,
+        "total": total,
+        "completed": len(completed_codes),
+        "failed": 0,
+        "initial_completed": initial_completed,
+        "checkpoint_path": str(checkpoint_path),
+    }
 
 
 # --------------------------- 增量更新 --------------------------- #
@@ -549,21 +885,24 @@ def main():
         len(codes), start, end, board_desc, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS,
     )
 
-    # ---------- 多线程抓取（全量覆盖） ---------- #
     workers = int(cfg.get("workers", 8))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(
-                fetch_one,
-                code,
-                start,
-                end,
-                out_dir,
-            )
-            for code in codes
-        ]
-        for _ in tqdm(as_completed(futures), total=len(futures), desc="下载进度"):
-            pass
+    result = full_fetch(
+        codes,
+        start=start,
+        end=end,
+        out_dir=out_dir,
+        workers=workers,
+    )
+
+    if not result["success"]:
+        logger.error(
+            "全量抓取未全部完成 | 已完成:%d/%d | 失败:%d | 断点文件:%s",
+            result["completed"],
+            result["total"],
+            result["failed"],
+            result["checkpoint_path"],
+        )
+        sys.exit(2)
 
     logger.info("全部任务完成，数据已保存至 %s", out_dir.resolve())
 

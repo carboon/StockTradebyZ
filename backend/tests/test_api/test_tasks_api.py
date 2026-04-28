@@ -24,11 +24,38 @@ from sqlalchemy import text
 
 from app.models import Task
 from app.time_utils import utc_now
+from app.api import tasks as tasks_api
 
 
 def _close_scheduled_task(coro):
     coro.close()
     return None
+
+
+def _mock_incremental_state(**overrides: Any) -> dict[str, Any]:
+    state = {
+        "status": "idle",
+        "running": False,
+        "progress": 0,
+        "current": 0,
+        "total": 0,
+        "current_code": None,
+        "updated_count": 0,
+        "skipped_count": 0,
+        "failed_count": 0,
+        "started_at": None,
+        "completed_at": None,
+        "eta_seconds": None,
+        "elapsed_seconds": 0,
+        "resume_supported": True,
+        "initial_completed": 0,
+        "completed_in_run": 0,
+        "checkpoint_path": None,
+        "last_error": None,
+        "message": "",
+    }
+    state.update(overrides)
+    return state
 
 
 @pytest.mark.api
@@ -112,6 +139,48 @@ def test_get_data_update_status_no_logs(test_client: TestClient) -> None:
         assert data["candidates"]["exists"] is False
         assert data["analysis"]["exists"] is False
         assert data["kline"]["exists"] is False
+
+
+@pytest.mark.api
+def test_get_incremental_status_includes_eta_fields(test_client: TestClient) -> None:
+    mock_state = _mock_incremental_state(
+        status="failed",
+        running=True,
+        progress=32,
+        current=640,
+        total=2000,
+        current_code="000001",
+        updated_count=300,
+        skipped_count=330,
+        failed_count=10,
+        started_at="2025-04-25T10:00:00",
+        completed_at="2025-04-25T10:10:00",
+        eta_seconds=120,
+        elapsed_seconds=45,
+        resume_supported=True,
+        initial_completed=600,
+        completed_in_run=40,
+        checkpoint_path="/tmp/incremental.json",
+        last_error="网络波动",
+        message="增量更新 640/2000",
+    )
+
+    with patch("app.services.market_service.MarketService.get_update_state", return_value=mock_state):
+        response = test_client.get("/api/v1/tasks/incremental-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["running"] is True
+    assert data["current"] == 640
+    assert data["total"] == 2000
+    assert data["eta_seconds"] == 120
+    assert data["elapsed_seconds"] == 45
+    assert data["status"] == "failed"
+    assert data["resume_supported"] is True
+    assert data["initial_completed"] == 600
+    assert data["completed_in_run"] == 40
+    assert data["checkpoint_path"] == "/tmp/incremental.json"
+    assert data["last_error"] == "网络波动"
 
 
 @pytest.mark.api
@@ -244,6 +313,51 @@ def test_start_full_update_returns_existing_running_task(test_client_with_db: An
 
 
 @pytest.mark.api
+def test_start_full_update_blocked_by_running_incremental_update(test_client_with_db: Any) -> None:
+    with patch(
+        "app.services.market_service.MarketService.get_update_state",
+        return_value=_mock_incremental_state(status="running", running=True),
+    ):
+        response = test_client_with_db.post(
+            "/api/v1/tasks/start",
+            json={
+                "reviewer": "quant",
+                "skip_fetch": False,
+                "start_from": 1,
+            },
+        )
+
+    assert response.status_code == 409
+    data = response.json()
+    assert "detail" in data
+    assert "增量更新任务正在运行" in data["detail"]
+
+
+@pytest.mark.api
+def test_start_incremental_update_blocked_by_running_full_update(test_client_with_db: Any) -> None:
+    task = Task(
+        task_type="full_update",
+        status="running",
+        progress=18,
+        params_json={"reviewer": "quant"},
+        started_at=utc_now(),
+        created_at=utc_now(),
+    )
+    test_client_with_db.db.add(task)
+    test_client_with_db.db.commit()
+    test_client_with_db.db.refresh(task)
+
+    response = test_client_with_db.post("/api/v1/tasks/start-incremental")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is False
+    assert data["running"] is False
+    assert data["blocking_task_id"] == task.id
+    assert str(task.id) in data["message"]
+
+
+@pytest.mark.api
 def test_get_tasks_empty(test_client_with_db: Any) -> None:
     """
     测试获取任务列表 - 空列表
@@ -300,6 +414,97 @@ def test_get_task_diagnostics(test_client_with_db: Any) -> None:
     assert data["running_tasks"][0]["status"] == "running"
     assert data["latest_failed_task"]["status"] == "failed"
     assert data["data_status"]["raw_data"]["exists"] is True
+
+
+@pytest.mark.api
+def test_get_task_diagnostics_marks_resolved_failure_as_success(test_client_with_db: Any) -> None:
+    failed_at = utc_now()
+    completed_at = utc_now()
+    failed_task = Task(
+        task_type="full_update",
+        status="failed",
+        progress=80,
+        error_message="old failure",
+        created_at=failed_at,
+        completed_at=failed_at,
+    )
+    success_task = Task(
+        task_type="full_update",
+        status="completed",
+        progress=100,
+        created_at=completed_at,
+        started_at=completed_at,
+        completed_at=completed_at,
+    )
+    test_client_with_db.db.add_all([failed_task, success_task])
+    test_client_with_db.db.commit()
+
+    with patch("app.api.tasks.TushareService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service.check_data_status.return_value = {
+            "raw_data": {"exists": True, "count": 3200, "latest_date": "2025-04-25"},
+            "candidates": {"exists": True, "count": 120, "latest_date": "2025-04-25"},
+            "analysis": {"exists": True, "count": 30, "latest_date": "2025-04-25"},
+            "kline": {"exists": True, "count": 500, "latest_date": "2025-04-25"},
+        }
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.get("/api/v1/tasks/diagnostics")
+
+    assert response.status_code == 200
+    data = response.json()
+    recovery_check = next(check for check in data["checks"] if check["key"] == "task_recovery")
+    assert recovery_check["status"] == "success"
+    assert "历史失败记录不影响当前使用" in recovery_check["summary"]
+
+
+@pytest.mark.api
+def test_get_task_overview_downgrades_resolved_failures(test_client_with_db: Any) -> None:
+    tasks_api._overview_cache["data"] = None
+    tasks_api._overview_cache["expires_at"] = 0.0
+
+    failed_at = utc_now()
+    completed_at = utc_now()
+    failed_task = Task(
+        task_type="full_update",
+        status="failed",
+        progress=80,
+        error_message="old failure",
+        created_at=failed_at,
+        completed_at=failed_at,
+    )
+    success_task = Task(
+        task_type="full_update",
+        status="completed",
+        progress=100,
+        summary="全量更新 / reviewer=quant | start_from=1",
+        created_at=completed_at,
+        started_at=completed_at,
+        completed_at=completed_at,
+    )
+    test_client_with_db.db.add_all([failed_task, success_task])
+    test_client_with_db.db.commit()
+
+    with patch("app.api.tasks.TushareService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service.check_data_status.return_value = {
+            "raw_data": {"exists": True, "count": 3200, "latest_date": "2025-04-25"},
+            "candidates": {"exists": True, "count": 120, "latest_date": "2025-04-25"},
+            "analysis": {"exists": True, "count": 30, "latest_date": "2025-04-25"},
+            "kline": {"exists": True, "count": 500, "latest_date": "2025-04-25"},
+        }
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.get("/api/v1/tasks/overview")
+
+    assert response.status_code == 200
+    data = response.json()
+    failed_card = next(card for card in data["cards"] if card["key"] == "failed")
+    assert failed_card["status"] == "warning"
+    assert "当前已恢复" in failed_card["meta"]
+    alert = next(item for item in data["alerts"] if item["title"] == "存在历史失败记录")
+    assert alert["level"] == "warning"
+    assert "最新一次初始化已成功完成" in alert["message"]
 
 
 @pytest.mark.api
@@ -538,6 +743,13 @@ def test_cancel_task_success(test_client_with_db: Any) -> None:
         mock_service = MagicMock()
         mock_service.cancel_task = AsyncMock(return_value=True)
         mock_service_class.return_value = mock_service
+        mock_service_class._build_stage_meta.return_value = {
+            "kind": "stage",
+            "stage": "cancelled",
+            "stage_label": "已取消",
+            "percent": 30,
+            "message": "任务已取消",
+        }
 
         response = test_client_with_db.post(f"/api/v1/tasks/{task.id}/cancel")
 

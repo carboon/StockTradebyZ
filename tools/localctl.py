@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import locale
 import os
 import shutil
 import signal
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -22,6 +24,7 @@ RUN_DIR = ROOT / "data" / "run"
 LOG_DIR = ROOT / "data" / "logs"
 BACKEND_PID_FILE = RUN_DIR / "backend.pid"
 FRONTEND_PID_FILE = RUN_DIR / "frontend.pid"
+FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_FRONTEND_PORT = 5173
 PIP_INDEX_CANDIDATES = [
@@ -44,6 +47,7 @@ DATA_DIRS = [
     ROOT / "data" / "logs",
     ROOT / "data" / "run",
 ]
+DB_CONFIG_PATH = ROOT / "data" / "db" / "stocktrade.db"
 
 
 def log(message: str) -> None:
@@ -66,6 +70,42 @@ def load_env_file(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
     return values
+
+
+def load_db_configs(path: Path = DB_CONFIG_PATH) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            rows = conn.execute("SELECT key, value FROM configs").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    return {
+        str(key).strip().lower(): str(value)
+        for key, value in rows
+        if key is not None
+    }
+
+
+def get_runtime_setting(
+    env_values: dict[str, str],
+    env_key: str,
+    *,
+    db_key: str | None = None,
+    default: str = "",
+) -> str:
+    value = env_values.get(env_key, "").strip()
+    if value and value != "your_tushare_token_here":
+        return value
+    db_values = load_db_configs()
+    fallback_key = (db_key or env_key.lower()).lower()
+    db_value = db_values.get(fallback_key, "").strip()
+    if db_value:
+        return db_value
+    return default
 
 
 def merged_runtime_env() -> dict[str, str]:
@@ -165,13 +205,10 @@ def install_with_npm_fallback(npm_bin: str) -> str:
 
 def write_frontend_env(env_values: dict[str, str] | None = None) -> str:
     env_values = env_values or load_env_file(ENV_FILE)
-    backend_port = env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT))
-    backend_host = env_values.get("BACKEND_HOST", "127.0.0.1")
     api_base_url = env_values.get("VITE_API_BASE_URL", "").strip()
 
     if not api_base_url:
-        normalized_host = "127.0.0.1" if backend_host == "0.0.0.0" else backend_host
-        api_base_url = f"http://{normalized_host}:{backend_port}/api"
+        api_base_url = "/api"
 
     FRONTEND_ENV_FILE.write_text(f"VITE_API_BASE_URL={api_base_url}\n", encoding="utf-8")
     return api_base_url
@@ -298,9 +335,9 @@ def preflight() -> None:
 
     env_values = load_env_file(ENV_FILE)
     backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
-    frontend_port = int(env_values.get("FRONTEND_PORT", str(DEFAULT_FRONTEND_PORT)))
 
-    if env_values.get("TUSHARE_TOKEN", "") in {"", "your_tushare_token_here"}:
+    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
+    if not token:
         log("[WARN] TUSHARE_TOKEN 未配置，系统可启动，但首次进入后需要在页面中完成配置")
     else:
         log("[OK] TUSHARE_TOKEN 已配置")
@@ -310,11 +347,7 @@ def preflight() -> None:
     else:
         log(f"[OK] 后端端口 {backend_port} 可用")
 
-    if is_port_open(frontend_port):
-        log(f"[WARN] 前端端口 {frontend_port} 已被占用")
-    else:
-        log(f"[OK] 前端端口 {frontend_port} 可用")
-
+    log(f"[OK] 本地部署模式将通过后端统一提供前端页面: http://127.0.0.1:{backend_port}")
     log("[OK] 预检完成")
 
 
@@ -404,6 +437,92 @@ def wait_backend_ready(port: int) -> None:
     log(f"警告: 后端在 15s 内未返回健康响应，前端仍会继续启动: {url}")
 
 
+def ensure_frontend_build(force: bool = False) -> None:
+    if FRONTEND_DIST_DIR.exists() and not force:
+        return
+    npm_bin = require_command(["npm.cmd", "npm"], "npm")
+    write_frontend_env()
+    log("构建前端生产资源...")
+    run_command([npm_bin, "run", "build"], cwd=ROOT / "frontend")
+
+
+def backend_base_url(env_values: dict[str, str]) -> str:
+    backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
+    return f"http://127.0.0.1:{backend_port}"
+
+
+def api_request(method: str, url: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+    request_headers = {"Content-Type": "application/json"}
+    request_data = None
+    if payload is not None:
+        request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, method=method.upper(), data=request_data, headers=request_headers)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(raw)
+        except Exception:
+            detail = raw or str(exc)
+        fail(f"API 请求失败: {url} | {detail}", exc.code)
+    except urllib.error.URLError as exc:
+        fail(f"API 请求失败: {url} | {exc}")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        fail(f"API 返回了无法解析的响应: {url} | {raw[:200]}")
+    if not isinstance(parsed, dict):
+        fail(f"API 返回了非对象响应: {url}")
+    return parsed
+
+
+def format_duration(seconds: int | None) -> str:
+    if seconds is None or seconds < 0:
+        return "-"
+    minutes, remain = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}小时{minutes}分"
+    if minutes > 0:
+        return f"{minutes}分{remain}秒"
+    return f"{remain}秒"
+
+
+def wait_for_task_completion(base_url: str, task_id: int) -> None:
+    last_snapshot = None
+    while True:
+        task = api_request("GET", f"{base_url}/api/v1/tasks/{task_id}")
+        meta = task.get("progress_meta_json") or {}
+        stage = meta.get("stage_label") or task.get("task_stage") or "-"
+        if meta.get("current") is not None and meta.get("total") is not None:
+            progress_text = f"{meta.get('current')}/{meta.get('total')}"
+        elif meta.get("stage_index") is not None and meta.get("stage_total") is not None:
+            progress_text = f"阶段 {meta.get('stage_index')}/{meta.get('stage_total')}"
+        else:
+            progress_text = f"{task.get('progress', 0)}%"
+        parts = [f"[{task.get('status')}] {stage}", progress_text]
+        if meta.get("eta_seconds") is not None:
+            parts.append(f"预计剩余 {format_duration(int(meta['eta_seconds']))}")
+        if meta.get("current_code"):
+            parts.append(f"当前 {meta['current_code']}")
+        if meta.get("failed_count"):
+            parts.append(f"失败 {meta['failed_count']}")
+        snapshot = " | ".join(parts)
+        if snapshot != last_snapshot:
+            log(snapshot)
+            last_snapshot = snapshot
+
+        status = str(task.get("status") or "")
+        if status == "completed":
+            return
+        if status in {"failed", "cancelled"}:
+            error_message = task.get("error_message") or meta.get("message") or "初始化未完成"
+            fail(str(error_message))
+        time.sleep(2)
+
+
 def start(skip_preflight: bool = False) -> None:
     if not (ROOT / ".venv").exists():
         fail(r"未检测到 .venv，请先执行 .\install-local.bat")
@@ -416,53 +535,51 @@ def start(skip_preflight: bool = False) -> None:
     ensure_data_dirs()
     env_values = load_env_file(ENV_FILE)
     backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
-    frontend_port = int(env_values.get("FRONTEND_PORT", str(DEFAULT_FRONTEND_PORT)))
     backend_host = env_values.get("BACKEND_HOST", "0.0.0.0")
-    frontend_host = env_values.get("FRONTEND_HOST", "0.0.0.0")
     write_frontend_env(env_values)
+    ensure_frontend_build(force=env_values.get("FORCE_FRONTEND_BUILD", "0") == "1")
 
     backend_pid = read_pid(BACKEND_PID_FILE)
     if backend_pid and process_exists(backend_pid):
         log(f"后端已在运行，PID={backend_pid}")
     else:
-        env = build_backend_env(env_values)
-        pid = start_process(
-            [str(venv_python()), "-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--host", backend_host, "--port", str(backend_port)],
-            BACKEND_PID_FILE,
-            LOG_DIR / "backend.log",
-            ROOT,
-            env,
-        )
-        log(f"后端已启动，PID={pid}，日志: {LOG_DIR / 'backend.log'}")
+        existing_pids = pid_listening_on_port(backend_port)
+        if existing_pids:
+            if BACKEND_PID_FILE.exists():
+                BACKEND_PID_FILE.unlink(missing_ok=True)
+            BACKEND_PID_FILE.write_text(str(existing_pids[0]), encoding="utf-8")
+            pid_text = ",".join(str(pid) for pid in existing_pids)
+            log(f"检测到后端端口 {backend_port} 已由现有进程监听，沿用运行中实例，PID={pid_text}")
+        else:
+            env = build_backend_env(env_values)
+            pid = start_process(
+                [str(venv_python()), "-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--host", backend_host, "--port", str(backend_port)],
+                BACKEND_PID_FILE,
+                LOG_DIR / "backend.log",
+                ROOT,
+                env,
+            )
+            log(f"后端已启动，PID={pid}，日志: {LOG_DIR / 'backend.log'}")
 
     wait_backend_ready(backend_port)
 
     frontend_pid = read_pid(FRONTEND_PID_FILE)
     if frontend_pid and process_exists(frontend_pid):
-        log(f"前端已在运行，PID={frontend_pid}")
-    else:
-        npm_bin = require_command(["npm.cmd", "npm"], "npm")
-        env = merged_runtime_env()
-        pid = start_process(
-            [npm_bin, "run", "dev", "--", "--host", frontend_host, "--port", str(frontend_port)],
-            FRONTEND_PID_FILE,
-            LOG_DIR / "frontend.log",
-            ROOT / "frontend",
-            env,
-        )
-        log(f"前端已启动，PID={pid}，日志: {LOG_DIR / 'frontend.log'}")
+        stop_pid(frontend_pid, "前端(旧 dev server)")
+        FRONTEND_PID_FILE.unlink(missing_ok=True)
+        log(f"已停止旧的前端 dev server，PID={frontend_pid}")
 
     log("")
     log("服务已启动：")
-    log(f"- 前端: http://127.0.0.1:{frontend_port}")
     log(f"- 后端: http://127.0.0.1:{backend_port}")
+    log(f"- 应用首页: http://127.0.0.1:{backend_port}")
     log(f"- API 文档: http://127.0.0.1:{backend_port}/docs")
 
 
 def stop() -> None:
     for pid_file, label, default_port in [
         (BACKEND_PID_FILE, "后端", DEFAULT_BACKEND_PORT),
-        (FRONTEND_PID_FILE, "前端", DEFAULT_FRONTEND_PORT),
+        (FRONTEND_PID_FILE, "旧前端 dev server", DEFAULT_FRONTEND_PORT),
     ]:
         pid = read_pid(pid_file)
         if pid and process_exists(pid):
@@ -481,26 +598,30 @@ def stop() -> None:
             else:
                 log(f"{label} 未运行")
         if pid_file.exists():
-            pid_file.unlink()
+            pid_file.unlink(missing_ok=True)
 
 
 def status() -> None:
     env_values = load_env_file(ENV_FILE)
     backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
-    frontend_port = int(env_values.get("FRONTEND_PORT", str(DEFAULT_FRONTEND_PORT)))
 
-    for pid_file, label in [
-        (BACKEND_PID_FILE, "后端"),
-        (FRONTEND_PID_FILE, "前端"),
-    ]:
-        pid = read_pid(pid_file)
-        if pid and process_exists(pid):
-            log(f"{label}: 运行中 (PID={pid})")
+    backend_pid = read_pid(BACKEND_PID_FILE)
+    if backend_pid and process_exists(backend_pid):
+        log(f"后端: 运行中 (PID={backend_pid})")
+    else:
+        fallback_pids = pid_listening_on_port(backend_port)
+        if fallback_pids:
+            BACKEND_PID_FILE.write_text(str(fallback_pids[0]), encoding="utf-8")
+            log(f"后端: 运行中 (PID={','.join(str(pid) for pid in fallback_pids)})")
         else:
-            log(f"{label}: 未运行")
+            log("后端: 未运行")
+
+    frontend_pid = read_pid(FRONTEND_PID_FILE)
+    if frontend_pid and process_exists(frontend_pid):
+        log(f"旧前端 dev server: 运行中 (PID={frontend_pid})")
 
     log(f"后端 HTTP: {'正常' if http_ok(f'http://127.0.0.1:{backend_port}/health') else '不可达'} (http://127.0.0.1:{backend_port}/health)")
-    log(f"前端 HTTP: {'正常' if http_ok(f'http://127.0.0.1:{frontend_port}') else '不可达'} (http://127.0.0.1:{frontend_port})")
+    log(f"应用 HTTP: {'正常' if http_ok(f'http://127.0.0.1:{backend_port}') else '不可达'} (http://127.0.0.1:{backend_port})")
 
 
 def init_data() -> None:
@@ -510,13 +631,30 @@ def init_data() -> None:
         fail(r"未检测到 .env，请先执行 .\install-local.bat 并配置 TUSHARE_TOKEN")
 
     env_values = load_env_file(ENV_FILE)
-    token = env_values.get("TUSHARE_TOKEN", "")
-    if token in {"", "your_tushare_token_here"}:
-        fail("请先在 .env 中配置有效的 TUSHARE_TOKEN")
+    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
+    if not token:
+        fail("请先在 .env 或页面配置中提供有效的 TUSHARE_TOKEN")
 
-    env = build_backend_env(env_values)
-    reviewer = env_values.get("DEFAULT_REVIEWER", "quant")
-    run_command([str(venv_python()), "run_all.py", "--reviewer", reviewer, "--start-from", "1"], env=env)
+    reviewer = get_runtime_setting(env_values, "DEFAULT_REVIEWER", db_key="default_reviewer", default="quant")
+    start(skip_preflight=True)
+    base_url = backend_base_url(env_values)
+    response = api_request(
+        "POST",
+        f"{base_url}/api/v1/tasks/start",
+        {
+            "reviewer": reviewer,
+            "skip_fetch": False,
+            "start_from": 1,
+        },
+    )
+    task = response.get("task")
+    if not isinstance(task, dict) or "id" not in task:
+        fail(f"初始化任务启动失败，返回内容异常: {response}")
+    task_id = int(task["id"])
+    log(f"初始化任务已提交，任务号 #{task_id}")
+    log(f"打开 http://127.0.0.1:{env_values.get('BACKEND_PORT', str(DEFAULT_BACKEND_PORT))}/update 可查看图形界面进度")
+    wait_for_task_completion(base_url, task_id)
+    log("首次初始化已完成。")
 
 
 def uninstall() -> None:
@@ -551,8 +689,8 @@ def uninstall() -> None:
 def bootstrap(skip_init_data: bool = False) -> None:
     install()
     env_values = load_env_file(ENV_FILE)
-    token = env_values.get("TUSHARE_TOKEN", "")
-    if token in {"", "your_tushare_token_here"}:
+    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
+    if not token:
         log("")
         log("安装已完成，当前未配置有效的 TUSHARE_TOKEN。")
         log("系统将先启动前后端，请在浏览器进入配置页完成 Token 配置。")
@@ -561,10 +699,10 @@ def bootstrap(skip_init_data: bool = False) -> None:
         return
 
     preflight()
-    if not skip_init_data:
-        log("执行首次数据初始化...")
-        init_data()
     start(skip_preflight=True)
+    if not skip_init_data:
+        log("通过应用 API 发起首次数据初始化...")
+        init_data()
 
 
 def create_parser() -> argparse.ArgumentParser:

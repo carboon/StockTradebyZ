@@ -50,6 +50,7 @@ htmlcov/
 # Local environment/config secrets
 .env
 .env.*
+!.env.example
 
 # Local databases and runtime data
 data/
@@ -61,3 +62,15 @@ file:test_db
 # OS files
 .DS_Store
 Thumbs.db
+
+.shell-python-packages/
+*.dist-info
+
+aiosqlite
+dotenv
+multipart
+pydantic_settings
+pytest_asyncio
+sqlalchemy
+websockets
+
