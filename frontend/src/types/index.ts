@@ -8,6 +8,18 @@ export interface StockInfo {
   exists?: boolean
 }
 
+export interface StockSearchItem {
+  code: string
+  name?: string
+  market?: string
+  industry?: string
+}
+
+export interface StockSearchResponse {
+  items: StockSearchItem[]
+  total: number
+}
+
 export interface Candidate {
   id: number
   pick_date: string
@@ -42,10 +54,14 @@ export interface B1Check {
   zx_long_pos?: boolean
   weekly_ma_aligned?: boolean
   volume_healthy?: boolean
+  in_active_pool?: boolean | null
   b1_passed?: boolean
+  prefilter_passed?: boolean | null
+  prefilter_blocked_by?: string[] | null
   score?: number
   verdict?: 'PASS' | 'WATCH' | 'FAIL'
   signal_type?: string
+  tomorrow_star_pass?: boolean | null
   notes?: string
 }
 
@@ -186,6 +202,7 @@ export interface TomorrowStarDatesResponse {
 
 export interface FreshnessResponse {
   latest_trade_date?: string | null
+  latest_trade_data_ready?: boolean | null
   local_latest_date?: string | null
   latest_candidate_date?: string | null
   latest_result_date?: string | null

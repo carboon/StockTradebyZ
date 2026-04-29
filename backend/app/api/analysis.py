@@ -58,6 +58,11 @@ async def get_tomorrow_star_freshness(
     from app.services.market_service import market_service, MarketService
 
     latest_trade_date = market_service.get_latest_trade_date() if market_service.token else None
+    latest_trade_data_ready = (
+        TushareService().is_trade_date_data_ready(latest_trade_date)
+        if latest_trade_date and market_service.token
+        else None
+    )
     local_latest_date = market_service.get_local_latest_date()
     latest_candidate_date = analysis_service.get_latest_candidate_date()
     latest_result_date = analysis_service.get_latest_result_date()
@@ -88,6 +93,7 @@ async def get_tomorrow_star_freshness(
         str(local_latest_date or ""),
         str(latest_candidate_date or ""),
         str(latest_result_date or ""),
+        str(latest_trade_data_ready),
         str(running_task.id if running_task else ""),
         str(running_task.status if running_task else ""),
         str(incremental_state.get("running", False)),
@@ -96,6 +102,7 @@ async def get_tomorrow_star_freshness(
 
     return {
         "latest_trade_date": latest_trade_date,
+        "latest_trade_data_ready": latest_trade_data_ready,
         "local_latest_date": local_latest_date,
         "latest_candidate_date": latest_candidate_date,
         "latest_result_date": latest_result_date,

@@ -20,6 +20,7 @@ class TushareService:
     """Tushare 数据服务"""
     _verify_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
     _stock_list_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+    _latest_data_ready_cache: dict[str, tuple[float, bool]] = {}
 
     def __init__(self, token: Optional[str] = None):
         if token is not None:
@@ -216,6 +217,35 @@ class TushareService:
             start_date=start_date,
             end_date=end_date
         )
+
+    def is_trade_date_data_ready(
+        self,
+        trade_date: str,
+        *,
+        ts_code: str = "000001.SZ",
+        ttl_seconds: int = 300,
+    ) -> bool:
+        """探测指定交易日的数据是否已在 Tushare 可读。"""
+        normalized = str(trade_date or "").replace("-", "")
+        if len(normalized) != 8 or not normalized.isdigit():
+            return False
+
+        cache_key = f"{self.token or ''}:{ts_code}:{normalized}"
+        cached = self._latest_data_ready_cache.get(cache_key)
+        now = time.time()
+        if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+
+        ready = False
+        try:
+            acquire_tushare_slot("daily")
+            df = self.pro.daily(ts_code=ts_code, start_date=normalized, end_date=normalized)
+            ready = bool(df is not None and not df.empty)
+        except Exception:
+            ready = False
+
+        self._latest_data_ready_cache[cache_key] = (now, ready)
+        return ready
 
     def get_raw_data_path(self, code: str) -> Path:
         """获取原始数据文件路径"""

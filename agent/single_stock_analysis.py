@@ -35,6 +35,7 @@ from typing import Any, Optional
 import pandas as pd
 import tushare as ts
 import yaml
+from backend.app.utils.stock_metadata import resolve_ts_code
 from openai import OpenAI
 
 warnings.filterwarnings("ignore")
@@ -91,13 +92,7 @@ def _load_env_var(name: str) -> str:
 
 def _to_ts_code(code: str) -> str:
     """把6位code映射到标准 ts_code 后缀。"""
-    code = str(code).zfill(6)
-    if code.startswith(("60", "68", "9")):
-        return f"{code}.SH"
-    elif code.startswith(("4", "8")):
-        return f"{code}.BJ"
-    else:
-        return f"{code}.SZ"
+    return resolve_ts_code(code)
 
 
 def fetch_stock_data(code: str, days: int = 500) -> Optional[pd.DataFrame]:

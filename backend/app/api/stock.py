@@ -11,10 +11,18 @@ from typing import Optional
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from app.database import get_db
 from app.models import Stock
-from app.schemas import StockResponse, KLineDataRequest, KLineResponse, KLineDataPoint
+from app.schemas import (
+    StockResponse,
+    StockSearchItem,
+    StockSearchResponse,
+    KLineDataRequest,
+    KLineResponse,
+    KLineDataPoint,
+)
 from app.config import settings
 from app.services.analysis_service import analysis_service
 from app.services.tushare_service import TushareService
@@ -22,6 +30,85 @@ from app.services.tushare_service import TushareService
 router = APIRouter()
 
 ROOT = Path(__file__).parent.parent.parent.parent
+
+
+def _stock_search_rank(item: dict, keyword: str, normalized_code: str) -> tuple[int, str]:
+    code = str(item.get("code", ""))
+    name = str(item.get("name", "") or "")
+    if normalized_code and code == normalized_code.zfill(6):
+        return (0, code)
+    if keyword and name == keyword:
+        return (1, code)
+    if normalized_code and code.startswith(normalized_code):
+        return (2, code)
+    if keyword and name.startswith(keyword):
+        return (3, code)
+    return (4, code)
+
+
+@router.get("/search", response_model=StockSearchResponse)
+async def search_stocks(
+    q: str,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+) -> StockSearchResponse:
+    """按代码或名称搜索股票，支持模糊匹配。"""
+    keyword = str(q or "").strip()
+    if not keyword:
+        return StockSearchResponse(items=[], total=0)
+
+    limit = max(1, min(int(limit or 10), 20))
+    normalized_code = "".join(ch for ch in keyword if ch.isdigit())
+    items_by_code: dict[str, dict] = {}
+
+    db_filters = []
+    if normalized_code:
+        db_filters.append(Stock.code.like(f"{normalized_code}%"))
+    db_filters.append(Stock.name.like(f"%{keyword}%"))
+    db_matches = (
+        db.query(Stock)
+        .filter(or_(*db_filters))
+        .limit(limit * 2)
+        .all()
+    )
+    for stock in db_matches:
+        items_by_code[stock.code] = {
+            "code": stock.code,
+            "name": stock.name,
+            "market": stock.market,
+            "industry": stock.industry,
+        }
+
+    if len(items_by_code) < limit:
+        try:
+            lookup = TushareService().get_stock_list()
+            if lookup is not None and not lookup.empty:
+                frame = lookup.copy()
+                frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
+                code_mask = frame["symbol"].str.startswith(normalized_code) if normalized_code else False
+                name_mask = frame["name"].astype(str).str.contains(keyword, na=False)
+                matched = frame[code_mask | name_mask].head(limit * 3)
+                for _, row in matched.iterrows():
+                    code = str(row.get("symbol", "")).zfill(6)
+                    if not code or code == "000000":
+                        continue
+                    items_by_code.setdefault(code, {
+                        "code": code,
+                        "name": row.get("name"),
+                        "market": TushareService._to_exchange(row.get("ts_code", "")),
+                        "industry": row.get("industry"),
+                    })
+        except Exception:
+            pass
+
+    ranked_items = sorted(
+        items_by_code.values(),
+        key=lambda item: _stock_search_rank(item, keyword, normalized_code),
+    )[:limit]
+    return StockSearchResponse(
+        items=[StockSearchItem(**item) for item in ranked_items],
+        total=len(ranked_items),
+    )
 
 
 @router.get("/{code}", response_model=StockResponse)

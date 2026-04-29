@@ -24,6 +24,7 @@ class AnalysisService:
     def __init__(self):
         self._selector = None
         self._reviewer = None
+        self._history_active_pool_cache: dict[tuple[str, str, int, int], dict[pd.Timestamp, set[str]]] = {}
 
     def load_stock_data(self, code: str) -> Optional[pd.DataFrame]:
         """加载股票数据"""
@@ -44,12 +45,7 @@ class AnalysisService:
 
         from Selector import B1Selector
 
-        config_file = ROOT / "config" / "rules_preselect.yaml"
-        cfg: dict[str, Any] = {}
-        if config_file.exists():
-            with open(config_file, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-
+        cfg = self._load_preselect_config()
         b1_cfg = cfg.get("b1", {})
         return B1Selector(
             j_threshold=float(b1_cfg.get("j_threshold", 15.0)),
@@ -59,6 +55,122 @@ class AnalysisService:
             zx_m3=int(b1_cfg.get("zx_m3", 57)),
             zx_m4=int(b1_cfg.get("zx_m4", 114)),
         )
+
+    def _load_preselect_config(self) -> dict[str, Any]:
+        """加载初选配置。"""
+        config_file = ROOT / "config" / "rules_preselect.yaml"
+        if not config_file.exists():
+            return {}
+        with open(config_file, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+
+    def _load_quant_review_config(self) -> dict[str, Any]:
+        """加载量化复核配置。"""
+        agent_dir = ROOT / "agent"
+        pipeline_dir = ROOT / "pipeline"
+        if str(agent_dir) not in sys.path:
+            sys.path.insert(0, str(agent_dir))
+        if str(pipeline_dir) not in sys.path:
+            sys.path.insert(0, str(pipeline_dir))
+
+        from quant_reviewer import load_config
+
+        return load_config()
+
+    def _build_prefilter(self, config: Optional[dict[str, Any]] = None):
+        """构建与明日之星一致的第 4 步前置过滤器。"""
+        pipeline_dir = ROOT / "pipeline"
+        if str(pipeline_dir) not in sys.path:
+            sys.path.insert(0, str(pipeline_dir))
+
+        from review_prefilter import Step4Prefilter
+
+        return Step4Prefilter(config or self._load_quant_review_config())
+
+    @staticmethod
+    def _normalize_history_record(record: dict[str, Any]) -> dict[str, Any]:
+        """兼容旧版历史文件，补齐新增字段。"""
+        normalized = dict(record)
+        normalized.setdefault("in_active_pool", None)
+        normalized.setdefault("prefilter_passed", None)
+        normalized.setdefault("tomorrow_star_pass", None)
+
+        blocked_by = normalized.get("prefilter_blocked_by")
+        if blocked_by is None:
+            normalized["prefilter_blocked_by"] = None
+        elif isinstance(blocked_by, list):
+            normalized["prefilter_blocked_by"] = [str(item) for item in blocked_by]
+        else:
+            normalized["prefilter_blocked_by"] = [str(blocked_by)]
+
+        return normalized
+
+    @staticmethod
+    def _derive_tomorrow_star_pass(
+        *,
+        in_active_pool: Optional[bool],
+        b1_passed: Optional[bool],
+        prefilter_passed: Optional[bool],
+        verdict: Optional[str],
+        signal_type: Optional[str],
+    ) -> Optional[bool]:
+        """派生单日是否满足明日之星主流程口径。"""
+        if in_active_pool is None or prefilter_passed is None:
+            return None
+        return bool(
+            in_active_pool
+            and b1_passed
+            and prefilter_passed
+            and verdict == "PASS"
+            and signal_type == "trend_start"
+        )
+
+    def _build_active_pool_sets(
+        self,
+        *,
+        start_ts: pd.Timestamp,
+        end_ts: pd.Timestamp,
+        preselect_cfg: dict[str, Any],
+    ) -> dict[pd.Timestamp, set[str]]:
+        """构建指定时间窗的流动性池成员集合。"""
+        global_cfg = preselect_cfg.get("global", {})
+        top_m = int(global_cfg.get("top_m", 2000))
+        n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
+        cache_key = (
+            start_ts.strftime("%Y-%m-%d"),
+            end_ts.strftime("%Y-%m-%d"),
+            top_m,
+            n_turnover_days,
+        )
+        cached = self._history_active_pool_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        pipeline_dir = ROOT / "pipeline"
+        if str(pipeline_dir) not in sys.path:
+            sys.path.insert(0, str(pipeline_dir))
+
+        from pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
+        from select_stock import load_raw_data
+
+        raw_data = load_raw_data(str(ROOT / settings.raw_data_dir), end_date=end_ts.strftime("%Y-%m-%d"))
+        preparer = MarketDataPreparer(
+            start_date=start_ts,
+            end_date=end_ts,
+            warmup_bars=n_turnover_days,
+            n_turnover_days=n_turnover_days,
+            selector=None,
+            n_jobs=4,
+        )
+        prepared = preparer.prepare_base_only(raw_data)
+        pool_by_date = TopTurnoverPoolBuilder(top_m=top_m).build(prepared)
+        pool_sets = {
+            dt: set(codes)
+            for dt, codes in pool_by_date.items()
+            if start_ts <= dt <= end_ts
+        }
+        self._history_active_pool_cache[cache_key] = pool_sets
+        return pool_sets
 
     def _normalize_pick_date(self, pick_date: Optional[str]) -> Optional[str]:
         """将日期统一规范为 YYYY-MM-DD。"""
@@ -514,7 +626,7 @@ class AnalysisService:
                 history = data.get("history", [])
 
                 # 限制返回30天数据
-                return history[:days]
+                return [self._normalize_history_record(item) for item in history[:days]]
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -577,9 +689,13 @@ class AnalysisService:
                     "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
                     "volume_healthy": None,
                     "b1_passed": bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False,
+                    "in_active_pool": None,
+                    "prefilter_passed": None,
+                    "prefilter_blocked_by": None,
                     "score": None,
                     "verdict": None,
                     "signal_type": None,
+                    "tomorrow_star_pass": None,
                 })
             except Exception as e:
                 # 跳过计算失败的日期
@@ -613,6 +729,9 @@ class AnalysisService:
             df["change_pct"] = df["close"].pct_change() * 100
 
         selector = self._build_b1_selector()
+        quant_config = self._load_quant_review_config()
+        prefilter = self._build_prefilter(quant_config)
+        preselect_cfg = self._load_preselect_config()
 
         # 创建历史数据存储目录
         history_dir = ROOT / settings.review_dir / "history"
@@ -626,6 +745,12 @@ class AnalysisService:
 
         # 获取最近days个交易日
         recent_df = df.tail(days).copy()
+        target_dates = [pd.Timestamp(ts).normalize() for ts in recent_df["date"].tolist()]
+        active_pool_sets = self._build_active_pool_sets(
+            start_ts=min(target_dates),
+            end_ts=max(target_dates),
+            preselect_cfg=preselect_cfg,
+        ) if target_dates else {}
 
         # 初始化空数据文件（标记为生成中）
         initial_data = {
@@ -671,9 +796,27 @@ class AnalysisService:
                 kdj_j = float(last_row["J"]) if pd.notna(last_row.get("J")) else None
                 zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
                 weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
+                in_active_pool = code in active_pool_sets.get(pd.Timestamp(row["date"]).normalize(), set())
+
+                prefilter_passed: Optional[bool] = None
+                prefilter_blocked_by: Optional[list[str]] = None
+                try:
+                    prefilter_result = prefilter.evaluate(code=code, pick_date=check_date, price_df=df_before)
+                    prefilter_passed = bool(prefilter_result.get("passed", True))
+                    prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
 
                 # 计算评分和信号（基于该交易日收盘数据，传入check_date）
-                score_result = self._quant_review_for_date(code, df_before, check_date)
+                score_result = self._quant_review_for_date(code, df_before, check_date, config=quant_config)
+                tomorrow_star_pass = self._derive_tomorrow_star_pass(
+                    in_active_pool=in_active_pool,
+                    b1_passed=b1_passed,
+                    prefilter_passed=prefilter_passed,
+                    verdict=score_result.get("verdict"),
+                    signal_type=score_result.get("signal_type"),
+                )
 
                 record = {
                     "check_date": check_date,
@@ -684,10 +827,14 @@ class AnalysisService:
                     "zx_long_pos": zx_long_pos,
                     "weekly_ma_aligned": weekly_ma_aligned,
                     "volume_healthy": None,
+                    "in_active_pool": in_active_pool,
                     "b1_passed": b1_passed,
+                    "prefilter_passed": prefilter_passed,
+                    "prefilter_blocked_by": prefilter_blocked_by,
                     "score": score_result.get("score"),
                     "verdict": score_result.get("verdict"),
                     "signal_type": score_result.get("signal_type"),
+                    "tomorrow_star_pass": tomorrow_star_pass,
                 }
                 history_records.append(record)
                 generated_count += 1
@@ -730,7 +877,13 @@ class AnalysisService:
             "file": str(stock_history_file),
         }
 
-    def _quant_review_for_date(self, code: str, df: pd.DataFrame, check_date: str = None) -> dict:
+    def _quant_review_for_date(
+        self,
+        code: str,
+        df: pd.DataFrame,
+        check_date: str = None,
+        config: Optional[dict[str, Any]] = None,
+    ) -> dict:
         """针对特定日期的数据进行量化评分
 
         注意：此方法用于历史数据生成，会绕过 prefilter 检查。
@@ -756,14 +909,14 @@ class AnalysisService:
             if str(pipeline_dir) not in sys.path:
                 sys.path.insert(0, str(pipeline_dir))
 
-            from quant_reviewer import QuantReviewer, load_config, prepare_review_frame, review_prepared_frame
+            from quant_reviewer import prepare_review_frame, review_prepared_frame
 
             # 加载配置
-            config = load_config()
+            review_config = config or self._load_quant_review_config()
 
             # 直接调用评分逻辑，绕过 prefilter
-            frame = prepare_review_frame(df, config)
-            result = review_prepared_frame(frame, config, code=code, asof_date=check_date, strategy=None)
+            frame = prepare_review_frame(df, review_config)
+            result = review_prepared_frame(frame, review_config, code=code, asof_date=check_date, strategy=None)
 
             return {
                 "score": result.get("total_score"),

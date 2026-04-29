@@ -15,6 +15,7 @@ import type {
   KLineData,
   SaveEnvResponse,
   StockInfo,
+  StockSearchResponse,
   Task,
   TaskDiagnosticsResponse,
   TaskEnvironmentResponse,
@@ -113,6 +114,13 @@ export const apiConfig = {
 export const apiStock = {
   // 获取股票信息
   getInfo: (code: string, options?: RequestOptions) => api.get<never, StockInfo>(`/v1/stock/${code}`, withRequestOptions(options, TIMEOUTS.short)),
+
+  // 搜索股票
+  search: (q: string, limit: number = 10, options?: RequestOptions) =>
+    api.get<never, StockSearchResponse>('/v1/stock/search', {
+      ...withRequestOptions(options, TIMEOUTS.short),
+      params: { q, limit },
+    }),
 
   // 获取 K线数据
   getKline: (code: string, days: number = 120, includeWeekly: boolean = true, options?: RequestOptions) =>

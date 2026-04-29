@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import locale
 import os
@@ -25,8 +26,28 @@ LOG_DIR = ROOT / "data" / "logs"
 BACKEND_PID_FILE = RUN_DIR / "backend.pid"
 FRONTEND_PID_FILE = RUN_DIR / "frontend.pid"
 FRONTEND_DIST_DIR = ROOT / "frontend" / "dist"
+INSTALL_STATE_FILE = RUN_DIR / "install-state.json"
+ROOT_REQUIREMENTS_FILE = ROOT / "requirements.txt"
+BACKEND_REQUIREMENTS_FILE = ROOT / "backend" / "requirements.txt"
+FRONTEND_LOCK_FILE = ROOT / "frontend" / "package-lock.json"
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+LAUNCHD_USER_DIR = Path.home() / "Library" / "LaunchAgents"
+BACKEND_SERVICE_NAME = "stocktrader-backend.service"
+FRONTEND_SERVICE_NAME = "stocktrader-frontend.service"
+BACKEND_PLIST_NAME = "com.stocktrader.backend.plist"
+FRONTEND_PLIST_NAME = "com.stocktrader.frontend.plist"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_FRONTEND_PORT = 5173
+MIN_BOOTSTRAP_PYTHON = (3, 10)
+MIN_RUNTIME_PYTHON = (3, 11)
+MIN_NODE_MAJOR = 18
+COMMON_SEARCH_DIRS = [
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+    Path("/home/linuxbrew/.linuxbrew/bin"),
+    Path("/usr/bin"),
+    Path("/usr/sbin"),
+]
 PIP_INDEX_CANDIDATES = [
     os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple"),
     "https://pypi.tuna.tsinghua.edu.cn/simple",
@@ -51,7 +72,7 @@ DB_CONFIG_PATH = ROOT / "data" / "db" / "stocktrade.db"
 
 
 def log(message: str) -> None:
-    print(message)
+    print(message, flush=True)
 
 
 def fail(message: str, exit_code: int = 1) -> None:
@@ -108,12 +129,6 @@ def get_runtime_setting(
     return default
 
 
-def merged_runtime_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env.update(load_env_file(ENV_FILE))
-    return env
-
-
 def ensure_env_file() -> None:
     if not ENV_FILE.exists():
         shutil.copyfile(ENV_EXAMPLE_FILE, ENV_FILE)
@@ -125,6 +140,156 @@ def ensure_data_dirs() -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
 
+def file_sha256(path: Path) -> str:
+    if not path.exists():
+        return ""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def frontend_env_content(env_values: dict[str, str]) -> str:
+    api_base_url = env_values.get("VITE_API_BASE_URL", "").strip() or "/api"
+    return f"VITE_API_BASE_URL={api_base_url}\n"
+
+
+def frontend_env_needs_update(env_values: dict[str, str]) -> bool:
+    expected = frontend_env_content(env_values)
+    if not FRONTEND_ENV_FILE.exists():
+        return True
+    try:
+        current = FRONTEND_ENV_FILE.read_text(encoding="utf-8")
+    except Exception:
+        return True
+    return current != expected
+
+
+def load_install_state() -> dict[str, object]:
+    if not INSTALL_STATE_FILE.exists():
+        return {}
+    try:
+        parsed = json.loads(INSTALL_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def save_install_state(state: dict[str, object]) -> None:
+    ensure_data_dirs()
+    INSTALL_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def dependency_snapshot() -> dict[str, dict[str, str]]:
+    return {
+        "backend": {
+            "python": ".".join(str(part) for part in sys.version_info[:3]),
+            "requirements.txt": file_sha256(ROOT_REQUIREMENTS_FILE),
+            "backend/requirements.txt": file_sha256(BACKEND_REQUIREMENTS_FILE),
+        },
+        "frontend": {
+            "package-lock.json": file_sha256(FRONTEND_LOCK_FILE),
+        },
+    }
+
+
+def backend_install_required(
+    install_state: dict[str, object],
+    snapshot: dict[str, dict[str, str]],
+    *,
+    force: bool = False,
+) -> bool:
+    if force or not venv_python().exists():
+        return True
+    return install_state.get("backend") != snapshot["backend"]
+
+
+def frontend_install_required(
+    install_state: dict[str, object],
+    snapshot: dict[str, dict[str, str]],
+    *,
+    force: bool = False,
+) -> bool:
+    if force or not (ROOT / "frontend" / "node_modules").exists():
+        return True
+    return install_state.get("frontend") != snapshot["frontend"]
+
+
+def has_persisted_data() -> bool:
+    if DB_CONFIG_PATH.exists():
+        return True
+
+    for directory in [
+        ROOT / "data" / "raw",
+        ROOT / "data" / "candidates",
+        ROOT / "data" / "review",
+        ROOT / "data" / "kline",
+    ]:
+        if not directory.exists():
+            continue
+        for child in directory.iterdir():
+            if child.name.startswith("."):
+                continue
+            return True
+    return False
+
+
+def install_plan_snapshot(force_install: bool = False) -> dict[str, object]:
+    env_values = load_env_file(ENV_FILE) if ENV_FILE.exists() else {}
+    snapshot = dependency_snapshot()
+    install_state = load_install_state()
+    backend_needed = backend_install_required(install_state, snapshot, force=force_install)
+    frontend_needed = frontend_install_required(install_state, snapshot, force=force_install)
+    frontend_build_needed = (
+        env_values.get("FORCE_FRONTEND_BUILD", "0") == "1"
+        or frontend_needed
+        or not FRONTEND_DIST_DIR.exists()
+        or frontend_env_needs_update(env_values)
+    )
+    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
+    auto_init_needed = bool(token) and not has_persisted_data()
+    return {
+        "env_values": env_values,
+        "snapshot": snapshot,
+        "install_state": install_state,
+        "backend_needed": backend_needed,
+        "frontend_needed": frontend_needed,
+        "frontend_build_needed": frontend_build_needed,
+        "auto_init_needed": auto_init_needed,
+        "token_configured": bool(token),
+    }
+
+
+class PhasePrinter:
+    def __init__(self, phases: list[tuple[str, int]]) -> None:
+        self.phases = phases
+        self.index = 0
+
+    def begin_next(self) -> None:
+        if self.index >= len(self.phases):
+            return
+        remaining_seconds = sum(seconds for _, seconds in self.phases[self.index :])
+        title, _ = self.phases[self.index]
+        self.index += 1
+        log(f"[{self.index}/{len(self.phases)}] {title} | 预计剩余 {format_duration(remaining_seconds)}")
+
+
 def venv_python() -> Path:
     if os.name == "nt":
         return ROOT / ".venv" / "Scripts" / "python.exe"
@@ -132,41 +297,209 @@ def venv_python() -> Path:
 
 
 def resolve_command(candidates: list[str]) -> str | None:
+    search_dirs = list(COMMON_SEARCH_DIRS)
+    if os.name == "nt":
+        for env_key in ["ProgramFiles", "ProgramFiles(x86)"]:
+            base_dir = os.environ.get(env_key, "")
+            if base_dir:
+                search_dirs.append(Path(base_dir) / "nodejs")
     for candidate in candidates:
+        candidate_path = Path(candidate)
+        if candidate_path.is_file() and os.access(candidate_path, os.X_OK):
+            return str(candidate_path)
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
+        if candidate_path.name == candidate and candidate_path.parent == Path("."):
+            for search_dir in search_dirs:
+                search_path = search_dir / candidate
+                if search_path.is_file() and os.access(search_path, os.X_OK):
+                    return str(search_path)
     return None
+
+
+def system_dependency_help() -> str:
+    if os.name == "nt":
+        return (
+            "系统会自动尝试通过 winget 安装 Python 3.12 和 Node.js LTS。\n"
+            "如果系统策略阻止安装，请以管理员身份重新运行当前脚本。"
+        )
+
+    if sys.platform == "darwin":
+        return "系统会自动尝试通过 Homebrew 安装 Python 3.11 和 Node.js。"
+
+    if resolve_command(["apt-get"]):
+        return "系统会自动尝试通过 apt-get 安装 Python、Node.js、npm、lsof。"
+    if resolve_command(["dnf"]):
+        return "系统会自动尝试通过 dnf 安装 Python、Node.js、npm、lsof。"
+    if resolve_command(["yum"]):
+        return "系统会自动尝试通过 yum 安装 Python、Node.js、npm、lsof。"
+    return "请先安装 Python 3.11+、Node.js 18+、npm、lsof、curl 后重试。"
 
 
 def require_command(candidates: list[str], description: str) -> str:
     command = resolve_command(candidates)
     if command:
         return command
-    if os.name == "nt":
-        help_text = (
-            "请先手动安装以下依赖并重试：\n"
-            "  Python 3.11+\n"
-            "  Node.js 18+\n"
-            "  npm\n"
-            "建议使用 winget：\n"
-            "  winget install Python.Python.3.12\n"
-            "  winget install OpenJS.NodeJS.LTS"
-        )
-    else:
-        help_text = f"请先安装 {description} 后重试。"
+    help_text = system_dependency_help()
     fail(f"缺少 {description}: {candidates[0]}\n{help_text}")
     return ""
 
 
-def check_python_version(python_bin: str) -> None:
+def version_tuple_text(version: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def parse_semver_prefix(raw: str) -> tuple[int, ...] | None:
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    if cleaned[0] in {"v", "V"}:
+        cleaned = cleaned[1:]
+    parts = cleaned.split(".")
+    values: list[int] = []
+    for part in parts:
+        digits = ""
+        for char in part:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        if not digits:
+            break
+        values.append(int(digits))
+    return tuple(values) if values else None
+
+
+def command_version_output(cmd: list[str], code: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [*cmd, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def python_command_version(cmd: list[str]) -> tuple[int, ...] | None:
+    output = command_version_output(cmd, "import sys; print('.'.join(str(x) for x in sys.version_info[:3]))")
+    if not output:
+        return None
+    return parse_semver_prefix(output)
+
+
+def python_command_candidates() -> list[list[str]]:
+    candidates: list[list[str]] = []
+
+    venv_py = str(venv_python())
+    if Path(venv_py).exists():
+        candidates.append([venv_py])
+
+    if sys.executable:
+        candidates.append([sys.executable])
+
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("ProgramFiles", "")
+        for path in [
+            Path(local_app_data) / "Programs" / "Python" / "Python312" / "python.exe",
+            Path(local_app_data) / "Programs" / "Python" / "Python311" / "python.exe",
+            Path(local_app_data) / "Programs" / "Python" / "Python310" / "python.exe",
+            Path(program_files) / "Python312" / "python.exe",
+            Path(program_files) / "Python311" / "python.exe",
+            Path(program_files) / "Python310" / "python.exe",
+        ]:
+            if path.is_file():
+                candidates.append([str(path)])
+        py_launcher = resolve_command(["py"])
+        if py_launcher:
+            for selector in ["-3.12", "-3.11", "-3.10"]:
+                candidates.append([py_launcher, selector])
+
+    for candidate in ["python3.12", "python3.11", "python3.10", "python3", "python"]:
+        resolved = resolve_command([candidate])
+        if resolved:
+            candidates.append([resolved])
+
+    unique: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for candidate in candidates:
+        key = tuple(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def find_python_command(min_version: tuple[int, int]) -> tuple[list[str], tuple[int, ...]] | None:
+    for candidate in python_command_candidates():
+        version = python_command_version(candidate)
+        if version is None:
+            continue
+        if version[:2] >= min_version:
+            return candidate, version
+    return None
+
+
+def check_python_version(python_bin: str, min_version: tuple[int, int] = MIN_RUNTIME_PYTHON) -> None:
     result = subprocess.run(
-        [python_bin, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"],
+        [python_bin, "-c", f"import sys; raise SystemExit(0 if sys.version_info >= {min_version} else 1)"],
         cwd=str(ROOT),
         check=False,
     )
     if result.returncode != 0:
-        fail(f"当前 Python 版本过低：{python_bin}，需要 Python 3.11 或更高版本")
+        fail(f"当前 Python 版本过低：{python_bin}，需要 Python {version_tuple_text(min_version)} 或更高版本")
+
+
+def node_version(node_bin: str) -> tuple[int, ...] | None:
+    try:
+        result = subprocess.run(
+            [node_bin, "--version"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_semver_prefix(result.stdout.strip())
+
+
+def python_has_venv(python_cmd: list[str]) -> bool:
+    try:
+        result = subprocess.run(
+            [*python_cmd, "-m", "venv", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def python_has_pip(python_cmd: list[str]) -> bool:
+    try:
+        result = subprocess.run(
+            [*python_cmd, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def run_command(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
@@ -175,11 +508,210 @@ def run_command(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | N
         fail(f"命令执行失败（退出码 {result.returncode}）：{' '.join(cmd)}", result.returncode)
 
 
+def detect_system_package_manager() -> str | None:
+    if os.name == "nt":
+        return "winget" if resolve_command(["winget"]) else None
+    if sys.platform == "darwin":
+        return "brew"
+    if resolve_command(["apt-get"]):
+        return "apt-get"
+    if resolve_command(["dnf"]):
+        return "dnf"
+    if resolve_command(["yum"]):
+        return "yum"
+    if resolve_command(["brew"]) or (resolve_command(["bash", "/bin/bash"]) and resolve_command(["curl", "/usr/bin/curl"])):
+        return "brew"
+    return None
+
+
+def run_package_manager_command(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
+    actual_cmd = list(cmd)
+    if os.name != "nt" and Path(cmd[0]).name != "brew":
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            sudo_bin = resolve_command(["sudo"])
+            if not sudo_bin:
+                fail("需要 sudo 权限来安装系统依赖，但系统未检测到 sudo。")
+            actual_cmd = [sudo_bin, *cmd]
+    run_command(actual_cmd, env=env)
+
+
+def build_package_manager_command(cmd: list[str]) -> list[str]:
+    if os.name == "nt" or Path(cmd[0]).name == "brew":
+        return list(cmd)
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        sudo_bin = resolve_command(["sudo"])
+        if not sudo_bin:
+            fail("需要 sudo 权限来安装系统依赖，但系统未检测到 sudo。")
+        return [sudo_bin, *cmd]
+    return list(cmd)
+
+
+def ensure_homebrew() -> str:
+    brew_bin = resolve_command(["brew"])
+    if brew_bin:
+        return brew_bin
+
+    installer = resolve_command(["bash", "/bin/bash"])
+    if not installer:
+        fail("未检测到 bash，无法自动安装 Homebrew。")
+
+    curl_bin = resolve_command(["curl", "/usr/bin/curl"])
+    if not curl_bin:
+        fail("未检测到 curl，无法自动安装 Homebrew。")
+
+    log("未检测到 Homebrew，开始自动安装...")
+    env = os.environ.copy()
+    env["NONINTERACTIVE"] = "1"
+    run_command(
+        [
+            installer,
+            "-c",
+            f"$({curl_bin} -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)",
+        ],
+        env=env,
+    )
+    brew_bin = resolve_command(["brew"]) or resolve_command(
+        [
+            "/opt/homebrew/bin/brew",
+            "/usr/local/bin/brew",
+            "/home/linuxbrew/.linuxbrew/bin/brew",
+        ]
+    )
+    if not brew_bin:
+        fail("Homebrew 安装完成后仍未检测到 brew。")
+    return brew_bin
+
+
+def ensure_winget() -> str:
+    winget_bin = resolve_command(["winget"])
+    if winget_bin:
+        return winget_bin
+    fail("未检测到 winget，请先通过 start-local.ps1 自动修复 WinGet 后重试。")
+    return ""
+
+
+def collect_system_dependency_issues() -> list[str]:
+    issues: list[str] = []
+
+    runtime_python = find_python_command(MIN_RUNTIME_PYTHON)
+    if runtime_python is None:
+        issues.append(f"Python {version_tuple_text(MIN_RUNTIME_PYTHON)}+")
+    else:
+        python_cmd, _ = runtime_python
+        if not python_has_venv(python_cmd):
+            issues.append("Python venv")
+        if not python_has_pip(python_cmd):
+            issues.append("Python pip")
+
+    node_bin = resolve_command(["node", "node.exe"])
+    if not node_bin:
+        issues.append(f"Node.js {MIN_NODE_MAJOR}+")
+    else:
+        version = node_version(node_bin)
+        if version is None or version[0] < MIN_NODE_MAJOR:
+            issues.append(f"Node.js {MIN_NODE_MAJOR}+")
+
+    if not resolve_command(["npm.cmd", "npm"]):
+        issues.append("npm")
+
+    if os.name != "nt" and not resolve_command(["lsof"]):
+        issues.append("lsof")
+
+    return issues
+
+
+def install_system_dependencies(manager: str, issues: list[str]) -> None:
+    log(f"检测到系统依赖缺失或版本不足: {', '.join(issues)}")
+    log(f"开始自动安装系统依赖，包管理器: {manager}")
+
+    if manager == "brew":
+        brew_bin = ensure_homebrew()
+        run_package_manager_command([brew_bin, "install", "python@3.11", "node"])
+        return
+
+    if manager == "apt-get":
+        apt_bin = require_command(["apt-get"], "apt-get")
+        run_package_manager_command([apt_bin, "update"])
+        attempts = [
+            [apt_bin, "install", "-y", "python3.12", "python3.12-venv", "python3-pip", "nodejs", "npm", "lsof"],
+            [apt_bin, "install", "-y", "python3.11", "python3.11-venv", "python3-pip", "nodejs", "npm", "lsof"],
+            [apt_bin, "install", "-y", "python3", "python3-venv", "python3-pip", "nodejs", "npm", "lsof"],
+        ]
+        for idx, attempt in enumerate(attempts, start=1):
+            result = subprocess.run(
+                build_package_manager_command(attempt),
+                cwd=str(ROOT),
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+            log(f"  apt 安装尝试 {idx}/{len(attempts)} 失败，切换下一组包名")
+        fail("apt-get 已执行，但仍无法安装满足要求的 Python/Node.js 依赖。")
+
+    if manager == "dnf":
+        dnf_bin = require_command(["dnf"], "dnf")
+        run_package_manager_command([dnf_bin, "install", "-y", "python3", "python3-pip", "python3-virtualenv", "nodejs", "npm", "lsof"])
+        return
+
+    if manager == "yum":
+        yum_bin = require_command(["yum"], "yum")
+        run_package_manager_command([yum_bin, "install", "-y", "python3", "python3-pip", "nodejs", "npm", "lsof"])
+        return
+
+    if manager == "winget":
+        winget_bin = ensure_winget()
+        base_args = [
+            winget_bin,
+            "install",
+            "--exact",
+            "--source",
+            "winget",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--scope",
+            "machine",
+            "--silent",
+        ]
+        run_package_manager_command([*base_args, "--id", "Python.Python.3.12"])
+        run_package_manager_command([*base_args, "--id", "OpenJS.NodeJS.LTS"])
+        return
+
+    fail(f"当前系统未识别到可自动执行的包管理器。{system_dependency_help()}")
+
+
+def relaunch_with_runtime_python() -> None:
+    runtime_python = find_python_command(MIN_RUNTIME_PYTHON)
+    if runtime_python is None:
+        fail(f"自动安装后仍未检测到 Python {version_tuple_text(MIN_RUNTIME_PYTHON)}+。")
+    python_cmd, version = runtime_python
+    log(f"切换到 Python {version_tuple_text(version[:3])} 继续执行...")
+    result = subprocess.run([*python_cmd, str(Path(__file__)), *sys.argv[1:]], cwd=str(ROOT), env=os.environ.copy(), check=False)
+    raise SystemExit(result.returncode)
+
+
+def ensure_system_dependencies() -> None:
+    issues = collect_system_dependency_issues()
+    if not issues:
+        return
+
+    manager = detect_system_package_manager()
+    if manager is None and sys.platform == "darwin":
+        manager = "brew"
+    if manager is None:
+        fail(f"系统依赖缺失：{', '.join(issues)}\n{system_dependency_help()}")
+
+    install_system_dependencies(manager, issues)
+
+    remaining = collect_system_dependency_issues()
+    if remaining:
+        fail(f"系统依赖自动安装后仍不满足要求：{', '.join(remaining)}")
+
 def install_with_pip_fallback(python_bin: str, args: list[str]) -> str:
-    for index in PIP_INDEX_CANDIDATES:
-        log(f"尝试 pip 源: {index}")
+    indexes = dedupe_preserve_order(PIP_INDEX_CANDIDATES)
+    for idx, index in enumerate(indexes, start=1):
+        log(f"  pip 镜像 {idx}/{len(indexes)}: {index}")
         result = subprocess.run(
-            [python_bin, "-m", "pip", "install", *args, "-i", index],
+            [python_bin, "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", *args, "-i", index],
             cwd=str(ROOT),
             check=False,
         )
@@ -190,10 +722,12 @@ def install_with_pip_fallback(python_bin: str, args: list[str]) -> str:
 
 
 def install_with_npm_fallback(npm_bin: str) -> str:
-    for registry in NPM_REGISTRY_CANDIDATES:
-        log(f"尝试 npm 源: {registry}")
+    registries = dedupe_preserve_order(NPM_REGISTRY_CANDIDATES)
+    install_command = "ci" if FRONTEND_LOCK_FILE.exists() else "install"
+    for idx, registry in enumerate(registries, start=1):
+        log(f"  npm 镜像 {idx}/{len(registries)}: {registry}")
         result = subprocess.run(
-            [npm_bin, "install", "--registry", registry],
+            [npm_bin, install_command, "--registry", registry, "--no-fund", "--no-audit", "--loglevel=error"],
             cwd=str(ROOT / "frontend"),
             check=False,
         )
@@ -205,12 +739,8 @@ def install_with_npm_fallback(npm_bin: str) -> str:
 
 def write_frontend_env(env_values: dict[str, str] | None = None) -> str:
     env_values = env_values or load_env_file(ENV_FILE)
-    api_base_url = env_values.get("VITE_API_BASE_URL", "").strip()
-
-    if not api_base_url:
-        api_base_url = "/api"
-
-    FRONTEND_ENV_FILE.write_text(f"VITE_API_BASE_URL={api_base_url}\n", encoding="utf-8")
+    api_base_url = env_values.get("VITE_API_BASE_URL", "").strip() or "/api"
+    FRONTEND_ENV_FILE.write_text(frontend_env_content(env_values), encoding="utf-8")
     return api_base_url
 
 
@@ -325,65 +855,152 @@ def http_ok(url: str) -> bool:
         return False
 
 
-def preflight() -> None:
-    python_bin = sys.executable
-    check_python_version(python_bin)
-    require_command(["node", "node.exe"], "Node.js")
-    require_command(["npm.cmd", "npm"], "npm")
+def ensure_runtime_prerequisites() -> tuple[str, str]:
     ensure_env_file()
     ensure_data_dirs()
+    ensure_system_dependencies()
 
-    env_values = load_env_file(ENV_FILE)
-    backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
+    if sys.version_info[:2] < MIN_RUNTIME_PYTHON:
+        relaunch_with_runtime_python()
 
-    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
-    if not token:
-        log("[WARN] TUSHARE_TOKEN 未配置，系统可启动，但首次进入后需要在页面中完成配置")
-    else:
-        log("[OK] TUSHARE_TOKEN 已配置")
-
-    if is_port_open(backend_port):
-        log(f"[WARN] 后端端口 {backend_port} 已被占用")
-    else:
-        log(f"[OK] 后端端口 {backend_port} 可用")
-
-    log(f"[OK] 本地部署模式将通过后端统一提供前端页面: http://127.0.0.1:{backend_port}")
-    log("[OK] 预检完成")
-
-
-def install() -> None:
     python_bin = sys.executable
-    check_python_version(python_bin)
+    check_python_version(python_bin, MIN_RUNTIME_PYTHON)
     require_command(["node", "node.exe"], "Node.js")
     npm_bin = require_command(["npm.cmd", "npm"], "npm")
-    ensure_env_file()
-    ensure_data_dirs()
+    return python_bin, npm_bin
 
-    venv_dir = ROOT / ".venv"
-    if not venv_dir.exists():
-        log("创建虚拟环境...")
-        run_command([python_bin, "-m", "venv", str(venv_dir)])
+
+def log_runtime_state(env_values: dict[str, str]) -> None:
+    backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
+    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
+
+    if token:
+        log("TUSHARE_TOKEN: 已配置")
+    else:
+        log("TUSHARE_TOKEN: 未配置，首次初始化需在页面内完成")
+
+    if is_port_open(backend_port):
+        log(f"端口 {backend_port}: 已被占用，启动时将复用现有实例")
+    else:
+        log(f"端口 {backend_port}: 可用")
+
+    log(f"访问地址: http://127.0.0.1:{backend_port}")
+
+
+def apply_install_plan(
+    plan: dict[str, object],
+    *,
+    python_bin: str,
+    npm_bin: str,
+) -> dict[str, str]:
+    env_values = plan["env_values"]
+    if not isinstance(env_values, dict):
+        fail("安装计划异常：env_values 缺失")
+
+    pip_index = ""
+    npm_registry = ""
+
+    if not (ROOT / ".venv").exists():
+        log("创建 .venv ...")
+        run_command([python_bin, "-m", "venv", str(ROOT / ".venv")])
 
     venv_py = str(venv_python())
-    pip_index = install_with_pip_fallback(venv_py, ["--upgrade", "pip"])
-    log("安装后端依赖...")
-    pip_index = install_with_pip_fallback(venv_py, ["-r", "requirements.txt"])
-    pip_index = install_with_pip_fallback(venv_py, ["-r", "backend/requirements.txt"])
+    backend_needed = bool(plan.get("backend_needed"))
+    frontend_needed = bool(plan.get("frontend_needed"))
+    previous_state = plan.get("install_state")
+    previous_pip_index = ""
+    previous_npm_registry = ""
+    if isinstance(previous_state, dict):
+        previous_pip_index = str(previous_state.get("pip_index") or "")
+        previous_npm_registry = str(previous_state.get("npm_registry") or "")
 
-    log("安装前端依赖...")
-    npm_registry = install_with_npm_fallback(npm_bin)
+    if backend_needed:
+        log("安装 Python 依赖...")
+        pip_index = install_with_pip_fallback(venv_py, ["--upgrade", "pip"])
+        pip_index = install_with_pip_fallback(venv_py, ["-r", str(ROOT_REQUIREMENTS_FILE)])
+        pip_index = install_with_pip_fallback(venv_py, ["-r", str(BACKEND_REQUIREMENTS_FILE)])
+    else:
+        pip_index = previous_pip_index
+        log("Python 依赖无变更，跳过")
 
-    api_base_url = write_frontend_env()
-    log("")
-    log("安装完成。")
-    log(f"- pip: {pip_index}")
-    log(f"- npm: {npm_registry}")
-    log(f"- 前端 API 地址: {api_base_url}")
-    log("")
-    log("Windows 下一步：")
-    log(r"1. 一键启动：.\bootstrap-local.bat")
-    log(r"2. 或分步执行：.\init-data.bat / .\start-local.bat / .\status-local.bat")
-    log("3. 浏览器首次进入后，可在配置页使用“首次启动自检”检查 Token、数据库和初始化状态")
+    if frontend_needed:
+        log("安装前端依赖...")
+        npm_registry = install_with_npm_fallback(npm_bin)
+    else:
+        npm_registry = previous_npm_registry
+        log("前端依赖无变更，跳过")
+
+    write_frontend_env(env_values)
+
+    snapshot = plan.get("snapshot")
+    if not isinstance(snapshot, dict):
+        fail("安装计划异常：snapshot 缺失")
+
+    save_install_state(
+        {
+            "backend": snapshot.get("backend", {}),
+            "frontend": snapshot.get("frontend", {}),
+            "pip_index": pip_index,
+            "npm_registry": npm_registry,
+            "updated_at": int(time.time()),
+        }
+    )
+    return {"pip_index": pip_index, "npm_registry": npm_registry}
+
+
+def maybe_build_frontend(npm_bin: str, env_values: dict[str, str], *, force: bool = False) -> None:
+    write_frontend_env(env_values)
+    if not force and FRONTEND_DIST_DIR.exists():
+        log("前端资源已存在，跳过构建")
+        return
+    log("构建前端生产资源...")
+    run_command([npm_bin, "run", "build"], cwd=ROOT / "frontend")
+
+
+def submit_init_task(env_values: dict[str, str]) -> tuple[str, int]:
+    reviewer = get_runtime_setting(env_values, "DEFAULT_REVIEWER", db_key="default_reviewer", default="quant")
+    base_url = backend_base_url(env_values)
+    response = api_request(
+        "POST",
+        f"{base_url}/api/v1/tasks/start",
+        {
+            "reviewer": reviewer,
+            "skip_fetch": False,
+            "start_from": 1,
+        },
+    )
+    task = response.get("task")
+    if not isinstance(task, dict) or "id" not in task:
+        fail(f"初始化任务启动失败，返回内容异常: {response}")
+    return base_url, int(task["id"])
+
+
+def preflight() -> None:
+    ensure_runtime_prerequisites()
+    env_values = load_env_file(ENV_FILE)
+    log_runtime_state(env_values)
+    log("预检完成")
+
+
+def install(force: bool = False) -> None:
+    python_bin, npm_bin = ensure_runtime_prerequisites()
+    plan = install_plan_snapshot(force_install=force)
+    env_values = plan["env_values"]
+    if not isinstance(env_values, dict):
+        fail("安装计划异常：env_values 缺失")
+
+    if not plan["backend_needed"] and not plan["frontend_needed"]:
+        api_base_url = write_frontend_env(env_values)
+        log("依赖已就绪，跳过安装。")
+        log(f"前端 API 地址: {api_base_url}")
+        return
+
+    mirrors = apply_install_plan(plan, python_bin=python_bin, npm_bin=npm_bin)
+    api_base_url = write_frontend_env(env_values)
+    log("安装完成")
+    log(f"pip 镜像: {mirrors['pip_index'] or '-'}")
+    log(f"npm 镜像: {mirrors['npm_registry'] or '-'}")
+    log(f"前端 API 地址: {api_base_url}")
 
 
 def build_backend_env(env_values: dict[str, str]) -> dict[str, str]:
@@ -435,15 +1052,6 @@ def wait_backend_ready(port: int) -> None:
             return
         time.sleep(1)
     log(f"警告: 后端在 15s 内未返回健康响应，前端仍会继续启动: {url}")
-
-
-def ensure_frontend_build(force: bool = False) -> None:
-    if FRONTEND_DIST_DIR.exists() and not force:
-        return
-    npm_bin = require_command(["npm.cmd", "npm"], "npm")
-    write_frontend_env()
-    log("构建前端生产资源...")
-    run_command([npm_bin, "run", "build"], cwd=ROOT / "frontend")
 
 
 def backend_base_url(env_values: dict[str, str]) -> str:
@@ -523,23 +1131,60 @@ def wait_for_task_completion(base_url: str, task_id: int) -> None:
         time.sleep(2)
 
 
-def start(skip_preflight: bool = False) -> None:
+def start(skip_preflight: bool = False, skip_init_data: bool = False, force_install: bool = False) -> None:
+    plan = install_plan_snapshot(force_install=force_install)
+    frontend_build_needed = bool(plan["frontend_build_needed"])
+    auto_init_needed = bool(plan["auto_init_needed"])
+    phases: list[tuple[str, int]] = [
+        ("检查运行环境", 20),
+        ("准备本地配置", 5),
+    ]
     if not (ROOT / ".venv").exists():
-        fail(r"未检测到 .venv，请先执行 .\install-local.bat")
-    if not ENV_FILE.exists():
-        fail(r"未检测到 .env，请先执行 .\install-local.bat 并配置 TUSHARE_TOKEN")
+        phases.append(("创建 Python 虚拟环境", 20))
+    if plan["backend_needed"] or plan["frontend_needed"]:
+        phases.append(("安装项目依赖", 330))
+    if frontend_build_needed:
+        phases.append(("构建前端资源", 90))
+    if not skip_preflight:
+        phases.append(("启动前检查", 10))
+    phases.append(("启动后端服务", 15))
+    phases.append(("等待服务就绪", 15))
+    if not skip_init_data and auto_init_needed:
+        phases.append(("首次初始化数据", 900))
+
+    progress = PhasePrinter(phases)
+
+    progress.begin_next()
+    python_bin, npm_bin = ensure_runtime_prerequisites()
+
+    progress.begin_next()
+    env_values = load_env_file(ENV_FILE)
+    write_frontend_env(env_values)
+
+    if not (ROOT / ".venv").exists():
+        progress.begin_next()
+        log("创建 .venv ...")
+        run_command([python_bin, "-m", "venv", str(ROOT / ".venv")])
+
+    plan = install_plan_snapshot(force_install=force_install)
+    if plan["backend_needed"] or plan["frontend_needed"]:
+        progress.begin_next()
+        mirrors = apply_install_plan(plan, python_bin=python_bin, npm_bin=npm_bin)
+        log(f"依赖安装完成 | pip: {mirrors['pip_index'] or '-'} | npm: {mirrors['npm_registry'] or '-'}")
+
+    if frontend_build_needed:
+        progress.begin_next()
+        maybe_build_frontend(npm_bin, env_values, force=True)
 
     if not skip_preflight:
-        preflight()
-
-    ensure_data_dirs()
-    env_values = load_env_file(ENV_FILE)
-    backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
-    backend_host = env_values.get("BACKEND_HOST", "0.0.0.0")
-    write_frontend_env(env_values)
-    ensure_frontend_build(force=env_values.get("FORCE_FRONTEND_BUILD", "0") == "1")
+        progress.begin_next()
+        log_runtime_state(env_values)
 
     backend_pid = read_pid(BACKEND_PID_FILE)
+    backend_port = int(env_values.get("BACKEND_PORT", str(DEFAULT_BACKEND_PORT)))
+    backend_host = env_values.get("BACKEND_HOST", "0.0.0.0")
+
+    progress.begin_next()
     if backend_pid and process_exists(backend_pid):
         log(f"后端已在运行，PID={backend_pid}")
     else:
@@ -561,6 +1206,7 @@ def start(skip_preflight: bool = False) -> None:
             )
             log(f"后端已启动，PID={pid}，日志: {LOG_DIR / 'backend.log'}")
 
+    progress.begin_next()
     wait_backend_ready(backend_port)
 
     frontend_pid = read_pid(FRONTEND_PID_FILE)
@@ -574,6 +1220,19 @@ def start(skip_preflight: bool = False) -> None:
     log(f"- 后端: http://127.0.0.1:{backend_port}")
     log(f"- 应用首页: http://127.0.0.1:{backend_port}")
     log(f"- API 文档: http://127.0.0.1:{backend_port}/docs")
+    if not get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token"):
+        log("提示: 先在页面配置 TUSHARE_TOKEN，再从“运维管理”发起首次初始化")
+        return
+
+    if skip_init_data or not auto_init_needed:
+        return
+
+    progress.begin_next()
+    base_url, task_id = submit_init_task(env_values)
+    log(f"初始化任务已提交，任务号 #{task_id}")
+    log(f"图形进度: http://127.0.0.1:{backend_port}/update")
+    wait_for_task_completion(base_url, task_id)
+    log("首次初始化已完成。")
 
 
 def stop() -> None:
@@ -625,45 +1284,74 @@ def status() -> None:
 
 
 def init_data() -> None:
-    if not (ROOT / ".venv").exists():
-        fail(r"未检测到 .venv，请先执行 .\install-local.bat")
-    if not ENV_FILE.exists():
-        fail(r"未检测到 .env，请先执行 .\install-local.bat 并配置 TUSHARE_TOKEN")
-
+    ensure_runtime_prerequisites()
     env_values = load_env_file(ENV_FILE)
     token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
     if not token:
         fail("请先在 .env 或页面配置中提供有效的 TUSHARE_TOKEN")
 
-    reviewer = get_runtime_setting(env_values, "DEFAULT_REVIEWER", db_key="default_reviewer", default="quant")
-    start(skip_preflight=True)
-    base_url = backend_base_url(env_values)
-    response = api_request(
-        "POST",
-        f"{base_url}/api/v1/tasks/start",
-        {
-            "reviewer": reviewer,
-            "skip_fetch": False,
-            "start_from": 1,
-        },
-    )
-    task = response.get("task")
-    if not isinstance(task, dict) or "id" not in task:
-        fail(f"初始化任务启动失败，返回内容异常: {response}")
-    task_id = int(task["id"])
+    start(skip_preflight=True, skip_init_data=True)
+    base_url, task_id = submit_init_task(env_values)
     log(f"初始化任务已提交，任务号 #{task_id}")
     log(f"打开 http://127.0.0.1:{env_values.get('BACKEND_PORT', str(DEFAULT_BACKEND_PORT))}/update 可查看图形界面进度")
     wait_for_task_completion(base_url, task_id)
     log("首次初始化已完成。")
 
 
+def remove_path(target: Path) -> None:
+    if not target.exists():
+        return
+    if target.is_dir():
+        shutil.rmtree(target, ignore_errors=False)
+    else:
+        target.unlink()
+    log(f"已删除: {target}")
+
+
+def cleanup_user_services() -> None:
+    if sys.platform == "linux":
+        if resolve_command(["systemctl"]):
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", BACKEND_SERVICE_NAME, FRONTEND_SERVICE_NAME],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        remove_path(SYSTEMD_USER_DIR / BACKEND_SERVICE_NAME)
+        remove_path(SYSTEMD_USER_DIR / FRONTEND_SERVICE_NAME)
+        return
+
+    if sys.platform == "darwin":
+        if resolve_command(["launchctl"]):
+            subprocess.run(
+                ["launchctl", "unload", str(LAUNCHD_USER_DIR / BACKEND_PLIST_NAME)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["launchctl", "unload", str(LAUNCHD_USER_DIR / FRONTEND_PLIST_NAME)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        remove_path(LAUNCHD_USER_DIR / BACKEND_PLIST_NAME)
+        remove_path(LAUNCHD_USER_DIR / FRONTEND_PLIST_NAME)
+
+
 def uninstall() -> None:
-    log("开始卸载本地部署内容：")
-    log("- 停止前后端本地进程")
-    log("- 删除数据库、配置文件、本地数据目录")
-    log("- 删除虚拟环境、前端依赖与构建产物")
+    log("开始卸载本地内容")
+    log("- 停止本地服务")
+    log("- 清理本目录生成的配置、依赖、构建产物和数据")
 
     stop()
+    cleanup_user_services()
 
     for target in [
         ROOT / ".env",
@@ -672,52 +1360,39 @@ def uninstall() -> None:
         ROOT / "frontend" / ".env.local",
         ROOT / "frontend" / "node_modules",
         ROOT / "frontend" / "dist",
+        ROOT / "frontend" / "coverage",
+        ROOT / ".coverage",
+        ROOT / "htmlcov",
         ROOT / "data",
         ROOT / "deploy",
     ]:
-        if target.exists():
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=False)
-            else:
-                target.unlink()
-            log(f"已删除: {target}")
+        remove_path(target)
 
-    log("")
-    log("卸载完成。")
+    for cache_dir in ROOT.rglob("__pycache__"):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=False)
+            log(f"已删除: {cache_dir}")
 
-
-def bootstrap(skip_init_data: bool = False) -> None:
-    install()
-    env_values = load_env_file(ENV_FILE)
-    token = get_runtime_setting(env_values, "TUSHARE_TOKEN", db_key="tushare_token")
-    if not token:
-        log("")
-        log("安装已完成，当前未配置有效的 TUSHARE_TOKEN。")
-        log("系统将先启动前后端，请在浏览器进入配置页完成 Token 配置。")
-        log("配置页会显示“首次启动自检”，任务中心可继续执行首次初始化并查看恢复提示。")
-        start(skip_preflight=True)
-        return
-
-    preflight()
-    start(skip_preflight=True)
-    if not skip_init_data:
-        log("通过应用 API 发起首次数据初始化...")
-        init_data()
+    log("卸载完成")
 
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="StockTrader 本地部署控制器")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("install")
+    install_parser = subparsers.add_parser("install")
+    install_parser.add_argument("--force", action="store_true")
     subparsers.add_parser("preflight")
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("--skip-preflight", action="store_true")
+    start_parser.add_argument("--skip-init-data", action="store_true")
+    start_parser.add_argument("--force-install", action="store_true")
     subparsers.add_parser("stop")
     subparsers.add_parser("status")
     subparsers.add_parser("init-data")
     bootstrap_parser = subparsers.add_parser("bootstrap")
     bootstrap_parser.add_argument("--skip-init-data", action="store_true")
+    bootstrap_parser.add_argument("--force-install", action="store_true")
     subparsers.add_parser("uninstall")
     return parser
 
@@ -727,11 +1402,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "install":
-        install()
+        install(force=args.force)
     elif args.command == "preflight":
         preflight()
     elif args.command == "start":
-        start(skip_preflight=args.skip_preflight)
+        start(
+            skip_preflight=args.skip_preflight,
+            skip_init_data=args.skip_init_data,
+            force_install=args.force_install,
+        )
     elif args.command == "stop":
         stop()
     elif args.command == "status":
@@ -739,7 +1418,7 @@ def main() -> None:
     elif args.command == "init-data":
         init_data()
     elif args.command == "bootstrap":
-        bootstrap(skip_init_data=args.skip_init_data)
+        start(skip_init_data=args.skip_init_data, force_install=args.force_install)
     elif args.command == "uninstall":
         uninstall()
     else:

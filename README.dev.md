@@ -39,6 +39,9 @@
 
 这不是双服务模式。它会：
 
+- 检查 Python / Node 运行环境
+- 缺少系统级 Python / Node 时自动执行包管理器安装
+- 按需安装或更新 `.venv` 和前端依赖
 - 构建 `frontend/dist`
 - 启动 FastAPI
 - 由后端统一托管前端页面

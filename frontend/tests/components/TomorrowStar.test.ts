@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ElementPlus from 'element-plus'
@@ -48,8 +48,10 @@ vi.mock('@/api', () => ({
 import { ElMessage } from 'element-plus'
 import { apiAnalysis, apiConfig, apiTasks } from '@/api'
 
-function flushPromises() {
-  return new Promise((resolve) => setTimeout(resolve, 0))
+async function flushPromises() {
+  for (let i = 0; i < 8; i += 1) {
+    await Promise.resolve()
+  }
 }
 
 function mockStatus({ initialized = true } = {}) {
@@ -128,6 +130,8 @@ function mountComponent() {
 
 describe('TomorrowStar.vue', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2024-01-15T00:30:00Z'))
     vi.clearAllMocks()
     window.sessionStorage.clear()
     mockPush.mockReset()
@@ -149,6 +153,7 @@ describe('TomorrowStar.vue', () => {
     } as any)
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-15',
+      latest_trade_data_ready: false,
       local_latest_date: '2024-01-15',
       latest_candidate_date: '2024-01-15',
       latest_result_date: '2024-01-15',
@@ -164,6 +169,11 @@ describe('TomorrowStar.vue', () => {
       running: false,
       message: 'started',
     } as any)
+  })
+
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
   })
 
   it('loads history and latest candidate/result data on mount', async () => {
@@ -206,8 +216,10 @@ describe('TomorrowStar.vue', () => {
   })
 
   it('starts incremental update when freshness says data should refresh', async () => {
+    vi.setSystemTime(new Date('2024-01-15T07:30:00Z'))
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-16',
+      latest_trade_data_ready: true,
       local_latest_date: '2024-01-15',
       latest_candidate_date: '2024-01-15',
       latest_result_date: '2024-01-15',
@@ -227,8 +239,10 @@ describe('TomorrowStar.vue', () => {
   })
 
   it('shows failed incremental warning and does not auto-restart update', async () => {
+    vi.setSystemTime(new Date('2024-01-15T07:30:00Z'))
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-16',
+      latest_trade_data_ready: true,
       local_latest_date: '2024-01-15',
       latest_candidate_date: '2024-01-15',
       latest_result_date: '2024-01-15',
@@ -253,7 +267,59 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.text()).toContain('任务中断，可恢复')
   })
 
+  it('does not auto-start incremental update outside the beijing post-close window', async () => {
+    vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
+      latest_trade_date: '2024-01-16',
+      latest_trade_data_ready: true,
+      local_latest_date: '2024-01-15',
+      latest_candidate_date: '2024-01-15',
+      latest_result_date: '2024-01-15',
+      needs_update: true,
+      freshness_version: 'v-outside-window',
+      running_task_id: null,
+      running_task_status: null,
+      incremental_update: buildIncrementalStatus(),
+    } as any)
+
+    const wrapper = mountComponent()
+    await flushPromises()
+    await wrapper.vm.ensureFreshDataAndLoad(true)
+    await flushPromises()
+
+    expect(apiTasks.startIncrementalUpdate).not.toHaveBeenCalled()
+  })
+
+  it('re-checks freshness every 10 minutes during the beijing post-close window', async () => {
+    vi.setSystemTime(new Date('2024-01-15T07:10:00Z'))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    vi.mocked(apiAnalysis.getFreshness).mockClear()
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+    await flushPromises()
+
+    expect(apiAnalysis.getFreshness).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('hydrates cached view state from sessionStorage before reloading', async () => {
+    const statusPayload = {
+      configured: true,
+      available: true,
+      message: 'Token有效',
+      data_status: {
+        raw_data: { exists: true, count: 3200, latest_date: '2025-04-25' },
+        candidates: { exists: true, count: 30, latest_date: '2025-04-25' },
+        analysis: { exists: true, count: 20, latest_date: '2025-04-25' },
+        kline: { exists: true, count: 100, latest_date: '2025-04-25' },
+      },
+    }
+    let resolveStatus: ((value: any) => void) | null = null
+    vi.mocked(apiConfig.getTushareStatus).mockImplementation(
+      () => new Promise((resolve) => { resolveStatus = resolve })
+    )
+
     window.sessionStorage.setItem('stocktrade:tomorrow-star:cache', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
       latestCandidates: [{ code: 'cached', kdj_j: 5 }],
@@ -275,6 +341,54 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.hydratedFromCache).toBe(true)
     expect(wrapper.vm.viewingDate).toBe('2024-01-10')
     expect(wrapper.vm.latestCandidates[0].code).toBe('cached')
+
+    resolveStatus?.(statusPayload)
+  })
+
+  it('refreshes hydrated cache after tushare status becomes ready', async () => {
+    const statusPayload = {
+      configured: true,
+      available: true,
+      message: 'Token有效',
+      data_status: {
+        raw_data: { exists: true, count: 3200, latest_date: '2025-04-25' },
+        candidates: { exists: true, count: 30, latest_date: '2025-04-25' },
+        analysis: { exists: true, count: 20, latest_date: '2025-04-25' },
+        kline: { exists: true, count: 100, latest_date: '2025-04-25' },
+      },
+    }
+    let resolveStatus: ((value: any) => void) | null = null
+    vi.mocked(apiConfig.getTushareStatus).mockImplementation(
+      () => new Promise((resolve) => { resolveStatus = resolve })
+    )
+
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache', JSON.stringify({
+      historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
+      latestCandidates: [{ code: 'cached', kdj_j: 5 }],
+      latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
+      selectedDate: '2024-01-10',
+      viewingDate: '2024-01-10',
+      latestDate: '2024-01-10',
+      latestDataDate: '2024-01-10',
+      historyPage: 1,
+      latestCandidatePage: 1,
+      lastHistorySignature: 'cached',
+      freshnessVersion: 'cached-v',
+      cachedAt: Date.now(),
+    }))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.viewingDate).toBe('2024-01-10')
+    expect(wrapper.vm.latestCandidates[0].code).toBe('cached')
+
+    resolveStatus?.(statusPayload)
+    await flushPromises()
+
+    expect(wrapper.vm.latestDate).toBe('2024-01-15')
+    expect(wrapper.vm.viewingDate).toBe('2024-01-15')
+    expect(wrapper.vm.latestCandidates[0].code).toBe('600000')
   })
 
   it('refreshes the current date and shows success feedback', async () => {

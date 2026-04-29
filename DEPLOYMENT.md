@@ -26,40 +26,37 @@
 ### 2.1 一键启动
 
 ```bash
-./bootstrap-local.sh
+./start-local.sh
 ```
 
 这会调用共享控制器 `tools/localctl.py`，完成：
 
-- 安装 Python 依赖和前端依赖
-- 准备 `.venv`
-- 生成前端本地环境配置
+- 判断运行环境并检查 Python 3.11+ / Node.js 18+
+- 如果缺少系统级 Python / Node / npm，会自动执行 `brew` / `apt-get` / `dnf` / `yum`
+- 准备 `.venv`、`.env` 和前端本地环境配置
+- 依赖有变更时自动安装或更新
+- 默认优先使用国内镜像：`pypi.tuna.tsinghua.edu.cn`、`mirrors.aliyun.com`、`registry.npmmirror.com`
+- 以精简形式打印 `当前阶段/总阶段/预计剩余`
 - 启动后端
-- 如果已经配置好 `TUSHARE_TOKEN`，自动发起首次初始化
+- 如果已经配置好 `TUSHARE_TOKEN` 且本地还没有持久化数据，自动发起首次初始化
+- 初始化阶段会继续显示 `当前/总数/ETA/当前代码`
 
-### 2.2 分步执行
+说明：
+
+- Linux 首次自动装系统依赖时，可能会要求输入 `sudo` 密码
+- macOS 如果还没装 Homebrew，会先自动安装 Homebrew，再继续安装 Python / Node
+- Linux 如果既没有 `apt-get` / `dnf` / `yum`，会回退安装并使用 Linuxbrew
+
+### 2.2 常用入口
 
 ```bash
-# 安装依赖
-./install-local.sh
-
-# 启动前预检
-./preflight-local.sh
-
-# 启动本地服务
 ./start-local.sh
-
-# 首次初始化
-./init-data.sh
-
-# 查看状态
-./status-local.sh
-
-# 停止服务
 ./stop-local.sh
-
-# 卸载本地部署
 ./uninstall-local.sh
+
+# 高级命令（不再单独提供顶层脚本）
+python3 tools/localctl.py init-data
+python3 tools/localctl.py status
 ```
 
 ### 2.3 首次进入时未配置 Token
@@ -75,16 +72,21 @@
 
 ### 2.4 常用入口脚本和真实行为
 
-当前这些脚本本质上都是 `tools/localctl.py` 的薄包装：
+当前面向普通用户只保留这 3 个脚本：
 
-- `bootstrap-local.sh`
-- `install-local.sh`
-- `preflight-local.sh`
 - `start-local.sh`
-- `init-data.sh`
-- `status-local.sh`
 - `stop-local.sh`
 - `uninstall-local.sh`
+
+其中：
+
+- `start-local.sh` 负责系统级依赖自举和应用启动
+- `stop-local.sh` / `uninstall-local.sh` 是原生 shell 脚本，不依赖 Python
+
+高级操作仍然可以直接调用：
+
+- `tools/localctl.py init-data`
+- `tools/localctl.py status`
 
 这意味着：
 
@@ -108,7 +110,7 @@
 
 - 页面：运维管理页
 - API：`POST /api/v1/tasks/start`
-- CLI：`./init-data.sh`
+- CLI：`python3 tools/localctl.py init-data`
 
 ### 3.2 进度展示
 
@@ -118,7 +120,8 @@
 
 - 页面右上角全局进度卡
 - 运维管理页任务中心
-- `init-data.sh` 的命令行输出
+- `start-local.sh` 的首次自动初始化输出
+- `tools/localctl.py init-data` 的命令行输出
 
 抓数阶段会重点显示：
 
@@ -183,26 +186,25 @@ data/
 
 Windows 不走 `*.sh`，而是走：
 
-- `*.bat`
 - `*.ps1`
 - 共享控制器 `tools/localctl.py`
 
 推荐入口：
 
 ```powershell
-.\bootstrap-local.bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
 常用命令：
 
 ```powershell
-.\install-local.bat
-.\preflight-local.bat
-.\start-local.bat
-.\init-data.bat
-.\status-local.bat
-.\stop-local.bat
-.\uninstall-local.bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\stop-local.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall-local.ps1
+
+# 高级命令
+py -3.11 .\tools\localctl.py init-data
+py -3.11 .\tools\localctl.py status
 ```
 
 详细步骤看 [WINDOWS_DEPLOYMENT.md](WINDOWS_DEPLOYMENT.md)。
@@ -330,7 +332,7 @@ lsof -i :8000
 
 推荐你按这个顺序使用：
 
-1. `./bootstrap-local.sh`
+1. `./start-local.sh`
 2. 打开 `http://127.0.0.1:8000`
 3. 如果未配置 Token，先去“配置管理”
 4. 去“运维管理”执行首次初始化

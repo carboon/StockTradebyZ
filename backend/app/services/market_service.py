@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
 import pandas as pd
+from app.utils.stock_metadata import resolve_ts_code
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
 ROOT = Path(__file__).parent.parent.parent.parent
@@ -492,7 +493,7 @@ class MarketService:
             else:
                 start_date = "20190101"
 
-            if start_date >= end_date:
+            if start_date > end_date:
                 result["success"] = True
                 result["updated"] = False
                 return result
@@ -501,16 +502,7 @@ class MarketService:
                 import tushare as ts
                 pro = ts.pro_api(token)
 
-                def _to_ts_code(c: str) -> str:
-                    c = str(c).zfill(6)
-                    if c.startswith(("60", "68", "9")):
-                        return f"{c}.SH"
-                    elif c.startswith(("4", "8")):
-                        return f"{c}.BJ"
-                    else:
-                        return f"{c}.SZ"
-
-                ts_code = _to_ts_code(code)
+                ts_code = resolve_ts_code(code)
                 from app.utils.tushare_rate_limit import acquire_tushare_slot
                 acquire_tushare_slot("pro_bar")
                 df = ts.pro_bar(

@@ -92,13 +92,21 @@ describe('api/index.ts', () => {
 
   it('passes optional request options to stock info and kline APIs', async () => {
     const signal = new AbortController().signal
-    mockGet.mockResolvedValue({ code: '600000' })
+    mockGet
+      .mockResolvedValueOnce({ code: '600000' })
+      .mockResolvedValueOnce({ items: [], total: 0 })
     mockPost.mockResolvedValue({ daily: [], weekly: [] })
 
     await apiStock.getInfo('600000', { signal })
+    await apiStock.search('浦发银行', 5, { signal })
     await apiStock.getKline('600000', 60, false, { signal })
 
     expect(mockGet).toHaveBeenCalledWith('/v1/stock/600000', { signal, timeout: 10000 })
+    expect(mockGet).toHaveBeenCalledWith('/v1/stock/search', {
+      signal,
+      timeout: 10000,
+      params: { q: '浦发银行', limit: 5 },
+    })
     expect(mockPost).toHaveBeenCalledWith(
       '/v1/stock/kline',
       { code: '600000', days: 60, include_weekly: false },

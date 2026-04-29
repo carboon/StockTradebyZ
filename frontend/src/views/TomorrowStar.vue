@@ -243,7 +243,7 @@ import { useRouter } from 'vue-router'
 import { Refresh, Loading } from '@element-plus/icons-vue'
 import { apiAnalysis, apiTasks, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
-import type { Candidate, AnalysisResult, IncrementalUpdateStatus } from '@/types'
+import type { Candidate, AnalysisResult, FreshnessResponse, IncrementalUpdateStatus } from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const router = useRouter()
@@ -252,9 +252,13 @@ const configStore = useConfigStore()
 let loadDataRequestId = 0
 let candidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
+const AUTO_INCREMENTAL_ATTEMPT_INTERVAL_MS = 10 * 60 * 1000
+const BEIJING_INCREMENTAL_START_MINUTE = 15 * 60
+const BEIJING_INCREMENTAL_END_MINUTE = 20 * 60
 const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 let incrementalPollTimer: number | null = null
+let autoIncrementalAttemptTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
 
 const loading = ref(false)
@@ -386,6 +390,8 @@ async function loadData(skipLatestLoad: boolean = false) {
 
   const requestId = ++loadDataRequestId
   const signal = beginRequest('loadData')
+  const previousSelectedDate = selectedDate.value
+  const previousViewingDate = viewingDate.value
   loading.value = true
   try {
     const datesData = await apiAnalysis.getDates({ signal })
@@ -448,12 +454,11 @@ async function loadData(skipLatestLoad: boolean = false) {
       return
     }
 
-    // 默认选中最新日期
-    selectedDate.value = latestDate.value
-    // 如果当前正在查看的日期不在新的历史列表中，重置为最新
-    if (viewingDate.value && !historyData.value.some(h => h.date === viewingDate.value)) {
-      viewingDate.value = latestDate.value
-    }
+    const hasPreviousSelectedDate = !!previousSelectedDate && historyData.value.some((item) => item.date === previousSelectedDate)
+    selectedDate.value = hasPreviousSelectedDate ? previousSelectedDate : latestDate.value
+
+    const hasPreviousViewingDate = !!previousViewingDate && historyData.value.some((item) => item.date === previousViewingDate)
+    viewingDate.value = hasPreviousViewingDate ? previousViewingDate : latestDate.value
 
     // 加载最新数据（右侧显示）- 根据 skipLatestLoad 参数决定是否跳过
     if (!skipLatestLoad && requestId === loadDataRequestId) {
@@ -702,6 +707,49 @@ function stopIncrementalPolling() {
   }
 }
 
+function getBeijingMinutes(now: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(now)
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value || '0')
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value || '0')
+  return hour * 60 + minute
+}
+
+function isWithinBeijingIncrementalWindow(now: Date = new Date()): boolean {
+  const minutes = getBeijingMinutes(now)
+  return minutes >= BEIJING_INCREMENTAL_START_MINUTE && minutes < BEIJING_INCREMENTAL_END_MINUTE
+}
+
+function shouldAutoStartIncremental(freshness: FreshnessResponse): boolean {
+  return Boolean(
+    isWithinBeijingIncrementalWindow()
+    && freshness.needs_update
+    && freshness.latest_trade_data_ready === true
+    && !incrementalUpdate.value.running
+    && !freshness.running_task_id
+    && freshness.incremental_update?.status !== 'failed'
+  )
+}
+
+function startAutoIncrementalAttemptTimer() {
+  stopAutoIncrementalAttemptTimer()
+  autoIncrementalAttemptTimer = window.setInterval(() => {
+    if (!isWithinBeijingIncrementalWindow()) return
+    void ensureFreshDataAndLoad(true)
+  }, AUTO_INCREMENTAL_ATTEMPT_INTERVAL_MS)
+}
+
+function stopAutoIncrementalAttemptTimer() {
+  if (autoIncrementalAttemptTimer) {
+    window.clearInterval(autoIncrementalAttemptTimer)
+    autoIncrementalAttemptTimer = null
+  }
+}
+
 async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   if (!configStore.tushareReady) return
   if (checkingFreshness.value || incrementalUpdate.value.running || loading.value) return
@@ -719,6 +767,7 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     const freshness = await apiAnalysis.getFreshness({ signal })
     lastRefreshCheckAt.value = Date.now()
     const nextFreshnessVersion = freshness.freshness_version || ''
+    const freshnessChanged = freshnessVersion.value !== nextFreshnessVersion
 
     // 更新增量更新状态
     if (freshness.incremental_update) {
@@ -729,12 +778,7 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     }
 
     // 如果需要更新且没有正在运行的增量更新，自动启动
-    if (
-      freshness.needs_update
-      && !incrementalUpdate.value.running
-      && !freshness.running_task_id
-      && freshness.incremental_update?.status !== 'failed'
-    ) {
+    if (shouldAutoStartIncremental(freshness)) {
       await startIncrementalUpdate()
     }
 
@@ -757,7 +801,7 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
       return
     }
 
-    if (!hydratedFromCache.value || forceReload) {
+    if (forceReload || !hydratedFromCache.value || freshnessChanged || historyData.value.length === 0) {
       await checkForRefresh(true)
     }
   } catch (error: any) {
@@ -906,28 +950,39 @@ function hydrateTomorrowStarCache() {
   }
 }
 
+async function refreshAfterStatusReady(forceReload: boolean = false) {
+  try {
+    await configStore.checkTushareStatus()
+  } catch {
+    return
+  }
+  await ensureFreshDataAndLoad(forceReload)
+}
+
 onMounted(() => {
-  configStore.checkTushareStatus()
   hydrateTomorrowStarCache()
+  startAutoIncrementalAttemptTimer()
 
   if (historyData.value.length === 0) {
-    loadData()
+    void loadData()
+    void configStore.checkTushareStatus().catch(() => undefined)
+  } else {
+    void refreshAfterStatusReady(false)
   }
 
-  ensureFreshDataAndLoad(hydratedFromCache.value ? false : true)
-
   // 检查增量更新状态
-  checkIncrementalStatus()
+  void checkIncrementalStatus()
 })
 
 onActivated(() => {
-  configStore.checkTushareStatus()
-  ensureFreshDataAndLoad()
-  checkIncrementalStatus()
+  startAutoIncrementalAttemptTimer()
+  void refreshAfterStatusReady()
+  void checkIncrementalStatus()
 })
 
 onDeactivated(() => {
   stopIncrementalPolling()
+  stopAutoIncrementalAttemptTimer()
   cancelAllPageRequests()
   loading.value = false
   loadingLatest.value = false
@@ -936,6 +991,7 @@ onDeactivated(() => {
 
 onUnmounted(() => {
   stopIncrementalPolling()
+  stopAutoIncrementalAttemptTimer()
   cancelAllPageRequests()
 })
 </script>

@@ -57,6 +57,20 @@ class StockResponse(BaseModel):
     exists: bool
 
 
+class StockSearchItem(BaseModel):
+    """股票搜索结果项"""
+    code: str
+    name: Optional[str] = None
+    market: Optional[str] = None
+    industry: Optional[str] = None
+
+
+class StockSearchResponse(BaseModel):
+    """股票搜索响应"""
+    items: List[StockSearchItem]
+    total: int
+
+
 # ==================== 候选股票 ====================
 class CandidateItem(BaseModel):
     """候选股票项"""
@@ -115,10 +129,14 @@ class B1CheckItem(BaseModel):
     zx_long_pos: Optional[bool] = None
     weekly_ma_aligned: Optional[bool] = None
     volume_healthy: Optional[bool] = None
+    in_active_pool: Optional[bool] = None
     b1_passed: Optional[bool] = None
+    prefilter_passed: Optional[bool] = None
+    prefilter_blocked_by: Optional[List[str]] = None
     score: Optional[float] = None
     verdict: Optional[str] = None
     signal_type: Optional[str] = None
+    tomorrow_star_pass: Optional[bool] = None
     notes: Optional[str] = None
 
 

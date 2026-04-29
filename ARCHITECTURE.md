@@ -22,7 +22,7 @@
 
 ```text
 用户
-├─ 命令行脚本 (*.sh / *.bat / *.ps1)
+├─ 命令行脚本 (*.sh / *.ps1)
 │  └─ tools/localctl.py
 └─ 浏览器
    └─ http://127.0.0.1:8000
@@ -53,10 +53,10 @@
 
 入口：
 
-- `bootstrap-local.sh`
 - `start-local.sh`
-- `init-data.sh`
-- Windows 对应 `*.bat` / `*.ps1`
+- `stop-local.sh`
+- `uninstall-local.sh`
+- Windows 对应 `*.ps1`
 
 统一控制器：
 
@@ -64,8 +64,9 @@
 
 当前行为：
 
-- `bootstrap-local.*` / `install-local.*` 负责准备 `.venv`、依赖和 `frontend/.env.local`
-- `start-local.*` 负责在需要时构建 `frontend/dist` 并启动后端
+- `start-local.*` 统一负责系统级 Python / Node 自举、环境检查、按需安装依赖、生成 `frontend/.env.local`、构建 `frontend/dist`、启动后端
+- `stop-local.*` / `uninstall-local.*` 已下沉为原生 shell / PowerShell，避免在停服和卸载时依赖 Python
+- 如果已配置 `TUSHARE_TOKEN` 且本地还没有持久化数据，`start-local.*` 会自动发起首次初始化
 - 启动 FastAPI
 - 由后端直接提供前端页面和 API
 - 默认访问地址就是 `http://127.0.0.1:8000`

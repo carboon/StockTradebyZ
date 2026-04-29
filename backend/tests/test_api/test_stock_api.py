@@ -161,10 +161,6 @@ def test_get_stock_info_invalid_code(test_client: TestClient) -> None:
     验证当传入非数字或格式不正确的股票代码时，
     API能正确处理并返回适当的响应。
     """
-    # 测试空代码
-    response = test_client.get("/api/v1/stock/")
-    assert response.status_code == 404  # 路由不存在
-
     # 测试包含字母的代码（zfill处理后会保留字母）
     with patch("app.api.stock.Path") as mock_path:
         mock_path_instance = MagicMock()
@@ -231,6 +227,56 @@ def test_get_stock_info_fallback_sync_from_tushare(test_client_with_db) -> None:
         assert data["name"] == "贵州茅台"
         assert data["market"] == "SH"
         assert data["industry"] == "酿酒"
+
+
+# ========================================================================
+# 股票搜索API测试 (GET /api/v1/stock/search)
+# ========================================================================
+
+@pytest.mark.api
+def test_search_stocks_by_name_from_db(test_client_with_db) -> None:
+    """
+    测试按名称模糊搜索股票 - 优先命中数据库
+    """
+    test_client_with_db.db.add_all([
+        Stock(code="600000", name="浦发银行", market="SH", industry="银行"),
+        Stock(code="600519", name="贵州茅台", market="SH", industry="酿酒"),
+    ])
+    test_client_with_db.db.commit()
+
+    response = test_client_with_db.get("/api/v1/stock/search?q=浦发")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] >= 1
+    assert data["items"][0]["code"] == "600000"
+    assert data["items"][0]["name"] == "浦发银行"
+
+
+@pytest.mark.api
+def test_search_stocks_fallback_to_tushare(test_client: TestClient) -> None:
+    """
+    测试搜索股票时从 Tushare 列表兜底返回结果
+    """
+    lookup = pd.DataFrame([
+        {
+            "ts_code": "600519.SH",
+            "symbol": "600519",
+            "name": "贵州茅台",
+            "industry": "酿酒",
+            "market": "主板",
+        }
+    ])
+
+    with patch("app.api.stock.TushareService.get_stock_list", return_value=lookup):
+        response = test_client.get("/api/v1/stock/search?q=茅台&limit=1")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["code"] == "600519"
+    assert data["items"][0]["name"] == "贵州茅台"
+    assert data["items"][0]["market"] == "SH"
 
 
 # ========================================================================
@@ -501,13 +547,10 @@ def test_get_kline_service_error(test_client_with_db) -> None:
             "days": 30,
         }
 
-        # TestClient会抛出异常而不是返回500响应
-        # 这是FastAPI测试客户端的预期行为
-        with pytest.raises(Exception) as exc_info:
-            test_client_with_db.post("/api/v1/stock/kline", json=request_data)
+        response = test_client_with_db.post("/api/v1/stock/kline", json=request_data)
 
-        # 验证异常信息包含预期的错误
-        assert "数据加载失败" in str(exc_info.value)
+        assert response.status_code == 500
+        assert "数据加载失败" in response.json()["detail"]
 
 
 @pytest.mark.api

@@ -907,7 +907,7 @@ def test_analyze_watchlist_item_success(test_client_with_db) -> None:
     assert data["analysis"]["hold_action"] == "hold"
     assert data["analysis"]["risk_level"] == "medium"
     assert data["analysis"]["buy_recommendation"] == "可试仓，不追高。"
-    assert data["analysis"]["hold_recommendation"] == "继续持有，不追高加仓。"
+    assert data["analysis"]["hold_recommendation"] == "量化评分较高，可适当加仓，注意仓位。"
     assert data["analysis"]["risk_recommendation"] == "关注回踩支撑是否有效。"
     assert data["analysis"]["recommendation"] == "当前仓位 25%。 继续持有，不追高；回踩企稳再加。"
 

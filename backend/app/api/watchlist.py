@@ -163,13 +163,7 @@ def _build_hold_recommendation(
             return "已有浮盈可先减仓。"
         return "谨慎持有，优先减仓观察。"
     if verdict == "PASS" and (score or 0) >= 4.0:
-        if entry_price and current_price:
-            pnl = current_price / entry_price - 1.0
-            if pnl >= 0.08:
-                return "继续持有，不追高加仓。"
-            if pnl <= -0.05:
-                return "谨慎持有，暂停加仓。"
-        return "可继续持有，强势突破再小幅加仓。"
+        return "量化评分较高，可适当加仓，注意仓位。"
     return "以观察为主，暂不加仓。"
 
 

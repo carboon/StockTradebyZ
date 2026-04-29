@@ -1024,8 +1024,14 @@ def test_b1_check_item_full():
         "zx_long_pos": True,
         "weekly_ma_aligned": True,
         "volume_healthy": True,
+        "in_active_pool": True,
         "b1_passed": True,
+        "prefilter_passed": True,
+        "prefilter_blocked_by": [],
         "score": 85.0,
+        "verdict": "PASS",
+        "signal_type": "trend_start",
+        "tomorrow_star_pass": True,
         "notes": "技术面表现良好"
     }
 
@@ -1034,8 +1040,12 @@ def test_b1_check_item_full():
     assert check.check_date == date(2024, 1, 15)
     assert check.close_price == 10.5
     assert check.change_pct == 2.5
+    assert check.in_active_pool is True
     assert check.b1_passed is True
+    assert check.prefilter_passed is True
+    assert check.prefilter_blocked_by == []
     assert check.score == 85.0
+    assert check.tomorrow_star_pass is True
 
 
 @pytest.mark.unit

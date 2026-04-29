@@ -379,8 +379,14 @@ def test_get_diagnosis_history(test_client: TestClient) -> None:
                 "zx_long_pos": True,
                 "weekly_ma_aligned": True,
                 "volume_healthy": True,
+                "in_active_pool": True,
                 "b1_passed": True,
+                "prefilter_passed": True,
+                "prefilter_blocked_by": [],
                 "score": None,
+                "verdict": "PASS",
+                "signal_type": "trend_start",
+                "tomorrow_star_pass": True,
             },
             {
                 "check_date": "2024-01-14",
@@ -391,8 +397,14 @@ def test_get_diagnosis_history(test_client: TestClient) -> None:
                 "zx_long_pos": False,
                 "weekly_ma_aligned": True,
                 "volume_healthy": False,
+                "in_active_pool": False,
                 "b1_passed": False,
+                "prefilter_passed": False,
+                "prefilter_blocked_by": ["market_regime"],
                 "score": None,
+                "verdict": "WATCH",
+                "signal_type": "rebound",
+                "tomorrow_star_pass": False,
             },
         ]
         mock_service.get_stock_history_checks.return_value = mock_history
@@ -405,8 +417,15 @@ def test_get_diagnosis_history(test_client: TestClient) -> None:
         assert data["total"] == 2
         assert len(data["history"]) == 2
         assert data["history"][0]["check_date"] == "2024-01-15"
+        assert data["history"][0]["in_active_pool"] is True
         assert data["history"][0]["b1_passed"] is True
+        assert data["history"][0]["prefilter_passed"] is True
+        assert data["history"][0]["signal_type"] == "trend_start"
+        assert data["history"][0]["tomorrow_star_pass"] is True
+        assert data["history"][1]["in_active_pool"] is False
         assert data["history"][1]["b1_passed"] is False
+        assert data["history"][1]["prefilter_passed"] is False
+        assert data["history"][1]["prefilter_blocked_by"] == ["market_regime"]
 
 
 @pytest.mark.api

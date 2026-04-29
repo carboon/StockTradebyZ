@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import tushare as ts
+from backend.app.utils.stock_metadata import market_segment_from_code, resolve_ts_code
 from backend.app.utils.tushare_rate_limit import acquire_tushare_slot
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -30,23 +31,11 @@ def _resolve_cfg_path(path_like: str | Path, base_dir: Path = _ROOT) -> Path:
 
 
 def _to_ts_code(code: str) -> str:
-    code = str(code).zfill(6)
-    if code.startswith(("60", "68", "9")):
-        return f"{code}.SH"
-    if code.startswith(("4", "8")):
-        return f"{code}.BJ"
-    return f"{code}.SZ"
+    return resolve_ts_code(code)
 
 
 def _market_segment(code: str) -> str:
-    code = str(code).zfill(6)
-    if code.startswith(("300", "301")):
-        return "gem"
-    if code.startswith("688"):
-        return "star"
-    if code.startswith(("4", "8")):
-        return "bj"
-    return "main"
+    return market_segment_from_code(code)
 
 
 def _normalize_trade_date(value: Any) -> str:
@@ -102,14 +91,18 @@ class TushareMetadataStore:
         self.pro = ts.pro_api(self.token)
         self._frames: dict[str, pd.DataFrame] = {}
 
-    def _load_or_fetch(self, rel_path: str, fetcher) -> pd.DataFrame:
+    def _load_or_fetch(self, rel_path: str, fetcher, *, refetch_if_empty: bool = False) -> pd.DataFrame:
         if rel_path in self._frames:
             return self._frames[rel_path]
 
         path = self.cache_dir / rel_path
+        frame: pd.DataFrame | None = None
         if path.exists():
             frame = pd.read_csv(path)
-        else:
+            if refetch_if_empty and frame.empty:
+                frame = None
+
+        if frame is None:
             path.parent.mkdir(parents=True, exist_ok=True)
             acquire_tushare_slot(rel_path)
             frame = fetcher()
@@ -179,17 +172,27 @@ class TushareMetadataStore:
         )
 
     def index_daily(self, ts_code: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
+        ts_code_text = str(ts_code).strip().upper()
         start = _normalize_trade_date(start_date)
         end = _normalize_trade_date(end_date) if end_date else pd.Timestamp.today().strftime("%Y%m%d")
-        rel = f"index_daily/{ts_code}_{start}_{end}.csv"
+        rel = f"index_daily/{ts_code_text}_{start}_{end}.csv"
+        use_sw_daily = ts_code_text.endswith(".SI")
         return self._load_or_fetch(
             rel,
-            lambda: self.pro.index_daily(
-                ts_code=ts_code,
+            lambda: self.pro.sw_daily(
+                ts_code=ts_code_text,
+                start_date=start,
+                end_date=end,
+                fields="ts_code,trade_date,close",
+            )
+            if use_sw_daily
+            else self.pro.index_daily(
+                ts_code=ts_code_text,
                 start_date=start,
                 end_date=end,
                 fields="ts_code,trade_date,close",
             ),
+            refetch_if_empty=use_sw_daily,
         )
 
 

@@ -11,15 +11,30 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ScriptPath = Join-Path $Root "tools\localctl.py"
 
 function Get-PythonCommand {
+    $venvPython = Join-Path $Root ".venv\Scripts\python.exe"
     $candidates = @(
+        @($venvPython),
         @("py", "-3.12"),
         @("py", "-3.11"),
+        @("py", "-3.10"),
         @("python"),
         @("python3")
     )
 
     foreach ($candidate in $candidates) {
         $cmd = $candidate[0]
+        if (($cmd -like "*.exe") -and (Test-Path $cmd)) {
+            $args = @()
+            try {
+                & $cmd "-c" "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    return ,@($cmd)
+                }
+            } catch {
+            }
+            continue
+        }
+
         if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
             continue
         }
@@ -30,7 +45,7 @@ function Get-PythonCommand {
         }
 
         try {
-            & $cmd @args "-c" "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" | Out-Null
+            & $cmd @args "-c" "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 return ,@($cmd) + $args
             }
@@ -38,7 +53,7 @@ function Get-PythonCommand {
         }
     }
 
-    throw "未找到可用的 Python 3.11+。请先安装 Python 再重试。"
+    throw "未找到可用于引导的 Python 3.10+。请先安装 Python 再重试。"
 }
 
 $pythonCmd = Get-PythonCommand

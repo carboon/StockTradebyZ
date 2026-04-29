@@ -16,7 +16,9 @@
 ## 当前系统形态
 
 - 本地优先，默认使用 SQLite 和本地 `data/` 目录
-- 推荐部署入口是 `bootstrap-local.sh` / `bootstrap-local.bat`
+- 推荐部署入口是 `start-local.sh` / `start-local.ps1`
+- 启动入口会自动分析并安装系统级 Python / Node / npm；macOS / Linux 走 `brew` / `apt-get` / `dnf` / `yum`，Windows 走 `winget`
+- 停止和卸载入口已改成原生脚本，不依赖 Python
 - 本地部署模式下，前端生产资源由 FastAPI 统一提供，默认只访问 `http://127.0.0.1:8000`
 - 直接打开 `/update`、`/tomorrow-star`、`/diagnosis` 等前端路由时，后端会做 SPA 回退，不需要单独的 Nginx 规则
 - 第 1 步 Tushare 抓取是最耗时阶段，界面右上角和任务中心都会显示 `当前/总数/ETA/当前代码`
@@ -27,13 +29,13 @@
 ### macOS / Linux
 
 ```bash
-./bootstrap-local.sh
+./start-local.sh
 ```
 
 ### Windows
 
 ```powershell
-.\bootstrap-local.bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
 完成后默认访问：
@@ -48,7 +50,7 @@
 首次初始化会通过后端任务中心执行，而不是要求用户手工拼命令。当前行为如下：
 
 - 初始化任务由 `POST /api/v1/tasks/start` 发起
-- CLI 包装脚本 `init-data.sh` / `tools/localctl.py init-data` 本质上也是调用同一套 API
+- 如需手工重跑初始化，可直接执行 `tools/localctl.py init-data`，本质上也是调用同一套 API
 - 抓取原始数据阶段会显示股票级进度、预计剩余时间、当前代码、失败数量和已恢复数量
 - 如果抓取阶段中断，再次发起初始化时会优先从 `data/run/` 里的断点继续
 - 如果只是后续步骤中断，重新发起初始化会复用已抓好的 `data/raw/`，重新生成候选和分析结果

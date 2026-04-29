@@ -12,19 +12,29 @@
 
     <!-- 搜索栏 -->
     <el-card class="search-card">
-      <el-form :inline="true" :model="searchForm" @submit.prevent="searchAndAnalyze">
-        <el-form-item label="股票代码">
-          <el-input
+      <el-form :inline="true" :model="searchForm" class="search-form-row" @submit.prevent="searchAndAnalyze">
+        <el-form-item label="代码或名称">
+          <el-autocomplete
             v-model="searchForm.code"
-            placeholder="请输入6位股票代码"
-            maxlength="6"
             clearable
-            style="width: 200px"
+            class="search-input"
+            placeholder="请输入股票代码或名称"
+            :fetch-suggestions="fetchStockSuggestions"
+            @select="handleStockSuggestionSelect"
+            @keyup.enter="searchAndAnalyze"
           >
-            <template #append>
-              <el-button :icon="Search" @click="searchAndAnalyze" />
+            <template #default="{ item }">
+              <div class="stock-suggestion">
+                <span class="suggestion-code">{{ item.code }}</span>
+                <span class="suggestion-name">{{ item.name || '-' }}</span>
+              </div>
             </template>
-          </el-input>
+          </el-autocomplete>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :icon="Search" @click="searchAndAnalyze">
+            诊断
+          </el-button>
         </el-form-item>
         <el-form-item v-if="stockCode">
           <el-button @click="addCurrentToWatchlist" :loading="addingToWatchlist" :disabled="isInWatchlist">
@@ -45,12 +55,34 @@
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
-                <span>{{ stockCode }} {{ stockName || '' }} K线图</span>
-                <el-radio-group v-model="chartDays" size="small" @change="loadKlineData">
-                  <el-radio-button :value="30">30天</el-radio-button>
-                  <el-radio-button :value="60">60天</el-radio-button>
-                  <el-radio-button :value="120">120天</el-radio-button>
-                </el-radio-group>
+                <div class="chart-header-main">
+                  <div class="stock-identity">
+                    <div class="stock-line">
+                      <span class="stock-code">{{ stockCode }}</span>
+                      <span v-if="stockName" class="stock-name">{{ stockName }}</span>
+                    </div>
+                    <div class="chart-meta">
+                      <span class="chart-title">单股诊断 K线图</span>
+                      <span class="chart-subtitle">按最近交易日展示趋势区间</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="chart-toolbar">
+                  <span class="chart-toolbar-label">观察区间</span>
+                  <div class="chart-range-switcher" role="tablist" aria-label="K线区间选择">
+                    <button
+                      v-for="days in chartDayOptions"
+                      :key="days"
+                      type="button"
+                      class="chart-range-button"
+                      :class="{ 'is-active': chartDays === days }"
+                      :aria-pressed="chartDays === days"
+                      @click="selectChartDays(days)"
+                    >
+                      {{ days }}天
+                    </button>
+                  </div>
+                </div>
               </div>
             </template>
             <div ref="chartRef" class="chart-container" />
@@ -180,7 +212,7 @@
       <el-card class="history-card">
         <template #header>
           <div class="history-header">
-            <span>每日检查历史 (近30个交易日收盘后数据)</span>
+            <span>每日检查历史 (近30个交易日收盘后回放)</span>
             <div class="history-actions">
               <span v-if="refreshingHistory" class="refreshing-text">
                 正在刷新... ({{ historyData.length }}/30)
@@ -202,6 +234,7 @@
           stripe
           size="small"
           max-height="300"
+          table-layout="auto"
         >
           <el-table-column prop="check_date" label="交易日" width="110">
             <template #default="{ row }">
@@ -220,19 +253,69 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="kdj_j" label="KDJ-J" width="70" align="right">
-            <template #default="{ row }">
-              {{ row.kdj_j != null ? row.kdj_j.toFixed(1) : '-' }}
+          <el-table-column prop="in_active_pool" width="78" align="center">
+            <template #header>
+              <span class="table-header-label">
+                活跃池
+                <el-tooltip content="是否进入当日活跃池；不在活跃池时，后续候选与明日之星口径通常不成立。" placement="top">
+                  <el-icon class="table-info-icon"><InfoFilled /></el-icon>
+                </el-tooltip>
+              </span>
             </template>
-          </el-table-column>
-          <el-table-column prop="b1_passed" label="B1" width="60" align="center">
             <template #default="{ row }">
-              <el-tag :type="row.b1_passed ? 'success' : 'info'" size="small">
-                {{ row.b1_passed ? '✓' : '✗' }}
+              <el-tag :type="getGateTagType(row.in_active_pool)" size="small">
+                {{ getGateLabel(row.in_active_pool) }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="score" label="当日评分" width="80" align="center">
+          <el-table-column prop="b1_passed" width="60" align="center">
+            <template #header>
+              <span class="table-header-label">
+                B1
+                <el-tooltip content="B1 原始策略信号，主要检查 KDJ 低位、结构与量能等基础条件。" placement="top">
+                  <el-icon class="table-info-icon"><InfoFilled /></el-icon>
+                </el-tooltip>
+              </span>
+            </template>
+            <template #default="{ row }">
+              <el-tag :type="getGateTagType(row.b1_passed)" size="small">
+                {{ getGateLabel(row.b1_passed) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="prefilter_passed" width="88" align="center">
+            <template #header>
+              <span class="table-header-label">
+                前置过滤
+                <el-tooltip content="对 ST、新股、解禁、市值层、行业强度、市场环境等做前置过滤；未通过会被拦截。" placement="top">
+                  <el-icon class="table-info-icon"><InfoFilled /></el-icon>
+                </el-tooltip>
+              </span>
+            </template>
+            <template #default="{ row }">
+              <el-tooltip
+                v-if="row.prefilter_passed === false && row.prefilter_blocked_by?.length"
+                :content="formatPrefilterBlockedBy(row.prefilter_blocked_by)"
+                placement="top"
+              >
+                <el-tag :type="getPrefilterTagType(row.prefilter_passed)" size="small">
+                  {{ getGateLabel(row.prefilter_passed) }}
+                </el-tag>
+              </el-tooltip>
+              <el-tag v-else :type="getPrefilterTagType(row.prefilter_passed)" size="small">
+                {{ getGateLabel(row.prefilter_passed) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="score" width="80" align="center">
+            <template #header>
+              <span class="table-header-label">
+                量化评分
+                <el-tooltip content="量化模型的综合评分，当前满分 5 分；仅评分高不等于量化结论 PASS。" placement="top">
+                  <el-icon class="table-info-icon"><InfoFilled /></el-icon>
+                </el-tooltip>
+              </span>
+            </template>
             <template #default="{ row }">
               <el-tag v-if="row.score != null" :type="getScoreType(row.score)" size="small">
                 {{ row.score.toFixed(1) }}
@@ -240,12 +323,27 @@
               <span v-else>-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="verdict" label="当日信号" width="90" align="center">
+          <el-table-column prop="verdict" label="量化结论" width="88" align="center">
             <template #default="{ row }">
               <el-tag v-if="row.verdict" :type="getVerdictType(row.verdict)" size="small">
                 {{ row.verdict }}
               </el-tag>
               <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="signal_type" label="信号类型" width="96" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.signal_type" :type="getSignalTagType(row.signal_type)" size="small">
+                {{ getSignalLabel(row.signal_type) }}
+              </el-tag>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="tomorrow_star_pass" label="明日之星" width="88" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getTomorrowStarTagType(row.tomorrow_star_pass)" size="small">
+                {{ getGateLabel(row.tomorrow_star_pass) }}
+              </el-tag>
             </template>
           </el-table-column>
         </el-table>
@@ -271,7 +369,7 @@ import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { B1Check, DiagnosisAnalysisDetails, KLineData, WatchlistItem } from '@/types'
+import type { B1Check, DiagnosisAnalysisDetails, KLineData, StockSearchItem, WatchlistItem } from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const route = useRoute()
@@ -310,6 +408,10 @@ type DiagnosisViewResult = {
   abnormal_move_reasoning?: string
 }
 
+type DiagnosisSearchSuggestion = StockSearchItem & {
+  value: string
+}
+
 const historyData = ref<B1Check[]>([])
 const analysisResult = ref<DiagnosisViewResult | null>(null)
 const stockName = ref('')
@@ -325,6 +427,7 @@ const scoreConfig = {
   volume_behavior: { label: '量价行为', weight: 0.3 },
   previous_abnormal_move: { label: '历史异动', weight: 0.3 },
 }
+const chartDayOptions = [30, 60, 120] as const
 
 // 计算评分项
 const scoreItems = computed(() => {
@@ -361,7 +464,7 @@ const showInitializationAlert = computed(() => configStore.tushareReady && !conf
 const emptyDescription = computed(() => {
   if (!configStore.tushareReady) return '请先完成 Tushare 配置后再进行单股诊断'
   if (!configStore.dataInitialized) return '请先完成首次初始化，再进行单股诊断'
-  return '请输入股票代码进行诊断'
+  return '请输入股票代码或名称进行诊断'
 })
 
 let chartInstance: ECharts | null = null
@@ -464,12 +567,13 @@ async function searchStock(requestId: number) {
     return
   }
 
-  const code = searchForm.value.code.trim()
-  if (!code) {
-    ElMessage.warning('请输入股票代码')
+  const keyword = searchForm.value.code.trim()
+  if (!keyword) {
+    ElMessage.warning('请输入股票代码或名称')
     return
   }
 
+  cancelRequest('stockSearch')
   cancelRequest('stockInfo')
   cancelRequest('watchlistStatus')
   cancelRequest('kline')
@@ -478,7 +582,25 @@ async function searchStock(requestId: number) {
   cancelRequest('historyRefresh')
   cancelRequest('historyStatus')
   cancelRequest('analyze')
-  stockCode.value = code.padStart(6, '0')
+
+  let matchedStock: DiagnosisSearchSuggestion | null = null
+  try {
+    matchedStock = await resolveDiagnosisSearchCode(keyword)
+  } catch (error: any) {
+    if (isRequestCanceled(error)) return
+    ElMessage.error('搜索股票失败: ' + error.message)
+    return
+  }
+
+  if (requestId !== searchSequence) return
+  if (!matchedStock?.code) {
+    ElMessage.warning('未找到匹配的股票代码或名称')
+    return
+  }
+
+  stockCode.value = matchedStock.code.padStart(6, '0')
+  stockName.value = matchedStock.name || ''
+  searchForm.value.code = stockCode.value
   analysisResult.value = null
 
   await loadStockInfo()
@@ -494,6 +616,62 @@ async function searchStock(requestId: number) {
   if (requestId !== searchSequence) return
   persistDiagnosisState()
   await maybeAutoRefreshHistory()
+}
+
+function toDiagnosisSearchSuggestion(item: StockSearchItem): DiagnosisSearchSuggestion {
+  const code = String(item.code || '').padStart(6, '0')
+  return {
+    ...item,
+    code,
+    value: code,
+  }
+}
+
+async function resolveDiagnosisSearchCode(keyword: string): Promise<DiagnosisSearchSuggestion | null> {
+  const trimmed = keyword.trim()
+  if (!trimmed) return null
+
+  if (/^\d{1,6}$/.test(trimmed)) {
+    const code = trimmed.padStart(6, '0')
+    return { code, value: code }
+  }
+
+  const signal = beginRequest('stockSearch')
+  try {
+    const data = await apiStock.search(trimmed, 10, { signal })
+    const item = data.items?.[0]
+    return item ? toDiagnosisSearchSuggestion(item) : null
+  } finally {
+    finishRequest('stockSearch', signal)
+  }
+}
+
+async function fetchStockSuggestions(
+  queryString: string,
+  callback: (items: DiagnosisSearchSuggestion[]) => void,
+) {
+  const trimmed = queryString.trim()
+  if (!trimmed) {
+    callback([])
+    return
+  }
+
+  const signal = beginRequest('stockSearch')
+  try {
+    const data = await apiStock.search(trimmed, 10, { signal })
+    callback((data.items || []).map(toDiagnosisSearchSuggestion))
+  } catch (error) {
+    if (!isRequestCanceled(error)) {
+      console.error('Failed to search stocks:', error)
+    }
+    callback([])
+  } finally {
+    finishRequest('stockSearch', signal)
+  }
+}
+
+function handleStockSuggestionSelect(item: DiagnosisSearchSuggestion) {
+  searchForm.value.code = item.code
 }
 
 async function searchAndAnalyze() {
@@ -643,6 +821,12 @@ function stopPollingHistory() {
   refreshingHistory.value = false
 }
 
+function selectChartDays(days: number) {
+  if (chartDays.value === days) return
+  chartDays.value = days
+  void loadKlineData()
+}
+
 async function loadKlineData() {
   if (!stockCode.value) return
 
@@ -669,8 +853,9 @@ async function loadKlineData() {
       setDiagnosisChartCache(stockCode.value, data, initialDays)
     }
 
+    const displayData = getDiagnosisDisplayChartData(data, requestedDays)
     await nextTick()
-    await renderChart(data)
+    await renderChart(displayData)
     // 确保图表在容器渲染完成后有正确的尺寸
     setTimeout(() => {
       chartInstance?.resize()
@@ -830,12 +1015,9 @@ async function renderChart(data: KLineData) {
     ],
   }
 
-  nextTick(() => {
-    if (chartInstance) {
-      chartInstance.setOption(option)
-      chartInstance.resize()
-    }
-  })
+  await nextTick()
+  chartInstance.setOption(option, true)
+  chartInstance.resize()
 }
 
 function queueDiagnosisFullChartRefresh(code: string, requestedDays: number, currentDays: number) {
@@ -850,7 +1032,7 @@ async function refreshDiagnosisFullChartInBackground(code: string, requestedDays
     const fullData = await apiStock.getKline(code, requestedDays, false, { signal, timeoutMs: 20000 })
     if (stockCode.value !== code || chartDays.value !== requestedDays) return
     setDiagnosisChartCache(code, fullData, requestedDays)
-    await renderChart(fullData)
+    await renderChart(getDiagnosisDisplayChartData(fullData, requestedDays))
     persistDiagnosisState()
   } catch (error) {
     if (isRequestCanceled(error)) return
@@ -1015,11 +1197,49 @@ function getScoreType(score?: number): string {
   return 'danger'
 }
 
+function getGateLabel(value?: boolean | null): string {
+  if (value === true) return '✓'
+  if (value === false) return '✗'
+  return '-'
+}
+
+function getGateTagType(value?: boolean | null): string {
+  if (value === true) return 'success'
+  if (value === false) return 'info'
+  return 'info'
+}
+
+function getPrefilterTagType(value?: boolean | null): string {
+  if (value === true) return 'success'
+  if (value === false) return 'warning'
+  return 'info'
+}
+
+function getTomorrowStarTagType(value?: boolean | null): string {
+  if (value === true) return 'success'
+  if (value === false) return 'info'
+  return 'info'
+}
+
+function formatPrefilterBlockedBy(blockedBy?: string[] | null): string {
+  if (!blockedBy?.length) return '-'
+  const labels: Record<string, string> = {
+    st: 'ST/*ST 风险',
+    recent_ipo: '上市天数不足',
+    unlock: '近期解禁压力',
+    size_bucket: '市值分层不符',
+    industry_strength: '行业强度不足',
+    market_regime: '市场环境未达标',
+  }
+  return blockedBy.map((item) => labels[item] || item).join(' / ')
+}
+
 function getSignalLabel(signalType: string): string {
   const labels: Record<string, string> = {
     'trend_start': '趋势启动',
     'rebound': '反弹延续',
     'distribution_risk': '风险释放',
+    'prefilter_blocked': '前置过滤拦截',
   }
   return labels[signalType] || signalType
 }
@@ -1029,6 +1249,7 @@ function getSignalTagType(signalType: string): string {
     'trend_start': 'success',
     'rebound': 'warning',
     'distribution_risk': 'danger',
+    'prefilter_blocked': 'info',
   }
   return types[signalType] || 'info'
 }
@@ -1048,6 +1269,17 @@ function persistDiagnosisState() {
   }
 
   sessionStorage.setItem(DIAGNOSIS_STATE_KEY, JSON.stringify(state))
+}
+
+function getDiagnosisDisplayChartData(data: KLineData, requestedDays: number): KLineData {
+  if (requestedDays <= 0 || data.daily.length <= requestedDays) {
+    return data
+  }
+
+  return {
+    ...data,
+    daily: data.daily.slice(-requestedDays),
+  }
 }
 
 function loadDiagnosisChartCache(code: string): { code: string; days: number; cachedAt: number; data: KLineData } | null {
@@ -1147,6 +1379,34 @@ function normalizeRouteCode(code: unknown): string {
     margin-bottom: 20px;
   }
 
+  .search-form-row {
+    align-items: center;
+  }
+
+  .search-input {
+    width: 240px;
+  }
+
+  .stock-suggestion {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+
+    .suggestion-code {
+      color: #303133;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }
+
+    .suggestion-name {
+      color: #606266;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
   .content-row {
     margin-bottom: 20px;
   }
@@ -1156,10 +1416,146 @@ function normalizeRouteCode(code: unknown): string {
     display: flex;
     flex-direction: column;
 
+    :deep(.el-card__header) {
+      padding: 16px 20px 12px;
+    }
+
     :deep(.el-card__body) {
       flex: 1;
       display: flex;
       flex-direction: column;
+    }
+
+    .card-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 20px;
+      row-gap: 12px;
+    }
+
+    .chart-header-main {
+      min-width: 0;
+    }
+
+    .stock-identity {
+      min-width: 0;
+      display: grid;
+      row-gap: 8px;
+    }
+
+    .stock-line {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .stock-code {
+      font-size: 20px;
+      font-weight: 700;
+      color: #1f2937;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+      line-height: 1;
+    }
+
+    .stock-name {
+      min-width: 0;
+      font-size: 17px;
+      font-weight: 600;
+      color: #0f172a;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      line-height: 1.15;
+    }
+
+    .chart-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .chart-title {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #edf5ff 0%, #f5f9ff 100%);
+      color: #35516f;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      box-shadow: inset 0 0 0 1px rgba(138, 164, 194, 0.2);
+    }
+
+    .chart-subtitle {
+      font-size: 12px;
+      line-height: 1.4;
+      color: #7b8794;
+      white-space: nowrap;
+    }
+
+    .chart-toolbar {
+      display: grid;
+      justify-items: end;
+      row-gap: 8px;
+    }
+
+    .chart-toolbar-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: #8090a3;
+      white-space: nowrap;
+    }
+
+    .chart-range-switcher {
+      display: inline-flex;
+      align-items: center;
+      justify-self: end;
+      min-height: 34px;
+      padding: 3px;
+      border: 1px solid #d8e2ec;
+      border-radius: 12px;
+      background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    }
+
+    .chart-range-button {
+      min-width: 60px;
+      height: 28px;
+      padding: 0 14px;
+      border: none;
+      border-radius: 9px;
+      background: transparent;
+      color: #5b6f86;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 28px;
+      cursor: pointer;
+      transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+
+      &:hover {
+        color: #24364a;
+        background: rgba(255, 255, 255, 0.55);
+      }
+
+      &:focus-visible {
+        outline: 2px solid rgba(29, 78, 216, 0.28);
+        outline-offset: 1px;
+      }
+
+      &.is-active {
+        color: #1d4ed8;
+        background: #ffffff;
+        box-shadow: 0 2px 6px rgba(37, 99, 235, 0.12);
+        transform: translateY(-1px);
+      }
     }
 
     .chart-container {
@@ -1391,6 +1787,18 @@ function normalizeRouteCode(code: unknown): string {
     }
   }
 
+  .table-header-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .table-info-icon {
+    font-size: 13px;
+    color: var(--color-info);
+    cursor: help;
+  }
+
   // 中国习惯：红涨绿跌
   .text-up {
     color: #ef5350;  // 红色 - 涨
@@ -1398,6 +1806,41 @@ function normalizeRouteCode(code: unknown): string {
 
   .text-down {
     color: #26a69a;  // 绿色 - 跌
+  }
+}
+
+@media (max-width: 768px) {
+  .diagnosis-page {
+    .chart-card {
+      .card-header {
+        grid-template-columns: 1fr;
+        align-items: start;
+      }
+
+      .stock-line {
+        gap: 8px 10px;
+      }
+
+      .stock-name {
+        max-width: 100%;
+      }
+
+      .chart-meta {
+        gap: 8px;
+      }
+
+      .chart-subtitle {
+        white-space: normal;
+      }
+
+      .chart-toolbar {
+        justify-items: start;
+      }
+
+      .chart-range-switcher {
+        justify-self: start;
+      }
+    }
   }
 }
 </style>

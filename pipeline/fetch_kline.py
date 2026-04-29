@@ -16,6 +16,7 @@ import os
 import pandas as pd
 import tushare as ts
 import yaml
+from backend.app.utils.stock_metadata import resolve_ts_code
 from backend.app.utils.tushare_rate_limit import acquire_tushare_slot, MAX_REQUESTS_PER_WINDOW, WINDOW_SECONDS
 
 warnings.filterwarnings("ignore")
@@ -147,13 +148,7 @@ def set_api(session) -> None:
 
 def _to_ts_code(code: str) -> str:
     """把6位code映射到标准 ts_code 后缀。"""
-    code = str(code).zfill(6)
-    if code.startswith(("60", "68", "9")):
-        return f"{code}.SH"
-    elif code.startswith(("4", "8")):
-        return f"{code}.BJ"
-    else:
-        return f"{code}.SZ"
+    return resolve_ts_code(code)
 
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     ts_code = _to_ts_code(code)

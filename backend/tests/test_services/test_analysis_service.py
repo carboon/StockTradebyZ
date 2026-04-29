@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.config import settings
 from app.services.analysis_service import AnalysisService
 
 # 添加 pipeline 目录到 Python 路径（与主流程一致）
@@ -1035,3 +1036,82 @@ def test_small_dataframe_handling(analysis_service):
             result = analysis_service.check_b1_strategy("600000")
 
             assert result["code"] == "600000"
+
+
+@pytest.mark.unit
+def test_generate_stock_history_checks_includes_extended_fields(
+    analysis_service,
+    sample_stock_df,
+    tmp_path,
+):
+    review_dir = tmp_path / "review"
+    code = "600000"
+    target_rows = sample_stock_df.tail(3).copy()
+    target_dates = [pd.Timestamp(ts).normalize() for ts in target_rows["date"].tolist()]
+    pass_date = target_rows.iloc[-1]["date"].strftime("%Y-%m-%d")
+    blocked_date = target_rows.iloc[-2]["date"].strftime("%Y-%m-%d")
+
+    selector = MagicMock()
+
+    def prepare_df(df_before: pd.DataFrame) -> pd.DataFrame:
+        prepared = df_before.copy()
+        prepared["J"] = 12.0
+        prepared["zxdq"] = prepared["close"] * 1.02
+        prepared["zxdkx"] = prepared["close"] * 0.98
+        prepared["wma_bull"] = True
+        prepared["_vec_pick"] = True
+        return prepared
+
+    selector.prepare_df.side_effect = prepare_df
+
+    prefilter = MagicMock()
+
+    def evaluate(*, code: str, pick_date: str, price_df: pd.DataFrame) -> dict:
+        if pick_date == blocked_date:
+            return {"passed": False, "blocked_by": ["market_regime"]}
+        return {"passed": True, "blocked_by": []}
+
+    prefilter.evaluate.side_effect = evaluate
+
+    active_pool_sets = {
+        target_dates[0]: set(),
+        target_dates[1]: {code},
+        target_dates[2]: {code},
+    }
+
+    def quant_result(_: str, __: pd.DataFrame, check_date: str, config=None) -> dict:
+        if check_date == pass_date:
+            return {"score": 4.2, "verdict": "PASS", "signal_type": "trend_start"}
+        return {"score": 3.6, "verdict": "WATCH", "signal_type": "rebound"}
+
+    with patch.object(settings, "review_dir", str(review_dir)), \
+         patch.object(analysis_service, "load_stock_data", return_value=sample_stock_df), \
+         patch.object(analysis_service, "_build_b1_selector", return_value=selector), \
+         patch.object(analysis_service, "_load_quant_review_config", return_value={"prefilter": {"enabled": True}}), \
+         patch.object(analysis_service, "_build_prefilter", return_value=prefilter), \
+         patch.object(analysis_service, "_build_active_pool_sets", return_value=active_pool_sets), \
+         patch.object(analysis_service, "_quant_review_for_date", side_effect=quant_result):
+        result = analysis_service.generate_stock_history_checks(code, days=3, clean=True)
+
+    assert result["success"] is True
+
+    history_file = review_dir / "history" / f"{code}.json"
+    payload = json.loads(history_file.read_text(encoding="utf-8"))
+    history = payload["history"]
+
+    assert history[0]["check_date"] == pass_date
+    assert history[0]["in_active_pool"] is True
+    assert history[0]["prefilter_passed"] is True
+    assert history[0]["prefilter_blocked_by"] == []
+    assert history[0]["verdict"] == "PASS"
+    assert history[0]["signal_type"] == "trend_start"
+    assert history[0]["tomorrow_star_pass"] is True
+
+    assert history[1]["check_date"] == blocked_date
+    assert history[1]["in_active_pool"] is True
+    assert history[1]["prefilter_passed"] is False
+    assert history[1]["prefilter_blocked_by"] == ["market_regime"]
+    assert history[1]["tomorrow_star_pass"] is False
+
+    assert history[2]["in_active_pool"] is False
+    assert history[2]["tomorrow_star_pass"] is False

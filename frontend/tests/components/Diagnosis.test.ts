@@ -62,6 +62,7 @@ vi.mock('@/api', () => ({
   },
   apiStock: {
     getInfo: vi.fn(),
+    search: vi.fn(),
     getKline: vi.fn(),
   },
   apiWatchlist: {
@@ -85,6 +86,23 @@ function flushPromises() {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
+function buildKline(days: number) {
+  return {
+    daily: Array.from({ length: days }, (_, index) => ({
+      date: `2024-03-${String((index % 31) + 1).padStart(2, '0')}`,
+      open: 10 + index * 0.1,
+      close: 10.5 + index * 0.1,
+      low: 9.8 + index * 0.1,
+      high: 10.8 + index * 0.1,
+      volume: 1000 + index,
+      ma5: 10.2 + index * 0.1,
+      ma10: 10.1 + index * 0.1,
+      ma20: 10.0 + index * 0.1,
+    })),
+    weekly: [],
+  }
+}
+
 const mockKline = {
   daily: [
     { date: '2024-01-15', open: 10, close: 10.5, low: 9.8, high: 10.8, volume: 1000, ma5: 10.2, ma10: 10.1, ma20: 10.0 },
@@ -92,23 +110,23 @@ const mockKline = {
   weekly: [],
 }
 
-const mockFullKline = {
-  daily: Array.from({ length: 120 }, (_, index) => ({
-    date: `2024-01-${String((index % 28) + 1).padStart(2, '0')}`,
-    open: 10,
-    close: 10.5,
-    low: 9.8,
-    high: 10.8,
-    volume: 1000,
-    ma5: 10.2,
-    ma10: 10.1,
-    ma20: 10.0,
-  })),
-  weekly: [],
-}
+const mockFullKline = buildKline(120)
 
 const mockHistory = [
-  { check_date: '2024-01-15', close_price: 10.5, change_pct: 2.5, kdj_j: 45.2, b1_passed: true, score: 4.2, verdict: 'PASS' },
+  {
+    check_date: '2024-01-15',
+    close_price: 10.5,
+    change_pct: 2.5,
+    kdj_j: 45.2,
+    in_active_pool: true,
+    b1_passed: true,
+    prefilter_passed: true,
+    prefilter_blocked_by: [],
+    score: 4.2,
+    verdict: 'PASS',
+    signal_type: 'trend_start',
+    tomorrow_star_pass: true,
+  },
 ]
 
 const mockAnalyzeResponse = {
@@ -162,6 +180,7 @@ function mountComponent() {
         'el-form': { template: '<form><slot /></form>' },
         'el-form-item': { template: '<div><slot /></div>' },
         'el-input': { template: '<input />' },
+        'el-autocomplete': { template: '<input />' },
         'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
         'el-radio-group': { template: '<div><slot /></div>' },
         'el-radio-button': { template: '<button><slot /></button>' },
@@ -187,6 +206,10 @@ describe('Diagnosis.vue', () => {
     mockRoute.query = {}
     setActivePinia(createPinia())
     mockStatus()
+    vi.mocked(apiStock.search).mockResolvedValue({
+      items: [{ code: '600000', name: '浦发银行' }],
+      total: 1,
+    } as any)
     vi.mocked(apiStock.getInfo).mockResolvedValue({ code: '600000', name: '浦发银行' } as any)
     vi.mocked(apiStock.getKline)
       .mockResolvedValueOnce(mockKline as any)
@@ -205,7 +228,7 @@ describe('Diagnosis.vue', () => {
 
     await wrapper.vm.searchStock(1)
 
-    expect(ElMessage.warning).toHaveBeenCalledWith('请输入股票代码')
+    expect(ElMessage.warning).toHaveBeenCalledWith('请输入股票代码或名称')
   })
 
   it('blocks search-and-analyze when initialization is incomplete', async () => {
@@ -236,6 +259,32 @@ describe('Diagnosis.vue', () => {
     expect(apiAnalysis.analyze).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
+  it('resolves stock names through the fuzzy search API before loading diagnosis data', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.searchForm.code = '浦发银行'
+    await wrapper.vm.searchAndAnalyze()
+    await flushPromises()
+
+    expect(apiStock.search).toHaveBeenCalledWith('浦发银行', 10, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiStock.getInfo).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(wrapper.vm.stockCode).toBe('600000')
+  })
+
+  it('keeps extended diagnosis history fields from the API response', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.stockCode = '600000'
+    await wrapper.vm.loadHistoryData()
+
+    expect(wrapper.vm.historyData[0].in_active_pool).toBe(true)
+    expect(wrapper.vm.historyData[0].prefilter_passed).toBe(true)
+    expect(wrapper.vm.historyData[0].signal_type).toBe('trend_start')
+    expect(wrapper.vm.historyData[0].tomorrow_star_pass).toBe(true)
+  })
+
   it('uses persistent diagnosis chart cache before requesting the full 120-day chart', async () => {
     window.localStorage.setItem('stocktrade:diagnosis:chart-cache', JSON.stringify({
       '600000': {
@@ -254,6 +303,38 @@ describe('Diagnosis.vue', () => {
     await flushPromises()
 
     expect(apiStock.getKline).toHaveBeenCalledWith('600000', 120, false, expect.objectContaining({ timeoutMs: 20000 }))
+  })
+
+  it('renders the selected chart window from cache when switching days', async () => {
+    const cachedKline = buildKline(60)
+    window.localStorage.setItem('stocktrade:diagnosis:chart-cache', JSON.stringify({
+      '600000': {
+        code: '600000',
+        days: 60,
+        cachedAt: Date.now(),
+        data: cachedKline,
+      },
+    }))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.stockCode = '600000'
+    wrapper.vm.chartDays = 30
+    await nextTick()
+
+    vi.mocked(apiStock.getKline).mockClear()
+    echartsInstance.setOption.mockClear()
+
+    await wrapper.vm.loadKlineData()
+    await flushPromises()
+
+    expect(apiStock.getKline).not.toHaveBeenCalled()
+    expect(echartsInstance.setOption).toHaveBeenCalled()
+
+    const option = echartsInstance.setOption.mock.calls.at(-1)?.[0]
+    expect(option?.xAxis?.[0]?.data).toEqual(cachedKline.daily.slice(-30).map((item) => item.date))
+    expect(option?.series?.[0]?.data).toHaveLength(30)
   })
 
   it('maps analysis fields into the view model and emits success feedback', async () => {
