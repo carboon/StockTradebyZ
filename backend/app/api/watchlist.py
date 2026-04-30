@@ -197,12 +197,18 @@ def _calc_support_resistance(df) -> tuple[float | None, float | None]:
 
 @router.get("/", response_model=WatchlistResponse)
 async def get_watchlist(db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistResponse:
-    """获取观察列表"""
-    watchlist = db.query(Watchlist).filter(Watchlist.is_active == True).all()
+    """获取当前用户的观察列表"""
+    # 按用户过滤并使用 join 优化查询
+    watchlist = (
+        db.query(Watchlist, Stock)
+        .join(Stock, Watchlist.code == Stock.code)
+        .filter(Watchlist.user_id == user.id, Watchlist.is_active == True)
+        .order_by(Watchlist.priority.desc(), Watchlist.added_at.desc())
+        .all()
+    )
 
     items = []
-    for w in watchlist:
-        stock = db.query(Stock).filter(Stock.code == w.code).first()
+    for w, stock in watchlist:
         items.append(
             WatchlistItem(
                 id=w.id,
@@ -222,11 +228,11 @@ async def get_watchlist(db: Session = Depends(get_db), user=Depends(require_user
 
 @router.post("/", response_model=WatchlistItem)
 async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistItem:
-    """添加到观察列表"""
+    """添加到当前用户的观察列表"""
     code = request.code.zfill(6)
 
-    # 检查是否已存在
-    existing = db.query(Watchlist).filter(Watchlist.code == code).first()
+    # 检查当前用户的列表中是否已存在
+    existing = db.query(Watchlist).filter(Watchlist.user_id == user.id, Watchlist.code == code).first()
     if existing:
         # 更新为活跃状态
         existing.is_active = True
@@ -239,6 +245,7 @@ async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(g
         w = existing
     else:
         w = Watchlist(
+            user_id=user.id,
             code=code,
             add_reason=request.reason,
             entry_price=request.entry_price,
@@ -276,8 +283,8 @@ async def update_watchlist_item(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> WatchlistItem:
-    """更新观察列表项"""
-    w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
+    """更新当前用户的观察列表项"""
+    w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
@@ -314,8 +321,8 @@ async def update_watchlist_item(
 
 @router.delete("/{item_id}")
 async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
-    """删除观察列表项"""
-    w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
+    """删除当前用户的观察列表项"""
+    w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
@@ -328,8 +335,8 @@ async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), use
 
 @router.get("/{item_id}/analysis")
 async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
-    """获取观察股票分析历史"""
-    w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
+    """获取当前用户的观察股票分析历史"""
+    w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
@@ -368,14 +375,63 @@ async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), us
 
 
 @router.post("/{item_id}/analyze")
-async def analyze_watchlist_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
-    """立即分析重点观察股票"""
-    w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
+async def analyze_watchlist_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
+    """立即分析当前用户的重点观察股票
+
+    优先命中已有分析结果：
+    1. 检查当日是否已有该股票的分析结果（可来自单股诊断或其他观察列表）
+    2. 如果存在，直接复用结果
+    3. 如果不存在，执行分析并缓存结果
+    """
+    from app.services.analysis_cache import analysis_cache
+
+    w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
-    result = analysis_service.analyze_stock(w.code, "quant")
+    # 先尝试加载数据以确定交易日
     df = analysis_service.load_stock_data(w.code)
+    if df is not None and not df.empty:
+        latest = df.sort_values("date").iloc[-1]
+        if hasattr(latest, "date"):
+            if hasattr(latest["date"], "date"):
+                tentative_date = latest["date"].date()
+            else:
+                tentative_date = latest["date"]
+        else:
+            tentative_date = date_class.today()
+    else:
+        tentative_date = date_class.today()
+
+    # 检查是否有已缓存的分析结果（可来自单股诊断）
+    trade_date_str = tentative_date.strftime("%Y-%m-%d")
+    cached_result = analysis_cache.get_cached_analysis(w.code, trade_date_str)
+
+    if cached_result is not None:
+        # 复用缓存结果
+        result = cached_result
+    else:
+        # 执行分析（会自动处理去重和缓存）
+        result = analysis_service.analyze_stock(w.code, "quant", use_cache=True)
+
+    # 处理分析中的状态
+    if result.get("_status") in ("analyzing", "waiting"):
+        return {
+            "status": "pending",
+            "code": w.code,
+            "message": "分析正在进行中，请稍后再试",
+            "_cache_key": result.get("_cache_key"),
+        }
+
+    support_level, resistance_level = _calc_support_resistance(df)
+    current_price = result.get("close_price")
+    verdict = result.get("verdict")
+    score = result.get("score")
+    signal_type = result.get("signal_type")
     support_level, resistance_level = _calc_support_resistance(df)
     current_price = result.get("close_price")
     verdict = result.get("verdict")
@@ -480,8 +536,8 @@ async def analyze_watchlist_item(item_id: int, db: Session = Depends(get_db), us
 
 @router.get("/{item_id}/chart")
 async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
-    """获取观察股票 K线图数据"""
-    w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
+    """获取当前用户的观察股票 K线图数据"""
+    w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 

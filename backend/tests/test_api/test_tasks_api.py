@@ -878,3 +878,130 @@ def test_get_task_with_cancelled_status(test_client_with_db: Any) -> None:
 
     assert data["status"] == "cancelled"
     assert data["progress"] == 50
+
+
+@pytest.mark.api
+def test_single_analysis_task_returns_existing_task(test_client_with_db: Any) -> None:
+    """
+    测试单股分析任务去重 - 返回现有任务
+
+    当同一股票在短时间内已有分析任务时，应返回现有任务ID。
+    """
+    now = utc_now()
+    existing_task = Task(
+        task_type="single_analysis",
+        status="running",
+        progress=50,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(existing_task)
+    test_client_with_db.db.commit()
+    test_client_with_db.db.refresh(existing_task)
+
+    with patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task):
+        from app.services.task_service import TaskService
+        task_service = TaskService(test_client_with_db.db)
+
+        # 模拟异步创建任务
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                task_service.create_task(
+                    "single_analysis",
+                    {"code": "600000", "reviewer": "quant"}
+                )
+            )
+        finally:
+            loop.close()
+
+    assert result["existing"] is True
+    assert result["task_id"] == existing_task.id
+    assert result["ws_url"] == f"/ws/tasks/{existing_task.id}"
+
+
+@pytest.mark.api
+def test_single_analysis_task_allows_different_stock(test_client_with_db: Any) -> None:
+    """
+    测试单股分析任务去重 - 不同股票创建新任务
+
+    不同股票代码的分析任务应创建新任务。
+    """
+    now = utc_now()
+    existing_task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(existing_task)
+    test_client_with_db.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task):
+        from app.services.task_service import TaskService
+        task_service = TaskService(test_client_with_db.db)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                task_service.create_task(
+                    "single_analysis",
+                    {"code": "000001", "reviewer": "quant"}
+                )
+            )
+        finally:
+            loop.close()
+
+    assert result["existing"] is False
+    assert result["task_id"] != existing_task.id
+
+
+@pytest.mark.api
+def test_single_analysis_task_allows_expired_old_task(test_client_with_db: Any) -> None:
+    """
+    测试单股分析任务去重 - 过期任务后允许新任务
+
+    超过1小时的已完成任务不应阻止新任务创建。
+    """
+    from datetime import timedelta
+    old_time = utc_now() - timedelta(hours=2)
+
+    old_task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=old_time,
+        completed_at=old_time,
+        created_at=old_time,
+    )
+    test_client_with_db.db.add(old_task)
+    test_client_with_db.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task):
+        from app.services.task_service import TaskService
+        task_service = TaskService(test_client_with_db.db)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                task_service.create_task(
+                    "single_analysis",
+                    {"code": "600000", "reviewer": "quant"}
+                )
+            )
+        finally:
+            loop.close()
+
+    assert result["existing"] is False
+    assert result["task_id"] != old_task.id

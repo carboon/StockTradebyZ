@@ -140,6 +140,64 @@ def ensure_task_center_schema() -> None:
 ensure_task_center_schema()
 
 
+def ensure_watchlist_user_schema() -> None:
+    """迁移：为 watchlist 表添加 user_id 列，并将现有数据关联到 admin 用户。"""
+    if not settings.database_url.startswith("sqlite"):
+        return
+
+    with engine.begin() as conn:
+        # 检查 user_id 列是否存在
+        watchlist_columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(watchlist)")).fetchall()
+        }
+        if "user_id" not in watchlist_columns:
+            print("迁移 watchlist 表：添加 user_id 列...")
+            # 添加 user_id 列
+            conn.execute(text("ALTER TABLE watchlist ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1"))
+            # 获取 admin 用户 ID
+            admin_id = conn.execute(text("SELECT id FROM users WHERE role = 'admin' LIMIT 1")).scalar()
+            if admin_id:
+                # 更新现有记录的 user_id 为 admin
+                conn.execute(text("UPDATE watchlist SET user_id = :admin_id"), {"admin_id": admin_id})
+            # 删除旧的 unique 约束（code 唯一）
+            # SQLite 不支持直接删除约束，需要重建表
+            # 创建新表
+            conn.execute(text("""
+                CREATE TABLE watchlist_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    code VARCHAR(10) NOT NULL,
+                    add_reason TEXT,
+                    entry_price FLOAT,
+                    position_ratio FLOAT,
+                    priority INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT 1,
+                    added_at DATETIME,
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    FOREIGN KEY(code) REFERENCES stocks(code),
+                    UNIQUE(user_id, code)
+                )
+            """))
+            # 复制数据
+            conn.execute(text("""
+                INSERT INTO watchlist_new (id, user_id, code, add_reason, entry_price, position_ratio, priority, is_active, added_at)
+                SELECT id, user_id, code, add_reason, entry_price, position_ratio, priority, is_active, added_at
+                FROM watchlist
+            """))
+            # 删除旧表
+            conn.execute(text("DROP TABLE watchlist"))
+            # 重命名新表
+            conn.execute(text("ALTER TABLE watchlist_new RENAME TO watchlist"))
+            # 重建索引
+            conn.execute(text("CREATE INDEX ix_watchlist_user_id ON watchlist(user_id)"))
+            conn.execute(text("CREATE INDEX ix_watchlist_code ON watchlist(code)"))
+            print("迁移完成：watchlist 表已添加 user_id 列")
+
+
+ensure_watchlist_user_schema()
+
+
 def ensure_admin_user() -> None:
     """首次启动时创建默认管理员账户。"""
     from datetime import datetime, timezone

@@ -486,36 +486,18 @@ def test_get_diagnosis_history_with_days_param(test_client: TestClient) -> None:
 @pytest.mark.api
 def test_start_diagnosis_success(test_client: TestClient) -> None:
     """
-    测试启动单股分析 - 成功
+    测试启动单股分析 - 成功创建任务
 
-    验证API能正确执行单股分析并返回分析结果。
+    验证API能正确创建单股分析任务并返回任务信息（后台任务模式）。
     """
-    with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_result = {
-            "code": "600000",
-            "b1_passed": True,
-            "kdj_j": 15.3,
-            "zx_long_pos": True,
-            "weekly_ma_aligned": True,
-            "volume_healthy": True,
-            "close_price": 10.5,
-            "score": 4.5,
-            "verdict": "PASS",
-            "comment": "技术形态良好",
-            "signal_type": "bullish",
-        }
-        mock_service.analyze_stock.return_value = mock_result
-
-        # Mock K线数据
-        mock_df = pd.DataFrame({
-            "date": pd.date_range("2024-01-01", periods=120),
-            "open": [10.0] * 120,
-            "high": [10.5] * 120,
-            "low": [9.5] * 120,
-            "close": [10.0] * 120,
-            "vol": [1000000] * 120,
+    with patch("app.api.analysis.TaskService") as mock_task_service_cls:
+        mock_task_service = MagicMock()
+        mock_task_service.create_task = AsyncMock(return_value={
+            "task_id": 1,
+            "ws_url": "/ws/tasks/1",
+            "existing": False,
         })
-        mock_service.load_stock_data.return_value = mock_df
+        mock_task_service_cls.return_value = mock_task_service
 
         response = test_client.post(
             "/api/v1/analysis/diagnosis/analyze",
@@ -524,36 +506,43 @@ def test_start_diagnosis_success(test_client: TestClient) -> None:
 
         assert response.status_code == 200
         data = response.json()
+        assert data["task_id"] == 1
         assert data["code"] == "600000"
-        assert data["b1_passed"] is True
-        assert data["score"] == 4.5
-        assert data["verdict"] == "PASS"
-        assert "analysis" in data
-        assert data["analysis"]["kdj_j"] == 15.3
-        assert "kline_data" in data
-        assert data["kline_data"] is not None
-        mock_service.analyze_stock.assert_called_once_with("600000", "quant")
+        assert data["status"] in ("pending", "existing")
+        assert "ws_url" in data
+        assert "message" in data
+        mock_task_service.create_task.assert_called_once()
 
 
 @pytest.mark.api
-def test_start_diagnosis_returns_stock_name(test_client_with_db) -> None:
+def test_start_diagnosis_returns_existing_task(test_client_with_db: Any) -> None:
     """
-    测试单股分析接口返回股票名称
+    测试启动单股分析 - 返回现有任务
+
+    验证当同一股票已有活跃分析任务时，返回现有任务ID。
     """
-    stock = Stock(code="600000", name="浦发银行", market="SH", industry="银行")
-    test_client_with_db.db.add(stock)
+    from app.time_utils import utc_now
+
+    now = utc_now()
+    existing_task = Task(
+        task_type="single_analysis",
+        status="running",
+        progress=50,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(existing_task)
     test_client_with_db.db.commit()
 
-    with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_result = {
-            "code": "600000",
-            "b1_passed": True,
-            "close_price": 10.5,
-            "score": 4.5,
-            "verdict": "PASS",
-        }
-        mock_service.analyze_stock.return_value = mock_result
-        mock_service.load_stock_data.return_value = None
+    with patch("app.api.analysis.TaskService") as mock_task_service_cls:
+        mock_task_service = MagicMock()
+        mock_task_service.create_task = AsyncMock(return_value={
+            "task_id": existing_task.id,
+            "ws_url": f"/ws/tasks/{existing_task.id}",
+            "existing": True,
+        })
+        mock_task_service_cls.return_value = mock_task_service
 
         response = test_client_with_db.post(
             "/api/v1/analysis/diagnosis/analyze",
@@ -562,121 +551,138 @@ def test_start_diagnosis_returns_stock_name(test_client_with_db) -> None:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["code"] == "600000"
-        assert data["name"] == "浦发银行"
+        assert data["task_id"] == existing_task.id
+        assert data["status"] == "existing"
 
 
 @pytest.mark.api
-def test_start_diagnosis_invalid_code(test_client: TestClient) -> None:
+def test_get_diagnosis_result_processing(test_client_with_db: Any) -> None:
     """
-    测试启动单股分析 - 无效代码
+    测试获取单股分析结果 - 任务进行中
 
-    验证当股票代码无效时，API能正确处理并返回错误信息。
+    验证当任务还在进行中时，返回processing状态。
     """
-    with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_result = {
-            "code": "999999",
-            "b1_passed": False,
-            "error": "数据不存在",
-        }
-        mock_service.analyze_stock.return_value = mock_result
-        mock_service.load_stock_data.return_value = None
+    from app.time_utils import utc_now
 
-        response = test_client.post(
-            "/api/v1/analysis/diagnosis/analyze",
-            json={"code": "999999"},
-        )
+    now = utc_now()
+    task = Task(
+        task_type="single_analysis",
+        status="running",
+        progress=50,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(task)
+    test_client_with_db.db.commit()
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["code"] == "999999"
-        assert data["b1_passed"] is False
-        assert data["kline_data"] is None
+    response = test_client_with_db.get("/api/v1/analysis/diagnosis/600000/result")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "processing"
+    assert data["task_id"] == task.id
+    assert data["task_status"] == "running"
+    assert data["progress"] == 50
 
 
 @pytest.mark.api
-def test_start_diagnosis_no_data(test_client: TestClient) -> None:
+def test_get_diagnosis_result_completed(test_client_with_db: Any) -> None:
     """
-    测试启动单股分析 - 无K线数据
+    测试获取单股分析结果 - 任务完成
 
-    验证当股票没有K线数据时，API能正确处理。
+    验证当任务已完成时，返回完整的分析结果。
     """
-    with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_result = {
-            "code": "600000",
-            "b1_passed": False,
-            "close_price": None,
-            "score": 0,
-            "verdict": "FAIL",
-            "comment": "数据不存在",
-        }
-        mock_service.analyze_stock.return_value = mock_result
-        mock_service.load_stock_data.return_value = None
+    from app.time_utils import utc_now
 
-        response = test_client.post(
-            "/api/v1/analysis/diagnosis/analyze",
-            json={"code": "600000"},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["code"] == "600000"
-        assert data["current_price"] is None
-        assert data["kline_data"] is None
-        assert data["verdict"] == "FAIL"
-
-
-@pytest.mark.api
-def test_start_diagnosis_with_kline(test_client: TestClient) -> None:
-    """
-    测试启动单股分析 - 包含完整K线数据
-
-    验证API能正确返回K线数据，包括日期、开高低收、成交量等。
-    """
-    with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_result = {
-            "code": "600000",
+    now = utc_now()
+    task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "600000", "reviewer": "quant"},
+        result_json={
+            "close_price": 10.5,
             "b1_passed": True,
+            "score": 4.5,
+            "verdict": "PASS",
             "kdj_j": 15.3,
             "zx_long_pos": True,
             "weekly_ma_aligned": True,
             "volume_healthy": True,
-            "close_price": 10.5,
-            "score": 4.5,
-            "verdict": "PASS",
-            "comment": "良好",
-        }
-        mock_service.analyze_stock.return_value = mock_result
+            "signal_type": "trend_start",
+            "comment": "技术形态良好",
+            "scores": {"trend_structure": 4.5},
+        },
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(task)
+    test_client_with_db.db.commit()
 
-        # 创建120天的K线数据
-        dates = pd.date_range("2024-01-01", periods=120)
-        mock_df = pd.DataFrame({
-            "date": dates,
-            "open": [10.0 + i * 0.01 for i in range(120)],
-            "high": [10.5 + i * 0.01 for i in range(120)],
-            "low": [9.5 + i * 0.01 for i in range(120)],
-            "close": [10.0 + i * 0.01 for i in range(120)],
-            "vol": [1000000 + i * 10000 for i in range(120)],
-        })
-        mock_service.load_stock_data.return_value = mock_df
+    stock = Stock(code="600000", name="浦发银行", market="SH", industry="银行")
+    test_client_with_db.db.add(stock)
+    test_client_with_db.db.commit()
 
-        response = test_client.post(
-            "/api/v1/analysis/diagnosis/analyze",
-            json={"code": "600000"},
-        )
+    response = test_client_with_db.get("/api/v1/analysis/diagnosis/600000/result")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert "kline_data" in data
-        assert data["kline_data"] is not None
-        assert "dates" in data["kline_data"]
-        assert "open" in data["kline_data"]
-        assert "high" in data["kline_data"]
-        assert "low" in data["kline_data"]
-        assert "close" in data["kline_data"]
-        assert "volume" in data["kline_data"]
-        # 验证返回最近120天数据
-        assert len(data["kline_data"]["dates"]) == 120
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["code"] == "600000"
+    assert data["name"] == "浦发银行"
+    assert data["current_price"] == 10.5
+    assert data["b1_passed"] is True
+    assert data["score"] == 4.5
+    assert data["verdict"] == "PASS"
+    assert data["analysis"]["kdj_j"] == 15.3
+
+
+@pytest.mark.api
+def test_get_diagnosis_result_failed(test_client_with_db: Any) -> None:
+    """
+    测试获取单股分析结果 - 任务失败
+
+    验证当任务失败时，返回错误信息。
+    """
+    from app.time_utils import utc_now
+
+    now = utc_now()
+    task = Task(
+        task_type="single_analysis",
+        status="failed",
+        progress=0,
+        params_json={"code": "600000", "reviewer": "quant"},
+        error_message="数据加载失败",
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(task)
+    test_client_with_db.db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/diagnosis/600000/result")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["error"] == "数据加载失败"
+
+
+@pytest.mark.api
+def test_get_diagnosis_result_not_found(test_client: TestClient) -> None:
+    """
+    测试获取单股分析结果 - 任务不存在
+
+    验证当没有找到分析任务时，返回404错误。
+    """
+    response = test_client.get("/api/v1/analysis/diagnosis/999999/result")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "detail" in data
+    assert "未找到分析任务" in data["detail"]
 
 
 @pytest.mark.api
@@ -776,3 +782,109 @@ def test_get_tomorrow_star_candidates_invalid_date(test_client: TestClient) -> N
                 assert response.status_code == 200
                 data = response.json()
                 assert data["total"] == 0
+
+
+@pytest.mark.api
+def test_get_analysis_results_read_only_no_auto_scoring(test_client: TestClient, tmp_path: Path) -> None:
+    """
+    测试获取分析结果只读模式 - 不触发自动补算
+
+    验证当候选股票缺少分析结果时，GET接口不会触发自动评分，
+    而是返回已存在的分析结果，不进行补算。
+    """
+    # 创建测试目录结构
+    test_root = tmp_path / "test_read_only"
+    candidates_dir = test_root / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    review_dir = test_root / "review"
+    date_dir = review_dir / "2024-01-15"
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建候选文件（包含2只股票）
+    candidate_data = {
+        "pick_date": "2024-01-15",
+        "candidates": [
+            {"code": "600000"},
+            {"code": "000001"},
+        ]
+    }
+    candidate_file = candidates_dir / "candidates_2024-01-15.json"
+    with open(candidate_file, "w") as f:
+        json.dump(candidate_data, f)
+
+    # 只创建其中一只股票的分析结果（模拟缺失情况）
+    with open(date_dir / "600000.json", "w") as f:
+        json.dump({
+            "code": "600000",
+            "total_score": 4.5,
+            "verdict": "PASS",
+            "signal_type": "trend_start",
+            "comment": "技术形态良好",
+        }, f)
+
+    # Mock settings
+    with patch("app.services.analysis_service.settings") as mock_settings:
+        with patch("app.services.analysis_service.ROOT", test_root):
+            mock_settings.candidates_dir = candidates_dir
+            mock_settings.review_dir = review_dir
+            mock_settings.min_score_threshold = 4.0
+
+            # 调用 get_analysis_results
+            from app.services.analysis_service import analysis_service
+            result = analysis_service.get_analysis_results("2024-01-15")
+
+            # 验证只返回已存在的分析结果，不包含缺失的股票
+            assert result["pick_date"] == "2024-01-15"
+            assert result["total"] == 1
+            assert len(result["results"]) == 1
+            assert result["results"][0]["code"] == "600000"
+
+            # 确保没有为缺失的股票自动生成分析结果文件
+            missing_file = date_dir / "000001.json"
+            assert not missing_file.exists(), "缺失的分析结果文件不应被自动创建"
+
+
+@pytest.mark.api
+def test_get_analysis_results_missing_all_return_empty(test_client: TestClient, tmp_path: Path) -> None:
+    """
+    测试获取分析结果 - 所有候选都缺失分析结果
+
+    验证当所有候选股票都缺少分析结果时，GET接口返回空列表，
+    不触发任何补算操作。
+    """
+    test_root = tmp_path / "test_all_missing"
+    candidates_dir = test_root / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    review_dir = test_root / "review"
+    date_dir = review_dir / "2024-01-15"
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建候选文件，但没有创建任何分析结果文件
+    candidate_data = {
+        "pick_date": "2024-01-15",
+        "candidates": [
+            {"code": "600000"},
+            {"code": "000001"},
+            {"code": "000002"},
+        ]
+    }
+    candidate_file = candidates_dir / "candidates_2024-01-15.json"
+    with open(candidate_file, "w") as f:
+        json.dump(candidate_data, f)
+
+    with patch("app.services.analysis_service.settings") as mock_settings:
+        with patch("app.services.analysis_service.ROOT", test_root):
+            mock_settings.candidates_dir = candidates_dir
+            mock_settings.review_dir = review_dir
+            mock_settings.min_score_threshold = 4.0
+
+            from app.services.analysis_service import analysis_service
+            result = analysis_service.get_analysis_results("2024-01-15")
+
+            # 验证返回空结果
+            assert result["pick_date"] == "2024-01-15"
+            assert result["total"] == 0
+            assert len(result["results"]) == 0
+
+            # 确保没有生成任何分析结果文件
+            assert not list(date_dir.glob("*.json")), "不应生成任何分析结果文件"

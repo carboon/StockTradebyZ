@@ -18,6 +18,7 @@ from app.models import Candidate, AnalysisResult, DailyB1Check, Stock, Task
 from app.services.analysis_service import analysis_service
 from app.services.task_service import TaskService
 from app.services.tushare_service import TushareService
+from app.time_utils import utc_now
 from app.schemas import (
     CandidatesResponse,
     CandidateItem,
@@ -423,17 +424,9 @@ async def get_candidates(
             # 运行 B1 策略筛选
             candidates = build_b1_candidates(prepared, pool_codes, pick_date, selector)
 
-            # 保存到缓存
-            cache_data = {
-                "prepared": prepared,
-                "pool_codes": pool_codes,
-                "candidates": candidates,
-                "pick_date": pick_date,
-            }
-            market_service.save_prepared_data(pick_date_str, cache_data)
-
-            # 清理旧缓存
-            market_service.clear_old_cache(keep_days=3)
+            # GET 接口不保存缓存（只读模式）
+            # 缓存保存应由后台任务（如 full_update 或 incremental_update）负责
+            # 注意：由于不保存缓存，下次请求仍需重新计算，这是只读行为的代价
 
         filtered_candidates = [c for c in candidates if c.get("b1_passed", True)]
         stock_name_map = resolve_stock_name_map([c["code"] for c in filtered_candidates[:limit]])
@@ -458,9 +451,8 @@ async def get_candidates(
                 )
             )
 
-        # 更新交易日缓存
-        if latest_trade_date:
-            market_service.update_cache(latest_trade_date)
+        # GET 接口不更新交易日缓存（只读模式）
+        # 缓存更新应由后台任务负责
 
         return CandidatesResponse(
             pick_date=pick_date.date(),
@@ -582,68 +574,116 @@ async def get_history_status(code: str, user=Depends(require_user)) -> dict:
 
 
 @router.post("/diagnosis/analyze")
-async def analyze_stock(request: DiagnosisRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> DiagnosisResponse:
-    """启动单股分析"""
+async def analyze_stock(request: DiagnosisRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+    """启动单股分析（后台任务模式）
+
+    返回任务信息，前端可通过任务ID轮询或通过WebSocket获取分析结果。
+    """
+    from app.main import manager
+
     ensure_tushare_ready()
     code = request.code.zfill(6)
 
-    try:
-        # 执行分析
-        result = analysis_service.analyze_stock(code, "quant")
-        stock = db.query(Stock).filter(Stock.code == code).first()
-        if stock is None:
-            try:
-                stock = TushareService().sync_stock_to_db(db, code)
-            except Exception:
-                stock = None
+    # 创建后台分析任务
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        "single_analysis",
+        {"code": code, "reviewer": "quant", "trigger_source": "manual"}
+    )
 
-        # 获取K线数据
-        kline_data = None
-        df = analysis_service.load_stock_data(code)
-        if df is not None and not df.empty:
-            # 确定成交量列名
-            vol_col = "vol" if "vol" in df.columns else "volume" if "volume" in df.columns else None
-            volume_data = df[vol_col].tolist()[-120:] if vol_col else []
+    return {
+        "task_id": result["task_id"],
+        "code": code,
+        "status": "pending" if not result.get("existing") else "existing",
+        "ws_url": result["ws_url"],
+        "message": "分析任务已创建" if not result.get("existing") else "复用现有分析任务",
+    }
 
-            kline_data = {
-                "dates": df["date"].dt.strftime("%Y-%m-%d").tolist()[-120:],
-                "open": df["open"].tolist()[-120:],
-                "high": df["high"].tolist()[-120:],
-                "low": df["low"].tolist()[-120:],
-                "close": df["close"].tolist()[-120:],
-                "volume": volume_data,
-            }
 
-        return DiagnosisResponse(
-            code=code,
-            name=stock.name if stock else None,
-            current_price=result.get("close_price"),
-            b1_passed=result.get("b1_passed"),
-            score=result.get("score"),
-            verdict=result.get("verdict"),
-            analysis={
-                # B1 检查详情
-                "kdj_j": result.get("kdj_j"),
-                "zx_long_pos": result.get("zx_long_pos"),
-                "weekly_ma_aligned": result.get("weekly_ma_aligned"),
-                "volume_healthy": result.get("volume_healthy"),
-                # 评分明细
-                "scores": result.get("scores"),
-                "trend_reasoning": result.get("trend_reasoning"),
-                "position_reasoning": result.get("position_reasoning"),
-                "volume_reasoning": result.get("volume_reasoning"),
-                "abnormal_move_reasoning": result.get("abnormal_move_reasoning"),
-                # 信号和结论
-                "signal_type": result.get("signal_type"),
-                "signal_reasoning": result.get("signal_reasoning"),
-                "comment": result.get("comment"),
-            },
-            kline_data=kline_data,
+@router.get("/diagnosis/{code}/result")
+async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+    """获取单股分析结果
+
+    从最新的single_analysis任务中获取分析结果。
+    如果任务已完成，返回完整结果；如果任务进行中，返回任务状态。
+    """
+    from datetime import timedelta
+    from app.models import Task
+
+    code = code.zfill(6)
+
+    # 查找最近的单股分析任务
+    cutoff_time = utc_now() - timedelta(hours=24)
+    task = (
+        db.query(Task)
+        .filter(
+            Task.task_type == "single_analysis",
+            Task.params_json["code"].astext == code,
+            Task.created_at >= cutoff_time,
         )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"分析失败: {str(e)}")
+        .order_by(Task.created_at.desc(), Task.id.desc())
+        .first()
+    )
+
+    if not task:
+        raise HTTPException(status_code=404, detail="未找到分析任务")
+
+    # 获取股票信息
+    stock = db.query(Stock).filter(Stock.code == code).first()
+    if stock is None:
+        try:
+            stock = TushareService().sync_stock_to_db(db, code)
+        except Exception:
+            stock = None
+
+    # 如果任务还在进行中，返回状态
+    if task.status in ("pending", "running"):
+        return {
+            "code": code,
+            "name": stock.name if stock else None,
+            "status": "processing",
+            "task_status": task.status,
+            "task_id": task.id,
+            "progress": task.progress,
+            "progress_meta": task.progress_meta_json,
+        }
+
+    # 如果任务失败，返回错误
+    if task.status == "failed":
+        return {
+            "code": code,
+            "name": stock.name if stock else None,
+            "status": "failed",
+            "task_id": task.id,
+            "error": task.error_message,
+        }
+
+    # 任务已完成，返回结果
+    result_json = task.result_json or {}
+    return {
+        "code": code,
+        "name": stock.name if stock else None,
+        "status": "completed",
+        "task_id": task.id,
+        "current_price": result_json.get("close_price"),
+        "b1_passed": result_json.get("b1_passed"),
+        "score": result_json.get("score"),
+        "verdict": result_json.get("verdict"),
+        "analysis": {
+            "kdj_j": result_json.get("kdj_j"),
+            "zx_long_pos": result_json.get("zx_long_pos"),
+            "weekly_ma_aligned": result_json.get("weekly_ma_aligned"),
+            "volume_healthy": result_json.get("volume_healthy"),
+            "scores": result_json.get("scores"),
+            "trend_reasoning": result_json.get("trend_reasoning"),
+            "position_reasoning": result_json.get("position_reasoning"),
+            "volume_reasoning": result_json.get("volume_reasoning"),
+            "abnormal_move_reasoning": result_json.get("abnormal_move_reasoning"),
+            "signal_type": result_json.get("signal_type"),
+            "signal_reasoning": result_json.get("signal_reasoning"),
+            "comment": result_json.get("comment"),
+        },
+    }
 
 
 @router.post("/tomorrow-star/generate")

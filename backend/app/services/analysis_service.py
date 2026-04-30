@@ -16,10 +16,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import settings
+from app.services.analysis_cache import analysis_cache
 
 
 class AnalysisService:
     """股票分析服务"""
+
+    # 策略版本，用于缓存失效
+    STRATEGY_VERSION = analysis_cache.STRATEGY_VERSION
 
     def __init__(self):
         self._selector = None
@@ -319,72 +323,143 @@ class AnalysisService:
                 "error": str(e)
             }
 
-    def analyze_stock(self, code: str, reviewer: str = "quant") -> Dict[str, Any]:
-        """执行完整的单股分析"""
+    def analyze_stock(
+        self,
+        code: str,
+        reviewer: str = "quant",
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        执行完整的单股分析
+
+        Args:
+            code: 股票代码
+            reviewer: 评审者类型 (quant/glm/qwen/gemini)
+            use_cache: 是否使用缓存（默认 True）
+
+        Returns:
+            分析结果字典，包含缓存状态标识 _cached
+        """
         import json
 
+        # 先执行 B1 检查以确定交易日
         b1_result = self.check_b1_strategy(code)
-        result = {
-            "code": code,
-            **b1_result
-        }
+        analysis_date = (
+            self._normalize_pick_date(b1_result.get("check_date"))
+            or self._normalize_pick_date(b1_result.get("analysis_date"))
+            or datetime.now().strftime("%Y-%m-%d")
+        )
 
-        # 执行评分
-        if reviewer == "quant":
-            score_result = self._quant_review(code)
-            result.update(score_result)
-        else:
-            # TODO: 调用 LLM 评分
-            result["score"] = None
-            result["verdict"] = "UNKNOWN"
-            result["comment"] = "LLM 评分待实现"
+        # 检查缓存
+        if use_cache:
+            cache_key = analysis_cache.make_cache_key(code, analysis_date, self.STRATEGY_VERSION)
+            cached_result = analysis_cache.get_cached_analysis(code, analysis_date)
 
-        # 保存分析结果到文件（供历史记录读取）
-        if result.get("score") is not None:
-            try:
-                # 单股分析也按实际数据日期归档，避免污染“今天”的批量结果目录。
-                analysis_date = (
-                    self._normalize_pick_date(result.get("check_date"))
-                    or self._normalize_pick_date(result.get("analysis_date"))
-                    or datetime.now().strftime("%Y-%m-%d")
-                )
-                review_dir = ROOT / settings.review_dir / analysis_date
-                review_dir.mkdir(parents=True, exist_ok=True)
-
-                # 尝试获取股票的收盘价（用于历史记录显示）
-                close_price = result.get("close_price")
-                if close_price is None:
-                    df = self.load_stock_data(code)
-                    if df is not None and not df.empty:
-                        close_price = float(df.iloc[-1]["close"])
-
-                stock_file = review_dir / f"{code}.json"
-                save_data = {
-                    "code": code,
-                    "total_score": result.get("score"),
-                    "verdict": result.get("verdict"),
-                    "signal_type": result.get("signal_type"),
-                    "comment": result.get("comment"),
-                    "trend_reasoning": result.get("trend_reasoning"),
-                    "position_reasoning": result.get("position_reasoning"),
-                    "volume_reasoning": result.get("volume_reasoning"),
-                    "abnormal_move_reasoning": result.get("abnormal_move_reasoning"),
-                    "scores": result.get("scores"),
-                    "b1_passed": result.get("b1_passed"),
-                    "kdj_j": result.get("kdj_j"),
-                    "close_price": close_price,  # 保存收盘价
-                    "analysis_date": analysis_date,
-                    "pick_date": analysis_date,
+            if cached_result is not None:
+                # 返回缓存结果，添加标识
+                return {
+                    **cached_result,
+                    "_cached": True,
+                    "_cache_key": cache_key,
                 }
 
-                with open(stock_file, "w", encoding="utf-8") as f:
-                    json.dump(save_data, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                # 保存失败不影响主流程
-                import traceback
-                traceback.print_exc()
+            # 检查是否正在进行
+            if analysis_cache.is_analysis_in_progress(cache_key):
+                # 返回"分析中"状态
+                return {
+                    "code": code,
+                    "b1_passed": b1_result.get("b1_passed", False),
+                    "check_date": analysis_date,
+                    "_status": "analyzing",
+                    "_cache_key": cache_key,
+                }
 
-        return result
+            # 尝试获取分析锁
+            acquired, lock = analysis_cache.start_analysis(cache_key)
+            if not acquired:
+                # 其他请求正在分析，返回等待状态
+                return {
+                    "code": code,
+                    "b1_passed": b1_result.get("b1_passed", False),
+                    "check_date": analysis_date,
+                    "_status": "waiting",
+                    "_cache_key": cache_key,
+                }
+
+        try:
+            result = {
+                "code": code,
+                **b1_result
+            }
+
+            # 执行评分
+            if reviewer == "quant":
+                score_result = self._quant_review(code)
+                result.update(score_result)
+            else:
+                # TODO: 调用 LLM 评分
+                result["score"] = None
+                result["verdict"] = "UNKNOWN"
+                result["comment"] = "LLM 评分待实现"
+
+            # 保存分析结果到文件（供历史记录读取）
+            if result.get("score") is not None:
+                try:
+                    # 尝试获取股票的收盘价（用于历史记录显示）
+                    close_price = result.get("close_price")
+                    if close_price is None:
+                        df = self.load_stock_data(code)
+                        if df is not None and not df.empty:
+                            close_price = float(df.iloc[-1]["close"])
+
+                    # 准备保存数据
+                    save_data = {
+                        "code": code,
+                        "total_score": result.get("score"),
+                        "verdict": result.get("verdict"),
+                        "signal_type": result.get("signal_type"),
+                        "comment": result.get("comment"),
+                        "trend_reasoning": result.get("trend_reasoning"),
+                        "position_reasoning": result.get("position_reasoning"),
+                        "volume_reasoning": result.get("volume_reasoning"),
+                        "abnormal_move_reasoning": result.get("abnormal_move_reasoning"),
+                        "scores": result.get("scores"),
+                        "b1_passed": result.get("b1_passed"),
+                        "kdj_j": result.get("kdj_j"),
+                        "close_price": close_price,
+                        "analysis_date": analysis_date,
+                        "pick_date": analysis_date,
+                    }
+
+                    # 使用缓存服务保存
+                    analysis_cache.save_analysis_result(code, analysis_date, save_data)
+
+                    # 更新结果
+                    result["close_price"] = close_price
+                except Exception as e:
+                    # 保存失败不影响主流程
+                    import traceback
+                    traceback.print_exc()
+
+            # 标记为非缓存结果
+            result["_cached"] = False
+
+            return result
+
+        finally:
+            # 释放锁（如果已获取）
+            if use_cache:
+                cache_key = analysis_cache.make_cache_key(code, analysis_date, self.STRATEGY_VERSION)
+                # 注意：这里不调用 finish_analysis，因为结果在上面已经保存
+                # 只需要确保锁被释放
+                with analysis_cache._global_lock:
+                    if cache_key in analysis_cache._in_progress:
+                        lock = analysis_cache._in_progress.pop(cache_key)
+                        if lock:
+                            try:
+                                lock.release()
+                            except RuntimeError:
+                                pass
 
     def _quant_review(self, code: str) -> Dict[str, Any]:
         """量化评分"""
@@ -527,22 +602,10 @@ class AnalysisService:
                         "comment": item.get("comment"),
                     })
 
-            # 如果有缺失的分析，触发自动评分
-            if missing_analysis_codes and len(missing_analysis_codes) <= 100:  # 限制自动分析数量
-                print(f"[get_analysis_results] 检测到 {len(missing_analysis_codes)} 个候选股票缺少分析结果，开始自动评分...")
-                for code in missing_analysis_codes:
-                    try:
-                        result = self.analyze_stock(code, "quant")
-                        detailed_results.append({
-                            "code": code,
-                            "verdict": result.get("verdict"),
-                            "total_score": result.get("score"),
-                            "signal_type": result.get("signal_type"),
-                            "comment": result.get("comment"),
-                        })
-                    except Exception as e:
-                        print(f"[get_analysis_results] 分析 {code} 失败: {e}")
-                        continue
+            # GET 接口不触发自动评分，直接跳过缺失的分析结果
+            # 当有缺失时，只返回已存在的分析结果
+            if missing_analysis_codes:
+                print(f"[get_analysis_results] 检测到 {len(missing_analysis_codes)} 个候选股票缺少分析结果（仅读模式，不触发补算）")
 
             if detailed_results:
                 # 按 verdict 优先级和 score 排序，生成 Top 5

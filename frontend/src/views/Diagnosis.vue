@@ -253,7 +253,7 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="in_active_pool" width="78" align="center">
+          <el-table-column prop="in_active_pool" width="90" align="center">
             <template #header>
               <span class="table-header-label">
                 活跃池
@@ -283,7 +283,7 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="prefilter_passed" width="88" align="center">
+          <el-table-column prop="prefilter_passed" width="100" align="center">
             <template #header>
               <span class="table-header-label">
                 前置过滤
@@ -307,7 +307,7 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="score" width="80" align="center">
+          <el-table-column prop="score" width="100" align="center">
             <template #header>
               <span class="table-header-label">
                 量化评分
@@ -323,7 +323,7 @@
               <span v-else>-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="verdict" label="量化结论" width="88" align="center">
+          <el-table-column prop="verdict" label="量化结论" width="100" align="center">
             <template #default="{ row }">
               <el-tag v-if="row.verdict" :type="getVerdictType(row.verdict)" size="small">
                 {{ row.verdict }}
@@ -331,7 +331,7 @@
               <span v-else>-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="signal_type" label="信号类型" width="96" align="center">
+          <el-table-column prop="signal_type" label="信号类型" width="110" align="center">
             <template #default="{ row }">
               <el-tag v-if="row.signal_type" :type="getSignalTagType(row.signal_type)" size="small">
                 {{ getSignalLabel(row.signal_type) }}
@@ -339,7 +339,7 @@
               <span v-else>-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="tomorrow_star_pass" label="明日之星" width="88" align="center">
+          <el-table-column prop="tomorrow_star_pass" label="明日之星" width="100" align="center">
             <template #default="{ row }">
               <el-tag :type="getTomorrowStarTagType(row.tomorrow_star_pass)" size="small">
                 {{ getGateLabel(row.tomorrow_star_pass) }}
@@ -539,6 +539,7 @@ onDeactivated(() => {
     clearInterval(pollingTimer)
     pollingTimer = null
   }
+  stopAnalysisPolling()
   cancelDiagnosisPageRequests()
   refreshingHistory.value = false
   analyzing.value = false
@@ -554,6 +555,7 @@ onUnmounted(() => {
     clearInterval(pollingTimer)
     pollingTimer = null
   }
+  stopAnalysisPolling()
   cancelDiagnosisPageRequests()
 })
 
@@ -582,6 +584,8 @@ async function searchStock(requestId: number) {
   cancelRequest('historyRefresh')
   cancelRequest('historyStatus')
   cancelRequest('analyze')
+  cancelRequest('analyzeResult')
+  stopAnalysisPolling()
 
   let matchedStock: DiagnosisSearchSuggestion | null = null
   try {
@@ -1086,6 +1090,10 @@ async function loadHistoryData() {
   }
 }
 
+// 分析任务轮询定时器
+let analysisPollingTimer: ReturnType<typeof setInterval> | null = null
+let currentAnalysisTaskId: number | null = null
+
 async function analyzeStock() {
   if (!configStore.dataInitialized) {
     ElMessage.info('请先完成首次初始化')
@@ -1095,42 +1103,110 @@ async function analyzeStock() {
 
   const signal = beginRequest('analyze')
   analyzing.value = true
+
   try {
-    const data = await apiAnalysis.analyze(stockCode.value, { signal })
-    stockName.value = data.name || stockName.value
-    const analysis: DiagnosisAnalysisDetails = data.analysis || {}
-    analysisResult.value = {
-      score: data.score,
-      b1_passed: data.b1_passed,
-      verdict: data.verdict,
-      // 从 analysis 对象中获取所有字段
-      signal_type: analysis.signal_type,
-      signal_reasoning: analysis.signal_reasoning,
-      comment: analysis.comment,
-      // B1 检查详情
-      kdj_j: analysis.kdj_j,
-      zx_long_pos: analysis.zx_long_pos,
-      weekly_ma_aligned: analysis.weekly_ma_aligned,
-      volume_healthy: analysis.volume_healthy,
-      // 评分明细
-      scores: analysis.scores || {},
-      trend_reasoning: analysis.trend_reasoning || '',
-      position_reasoning: analysis.position_reasoning || '',
-      volume_reasoning: analysis.volume_reasoning || '',
-      abnormal_move_reasoning: analysis.abnormal_move_reasoning || '',
+    // 1. 提交分析任务
+    const taskResponse = await apiAnalysis.analyze(stockCode.value, { signal })
+    currentAnalysisTaskId = taskResponse.task_id
+
+    if (taskResponse.status === 'existing') {
+      ElMessage.info(taskResponse.message || '复用现有分析任务')
+    } else {
+      ElMessage.info('分析任务已创建，正在执行...')
     }
 
-    // 刷新历史数据
-    await loadHistoryData()
-    persistDiagnosisState()
-
-    ElMessage.success('分析完成')
+    // 2. 开始轮询任务状态
+    startAnalysisPolling()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
-    ElMessage.error('分析失败: ' + error.message)
-  } finally {
-    finishRequest('analyze', signal)
+    ElMessage.error('提交分析任务失败: ' + error.message)
     analyzing.value = false
+    finishRequest('analyze', signal)
+  }
+}
+
+function startAnalysisPolling() {
+  // 清除之前的轮询
+  stopAnalysisPolling()
+
+  // 立即检查一次
+  checkAnalysisResult()
+
+  // 每2秒轮询一次
+  analysisPollingTimer = setInterval(() => {
+    checkAnalysisResult()
+  }, 2000)
+}
+
+function stopAnalysisPolling() {
+  if (analysisPollingTimer) {
+    clearInterval(analysisPollingTimer)
+    analysisPollingTimer = null
+  }
+  currentAnalysisTaskId = null
+}
+
+async function checkAnalysisResult() {
+  if (!stockCode.value) return
+
+  const signal = beginRequest('analyzeResult')
+  try {
+    const data = await apiAnalysis.getResult(stockCode.value, { signal })
+
+    if (data.status === 'processing') {
+      // 任务还在处理中，更新进度信息
+      if (data.progress_meta) {
+        const meta = data.progress_meta
+        const progressText = meta.message || meta.stage_label || '分析中...'
+        // 可以在界面上显示进度
+      }
+    } else if (data.status === 'completed') {
+      // 任务完成，更新分析结果
+      stopAnalysisPolling()
+
+      stockName.value = data.name || stockName.value
+      const analysis = data.analysis || {}
+      analysisResult.value = {
+        score: data.score,
+        b1_passed: data.b1_passed,
+        verdict: data.verdict,
+        // 从 analysis 对象中获取所有字段
+        signal_type: analysis.signal_type,
+        signal_reasoning: analysis.signal_reasoning,
+        comment: analysis.comment,
+        // B1 检查详情
+        kdj_j: analysis.kdj_j,
+        zx_long_pos: analysis.zx_long_pos,
+        weekly_ma_aligned: analysis.weekly_ma_aligned,
+        volume_healthy: analysis.volume_healthy,
+        // 评分明细
+        scores: analysis.scores || {},
+        trend_reasoning: analysis.trend_reasoning || '',
+        position_reasoning: analysis.position_reasoning || '',
+        volume_reasoning: analysis.volume_reasoning || '',
+        abnormal_move_reasoning: analysis.abnormal_move_reasoning || '',
+      }
+
+      // 刷新历史数据
+      await loadHistoryData()
+      persistDiagnosisState()
+
+      ElMessage.success('分析完成')
+      analyzing.value = false
+    } else if (data.status === 'failed') {
+      // 任务失败
+      stopAnalysisPolling()
+      ElMessage.error(data.error || '分析任务执行失败')
+      analyzing.value = false
+    }
+  } catch (error: any) {
+    if (isRequestCanceled(error)) {
+      stopAnalysisPolling()
+      return
+    }
+    // 忽略轮询错误，继续轮询
+  } finally {
+    finishRequest('analyzeResult', signal)
   }
 }
 

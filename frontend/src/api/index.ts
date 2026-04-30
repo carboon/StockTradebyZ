@@ -9,8 +9,10 @@ import type {
   ConfigResponse,
   DataStatus,
   DiagnosisAnalyzeResponse,
+  DiagnosisAnalyzeTaskResponse,
   DiagnosisHistoryResponse,
   DiagnosisHistoryStatusResponse,
+  DiagnosisResultResponse,
   FreshnessResponse,
   IncrementalUpdateResponse,
   IncrementalUpdateStatus,
@@ -25,6 +27,7 @@ import type {
   TaskListResponse,
   TaskLogListResponse,
   TaskOverviewResponse,
+  TaskProgressMeta,
   TaskRunningResponse,
   TaskResponse,
   TomorrowStarDatesResponse,
@@ -112,6 +115,19 @@ export function isRequestCanceled(error: unknown): boolean {
   return axios.isCancel(error) || (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_CANCELED')
 }
 
+// 健康检查（无需认证）
+export async function checkHealth(): Promise<{ status: string } | null> {
+  try {
+    // 直接使用 axios 创建一个不携带认证信息的请求
+    const response = await axios.get(`${API_BASE_URL}/health`, {
+      timeout: 5000,
+    })
+    return response.data
+  } catch {
+    return null
+  }
+}
+
 // API 方法
 export const apiConfig = {
   // 获取所有配置
@@ -185,9 +201,13 @@ export const apiAnalysis = {
       { ...withRequestOptions(options, TIMEOUTS.long), params: { days, clean: true } },
     ),
 
-  // 启动单股分析
+  // 启动单股分析（后台任务模式）
   analyze: (code: string, options?: RequestOptions) =>
-    api.post<{ code: string }, DiagnosisAnalyzeResponse>('/v1/analysis/diagnosis/analyze', { code }, withRequestOptions(options, TIMEOUTS.long)),
+    api.post<{ code: string }, DiagnosisAnalyzeTaskResponse>('/v1/analysis/diagnosis/analyze', { code }, withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 获取单股分析结果
+  getResult: (code: string, options?: RequestOptions) =>
+    api.get<never, DiagnosisResultResponse>(`/v1/analysis/diagnosis/${code}/result`, withRequestOptions(options, TIMEOUTS.standard)),
 }
 
 export const apiWatchlist = {

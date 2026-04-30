@@ -274,6 +274,30 @@ export interface DiagnosisAnalyzeResponse {
   } | null
 }
 
+export interface DiagnosisAnalyzeTaskResponse {
+  task_id: number
+  code: string
+  status: 'pending' | 'existing'
+  ws_url: string
+  message: string
+}
+
+export interface DiagnosisResultResponse {
+  code: string
+  name?: string
+  status: 'processing' | 'completed' | 'failed'
+  task_id?: number
+  task_status?: Task['status']
+  progress?: number
+  progress_meta?: TaskProgressMeta
+  error?: string
+  current_price?: number
+  b1_passed?: boolean
+  score?: number
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  analysis?: DiagnosisAnalysisDetails
+}
+
 export interface WatchlistResponse {
   items: WatchlistItem[]
   total: number

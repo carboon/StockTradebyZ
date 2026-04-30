@@ -90,9 +90,13 @@ class DailyB1Check(Base):
 class Watchlist(Base):
     """重点观察表"""
     __tablename__ = "watchlist"
+    __table_args__ = (
+        UniqueConstraint("user_id", "code", name="uq_watchlist_user_code"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, unique=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
     add_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     position_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

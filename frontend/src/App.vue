@@ -1,12 +1,20 @@
 <template>
-  <PageLayout />
+  <!-- 登录/注册页：独立布局，无状态检查干扰 -->
+  <template v-if="isAuthPage">
+    <RouterView />
+  </template>
+
+  <!-- 主应用页面：带完整布局和状态提示 -->
+  <PageLayout v-else />
+
+  <!-- 模态对话框：仅用于关键系统问题，登录页不显示 -->
   <el-dialog
+    v-if="!isAuthPage"
     :model-value="showStatusGate"
     :title="gateTitle"
     width="520px"
-    :show-close="false"
-    :close-on-click-modal="false"
-    :close-on-press-escape="false"
+    :show-close="true"
+    :close-on-click-modal="true"
   >
     <p class="gate-text">{{ gateDescription }}</p>
     <p class="gate-text gate-text-muted">{{ gateMessage }}</p>
@@ -20,31 +28,53 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { RouterView } from 'vue-router'
 import PageLayout from '@/components/common/PageLayout.vue'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
+import { useAuthStore } from '@/store/auth'
 
 const router = useRouter()
 const route = useRoute()
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
+const authStore = useAuthStore()
 
+// 登录/注册页：使用独立全屏布局，不参与任何状态检查
+// 使用 route.name 而不是 route.path，因为路由初始化时 path 可能为空
+const isAuthPage = computed(() => {
+  const name = route.name as string
+  return name === 'Login' || name === 'Register'
+})
+
+// 是否已登录
+const isLoggedIn = computed(() => authStore.isAuthenticated)
+
+// 系统状态检查的白名单路由（这些路由不会被强制跳转）
 const allowedRoutes = new Set(['/config', '/system-info', '/update'])
 const isAllowedRoute = computed(() => allowedRoutes.has(route.path))
 
+// 状态类型判定
 const gateType = computed<'api-unavailable' | 'tushare-unready' | 'initialization-pending' | null>(() => {
   if (!configStore.apiAvailable) return 'api-unavailable'
   if (configStore.tushareStatus && !configStore.tushareReady) return 'tushare-unready'
   if (configStore.tushareReady && !configStore.dataInitialized) return 'initialization-pending'
   return null
 })
-const showStatusGate = computed(() => gateType.value !== null && !isAllowedRoute.value)
+
+// 是否显示模态对话框（登录页或未登录时不显示）
+const showStatusGate = computed(() => {
+  if (isAuthPage.value || !isLoggedIn.value) return false
+  return gateType.value !== null && !isAllowedRoute.value
+})
+
 const gateTitle = computed(() => {
   if (gateType.value === 'api-unavailable') return '后端服务暂不可用'
   if (gateType.value === 'tushare-unready') return '请先完成 Tushare 配置'
   if (gateType.value === 'initialization-pending') return '请先完成首次初始化'
   return ''
 })
+
 const gateDescription = computed(() => {
   if (gateType.value === 'api-unavailable') {
     return '前端已经启动，但当前无法连接后端服务。配置保存、数据更新、诊断分析等功能暂不可用。'
@@ -57,6 +87,7 @@ const gateDescription = computed(() => {
   }
   return ''
 })
+
 const gateMessage = computed(() => {
   if (gateType.value === 'api-unavailable') {
     return configStore.statusError || '请确认后端服务已成功启动，然后重新检查。'
@@ -69,11 +100,16 @@ const gateMessage = computed(() => {
   }
   return ''
 })
+
 const gateActionLabel = computed(() => {
   return gateType.value === 'initialization-pending' ? '前往任务中心' : '前往配置'
 })
 
+// 路由强制跳转逻辑（登录页不受影响）
 function enforceRouteAccess() {
+  // 登录页不参与任何路由强制跳转
+  if (isAuthPage.value) return
+
   if (gateType.value === 'tushare-unready' && !isAllowedRoute.value) {
     router.replace('/config')
     return
@@ -84,6 +120,11 @@ function enforceRouteAccess() {
 }
 
 async function refreshStatus() {
+  // 只对已登录用户检查状态
+  if (!isLoggedIn.value) {
+    return
+  }
+
   try {
     await configStore.checkTushareStatus()
     enforceRouteAccess()
@@ -99,15 +140,26 @@ function goConfig() {
   }
 }
 
+// 初始化：非登录页且已登录时才检查状态
 onMounted(async () => {
-  await refreshStatus()
+  if (!isAuthPage.value && isLoggedIn.value) {
+    await refreshStatus()
+  }
 })
 
+// 监听路由和状态变化
 watch(() => [route.path, gateType.value], () => {
   enforceRouteAccess()
 })
 
-watch(() => [gateType.value, configStore.statusError, configStore.initializationMessage], () => {
+// 通知栏提示（仅已登录用户在非登录页显示）
+watch(() => [gateType.value, configStore.statusError, configStore.initializationMessage, isLoggedIn.value], () => {
+  // 登录页或未登录时，不显示系统状态通知
+  if (isAuthPage.value || !isLoggedIn.value) {
+    noticeStore.clearNotice()
+    return
+  }
+
   if (gateType.value === 'api-unavailable') {
     noticeStore.setNotice({
       type: 'error',

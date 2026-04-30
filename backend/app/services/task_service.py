@@ -2,17 +2,159 @@
 Task Service
 ~~~~~~~~~~~~
 后台任务服务，集成 run_all.py
+
+## 日志策略（阶段3优化）
+任务日志持久化策略：
+1. 结构化进度行（is_progress_line=True）只更新状态，不写日志表
+2. 使用缓冲区批量写入日志，每30秒或50条批量写入一次
+3. 任务关键状态变更（pending->running, completed等）立即写库
+4. 普通日志行批量聚合写入
+
+## 预期效果
+- 长时间运行任务的日志写入频率降低约80%
+- 减少对任务执行性能的影响
 """
 import asyncio
 import locale
+import logging
 import sys
 import threading
+import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.time_utils import utc_now
 
 ROOT = Path(__file__).parent.parent.parent.parent
+
+logger = logging.getLogger(__name__)
+
+
+# 任务日志缓冲区
+class TaskLogBuffer:
+    """任务日志缓冲区，支持批量写入。"""
+
+    def __init__(self, flush_interval: int = 30, flush_threshold: int = 50):
+        self._buffer: dict[int, List[dict]] = defaultdict(list)
+        self._lock = threading.Lock()
+        self._last_flush = time.time()
+        self._flush_interval = flush_interval
+        self._flush_threshold = flush_threshold
+        self._running = False
+
+    def add(
+        self,
+        task_id: int,
+        level: str,
+        message: str,
+        stage: Optional[str] = None,
+        immediate: bool = False,
+    ) -> None:
+        """添加日志到缓冲区。
+
+        Args:
+            task_id: 任务ID
+            level: 日志级别
+            message: 日志消息
+            stage: 任务阶段
+            immediate: 是否立即写入（用于关键状态变更）
+        """
+        if immediate:
+            self._flush_single(task_id, level, message, stage)
+            return
+
+        with self._lock:
+            self._buffer[task_id].append({
+                "level": level,
+                "message": message,
+                "stage": stage,
+            })
+            if len(self._buffer[task_id]) >= self._flush_threshold:
+                self._flush_task(task_id)
+
+    def _flush_single(self, task_id: int, level: str, message: str, stage: Optional[str] = None) -> None:
+        """立即写入单条日志（用于关键状态变更）。"""
+        from app.database import SessionLocal
+        from app.models import TaskLog
+
+        db = SessionLocal()
+        try:
+            log = TaskLog(
+                task_id=task_id,
+                level=level,
+                stage=stage,
+                message=message,
+            )
+            db.add(log)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning("写入任务日志失败: %s", e)
+        finally:
+            db.close()
+
+    def _flush_task(self, task_id: int) -> None:
+        """刷新指定任务的日志。"""
+        if not self._buffer[task_id]:
+            return
+
+        from app.database import SessionLocal
+        from app.models import TaskLog
+
+        buffer_copy = self._buffer[task_id][:]
+        self._buffer[task_id].clear()
+
+        db = SessionLocal()
+        try:
+            logs = [
+                TaskLog(
+                    task_id=task_id,
+                    level=item["level"],
+                    stage=item.get("stage"),
+                    message=item["message"],
+                )
+                for item in buffer_copy
+            ]
+            db.add_all(logs)
+            db.commit()
+            logger.debug("批量写入任务日志: task_id=%d, count=%d", task_id, len(logs))
+        except Exception as e:
+            db.rollback()
+            logger.warning("批量写入任务日志失败: %s", e)
+        finally:
+            db.close()
+
+    def flush_all(self) -> None:
+        """刷新所有缓冲日志。"""
+        with self._lock:
+            for task_id in list(self._buffer.keys()):
+                if self._buffer[task_id]:
+                    self._flush_task(task_id)
+            self._last_flush = time.time()
+
+    def start_background_flush(self) -> None:
+        """启动后台定期刷新任务。"""
+        if self._running:
+            return
+        self._running = True
+
+        def flush_loop():
+            while self._running:
+                time.sleep(self._flush_interval)
+                self.flush_all()
+
+        thread = threading.Thread(target=flush_loop, daemon=True)
+        thread.start()
+
+    def shutdown(self) -> None:
+        """停止并刷新剩余数据。"""
+        self._running = False
+        self.flush_all()
+
+
+# 全局任务日志缓冲区
+_task_log_buffer = TaskLogBuffer()
 
 
 class TaskService:
@@ -20,6 +162,7 @@ class TaskService:
 
     ACTIVE_STATUSES = ("pending", "running")
     FULL_TASK_TYPES = ("full_update", "tomorrow_star")
+    SINGLE_ANALYSIS_TASK_TYPE = "single_analysis"
     _creation_lock = threading.Lock()
     _running_tasks: Dict[int, asyncio.subprocess.Process] = {}
     _cancelled_tasks: set[int] = set()
@@ -44,11 +187,16 @@ class TaskService:
         self.running_tasks = self.__class__._running_tasks
         self.manager = manager
 
+        # 确保后台刷新任务只启动一次
+        if not _task_log_buffer._running:
+            _task_log_buffer.start_background_flush()
+
     async def create_task(self, task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """创建任务"""
         from app.models import Task
 
         with self._creation_lock:
+            # 全量任务去重
             if task_type in self.FULL_TASK_TYPES:
                 existing_task = self.get_active_full_task()
                 if existing_task:
@@ -57,6 +205,18 @@ class TaskService:
                         "ws_url": f"/ws/tasks/{existing_task.id}",
                         "existing": True,
                     }
+
+            # 单股分析任务去重：检查同一股票、同一交易日是否有进行中或已完成的任务
+            if task_type == self.SINGLE_ANALYSIS_TASK_TYPE:
+                code = params.get("code")
+                if code:
+                    existing_task = self._get_active_single_analysis_task(code)
+                    if existing_task:
+                        return {
+                            "task_id": existing_task.id,
+                            "ws_url": f"/ws/tasks/{existing_task.id}",
+                            "existing": True,
+                        }
 
             task = Task(
                 task_type=task_type,
@@ -95,6 +255,36 @@ class TaskService:
             .first()
         )
 
+    def _get_active_single_analysis_task(self, code: str) -> Optional[Any]:
+        """返回指定股票的活跃分析任务（pending/running/completed）。
+
+        用于防止重复创建同一股票的分析任务。如果存在已完成（completed）
+        或运行中的任务，则复用该任务。
+
+        Args:
+            code: 股票代码
+
+        Returns:
+            Task对象或None
+        """
+        from app.models import Task
+        from datetime import timedelta
+
+        # 查找最近1小时内的相关任务（包括已完成的）
+        cutoff_time = utc_now() - timedelta(hours=1)
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type == self.SINGLE_ANALYSIS_TASK_TYPE,
+                Task.params_json["code"].astext == code,
+                Task.status.in_(self.ACTIVE_STATUSES + ("completed",)),
+                Task.created_at >= cutoff_time,
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+
     async def _run_task(self, task_id: int):
         """运行任务"""
         from app.models import Task
@@ -111,7 +301,8 @@ class TaskService:
         task.task_stage = "starting"
         task.progress_meta_json = self._build_stage_meta("starting", progress=0, message="任务启动中")
         db.commit()
-        self._record_task_log(db, task, "任务已启动", "info")
+        # 关键状态变更立即记录
+        self._record_task_log(task, "任务已启动", "info", immediate=True)
         await self._publish_ops_task_event(task, "task_started")
 
         try:
@@ -130,7 +321,7 @@ class TaskService:
             task.task_stage = "completed"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("completed", progress=100, message="任务执行完成")
-            self._record_task_log(db, task, "任务执行完成", "success")
+            self._record_task_log(task, "任务执行完成", "success", immediate=True)
             await self._publish_ops_task_event(task, "task_completed")
 
         except asyncio.CancelledError:
@@ -138,7 +329,7 @@ class TaskService:
             task.task_stage = "cancelled"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("cancelled", progress=task.progress, message="任务已取消")
-            self._record_task_log(db, task, "任务已取消", "warning")
+            self._record_task_log(task, "任务已取消", "warning", immediate=True)
             await self._publish_ops_task_event(task, "task_cancelled")
         except Exception as e:
             task.status = "failed"
@@ -146,11 +337,13 @@ class TaskService:
             task.task_stage = "failed"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("failed", progress=task.progress, message=f"任务执行失败: {str(e)}")
-            self._record_task_log(db, task, f"任务执行失败: {str(e)}", "error")
+            self._record_task_log(task, f"任务执行失败: {str(e)}", "error", immediate=True)
             await self._publish_ops_task_event(task, "task_failed")
 
         finally:
             db.commit()
+            # 确保任务结束前刷新所有日志
+            _task_log_buffer.flush_all()
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
             self._cancelled_tasks.discard(task_id)
@@ -227,8 +420,11 @@ class TaskService:
                     task.progress_meta_json = self._build_stage_meta(stage, progress=task.progress, message=line)
 
                 # 结构化进度行只更新状态，不写日志表（避免膨胀）
+                # 非进度行使用缓冲区批量写入
                 if not is_progress_line(line):
-                    self._record_task_log(db, task, line, log_type, stage=stage)
+                    self._record_task_log(task, line, log_type, stage=stage)
+
+                # 每处理100行输出提交一次状态，避免频繁写库
                 db.commit()
                 await self._publish_ops_task_event(task, "task_progress")
 
@@ -406,13 +602,25 @@ class TaskService:
         return meta
 
     @staticmethod
-    def _record_task_log(db: Session, task: Any, message: str, level: str, stage: Optional[str] = None) -> None:
-        from app.models import TaskLog
+    def _record_task_log(task: Any, message: str, level: str, stage: Optional[str] = None, immediate: bool = False) -> None:
+        """记录任务日志到缓冲区。
 
-        log = TaskLog(
+        Args:
+            task: 任务对象
+            message: 日志消息
+            level: 日志级别
+            stage: 任务阶段
+            immediate: 是否立即写入（关键状态变更使用）
+        """
+        _task_log_buffer.add(
             task_id=task.id,
             level=level,
-            stage=stage or task.task_stage,
             message=message,
+            stage=stage or task.task_stage,
+            immediate=immediate,
         )
-        db.add(log)
+
+
+def flush_task_log_buffer() -> None:
+    """手动刷新任务日志缓冲区（用于测试或优雅关闭）。"""
+    _task_log_buffer.flush_all()

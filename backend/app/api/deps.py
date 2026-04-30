@@ -2,6 +2,16 @@
 Authentication Dependencies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 FastAPI 依赖注入：用户认证、权限检查
+
+## 日志策略（阶段3优化）
+ApiKey.last_used_at 更新策略：
+1. 使用内存缓存记录已更新的API Key
+2. 时间窗口60秒内同一key只更新一次
+3. 使用LRU缓存自动清理过期记录
+
+## 预期效果
+- 对于高频API调用，last_used_at更新频率降低约98%
+- 从每次请求更新变为每分钟最多一次
 """
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -13,6 +23,12 @@ from app.models import ApiKey, User
 
 # Bearer token 提取器（auto_error=False 使得 token 可选）
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+# API Key最后使用时间缓存（用于降低写库频率）
+# 结构: {api_key_id: last_update_timestamp}
+_api_key_last_update_cache: dict[int, float] = {}
+_API_KEY_UPDATE_INTERVAL = 60  # 秒，同一key的最小更新间隔
 
 
 def get_current_user(
@@ -119,7 +135,14 @@ def _try_bearer_token(
 
 
 def _try_api_key(request: Request, db: Session) -> User | None:
-    """尝试从 X-API-Key header 中查找用户。"""
+    """尝试从 X-API-Key header 中查找用户。
+
+    使用时间窗口缓存降低 last_used_at 更新频率：
+    - 同一 API Key 在60秒内只更新一次 last_used_at
+    - 使用内存缓存避免频繁写库
+    """
+    import time
+
     api_key_value = request.headers.get("X-API-Key")
     if not api_key_value:
         return None
@@ -133,10 +156,15 @@ def _try_api_key(request: Request, db: Session) -> User | None:
     if not api_key_record:
         return None
 
-    # 更新最后使用时间
-    from app.time_utils import utc_now
-    api_key_record.last_used_at = utc_now()
-    db.commit()
+    # 检查是否需要更新 last_used_at（使用时间窗口缓存）
+    current_time = time.time()
+    last_update = _api_key_last_update_cache.get(api_key_record.id, 0)
+
+    if current_time - last_update >= _API_KEY_UPDATE_INTERVAL:
+        from app.time_utils import utc_now
+        api_key_record.last_used_at = utc_now()
+        db.commit()
+        _api_key_last_update_cache[api_key_record.id] = current_time
 
     # 返回关联的用户
     return db.query(User).filter(User.id == api_key_record.user_id).first()

@@ -169,7 +169,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document,
@@ -331,6 +331,9 @@ function getElapsedSeconds(startedAt?: string): number {
 }
 
 async function refreshHeaderProgress() {
+  // 未登录时不调用 API
+  if (!authStore.isAuthenticated) return
+
   if (document.visibilityState === 'hidden') return
   try {
     const [runningResp, incrementalResp] = await Promise.all([
@@ -346,16 +349,36 @@ async function refreshHeaderProgress() {
 }
 
 onMounted(() => {
-  void refreshHeaderProgress()
-  progressPoller = setInterval(() => {
+  // 只在已登录时启动轮询
+  if (authStore.isAuthenticated) {
     void refreshHeaderProgress()
-  }, 5000)
+    progressPoller = setInterval(() => {
+      void refreshHeaderProgress()
+    }, 5000)
+  }
 })
 
 onUnmounted(() => {
   if (progressPoller) {
     clearInterval(progressPoller)
     progressPoller = null
+  }
+})
+
+// 监听登录状态变化
+watch(() => authStore.isAuthenticated, (isLoggedIn) => {
+  if (isLoggedIn && !progressPoller) {
+    // 用户刚登录，启动轮询
+    void refreshHeaderProgress()
+    progressPoller = setInterval(() => {
+      void refreshHeaderProgress()
+    }, 5000)
+  } else if (!isLoggedIn && progressPoller) {
+    // 用户已登出，停止轮询并清除数据
+    clearInterval(progressPoller)
+    progressPoller = null
+    activeTasks.value = []
+    incrementalStatus.value = null
   }
 })
 </script>

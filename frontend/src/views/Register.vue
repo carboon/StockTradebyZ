@@ -7,6 +7,23 @@
         <p>创建你的 StockTrader 账户</p>
       </div>
 
+      <!-- 后端状态提示（不阻塞输入） -->
+      <el-alert
+        v-if="!backendStatus.ok"
+        :type="backendStatus.type"
+        :closable="false"
+        class="backend-status-alert"
+        show-icon
+      >
+        <template #title>
+          {{ backendStatus.title }}
+        </template>
+        <template #default>
+          {{ backendStatus.message }}
+          <el-button link type="primary" @click="checkBackend">重新检查</el-button>
+        </template>
+      </el-alert>
+
       <el-form
         ref="formRef"
         :model="form"
@@ -20,6 +37,7 @@
             placeholder="3-50个字符"
             :prefix-icon="User"
             size="large"
+            :disabled="loading"
           />
         </el-form-item>
 
@@ -28,6 +46,7 @@
             v-model="form.displayName"
             placeholder="显示名称"
             size="large"
+            :disabled="loading"
           />
         </el-form-item>
 
@@ -39,6 +58,7 @@
             :prefix-icon="Lock"
             size="large"
             show-password
+            :disabled="loading"
           />
         </el-form-item>
 
@@ -50,6 +70,7 @@
             :prefix-icon="Lock"
             size="large"
             show-password
+            :disabled="loading"
             @keyup.enter="handleRegister"
           />
         </el-form-item>
@@ -62,7 +83,7 @@
             class="login-btn"
             @click="handleRegister"
           >
-            注册
+            {{ loading ? '注册中...' : '注册' }}
           </el-button>
         </el-form-item>
       </el-form>
@@ -76,17 +97,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { TrendCharts, User, Lock } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
+import { checkHealth } from '@/api'
 
 const router = useRouter()
 const authStore = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
+
+// 后端健康状态
+const backendHealthy = ref(true)
 
 const form = reactive({
   username: '',
@@ -94,6 +119,29 @@ const form = reactive({
   password: '',
   confirmPassword: '',
 })
+
+// 后端状态（用于显示提示，但不阻塞注册）
+const backendStatus = computed(() => {
+  if (backendHealthy.value) {
+    return { ok: true, type: 'success' as const, title: '', message: '' }
+  }
+  return {
+    ok: false,
+    type: 'warning' as const,
+    title: '后端服务连接异常',
+    message: '无法连接到后端服务，请确认服务已启动。您可以尝试点击注册，系统会自动重试。',
+  }
+})
+
+async function checkBackend() {
+  const result = await checkHealth()
+  backendHealthy.value = result !== null
+  if (backendHealthy.value) {
+    ElMessage.success('后端服务连接正常')
+  } else {
+    ElMessage.warning('后端服务仍不可用')
+  }
+}
 
 const validateConfirm = (_rule: unknown, value: string, callback: (err?: Error) => void) => {
   if (value !== form.password) {
@@ -127,15 +175,24 @@ async function handleRegister() {
     try {
       await authStore.register(form.username, form.password, form.displayName || undefined)
       ElMessage.success('注册成功')
-      router.push('/')
+      router.push('/login')
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '注册失败'
       ElMessage.error(message)
+      // 如果是网络错误，更新后端状态
+      if (message.includes('fetch') || message.includes('网络') || message.includes('连接') || message.includes('ECONNREFUSED')) {
+        backendHealthy.value = false
+      }
     } finally {
       loading.value = false
     }
   })
 }
+
+// 注册页挂载时检查后端状态
+onMounted(async () => {
+  await checkBackend()
+})
 </script>
 
 <style scoped lang="scss">
@@ -158,7 +215,7 @@ async function handleRegister() {
 
 .login-header {
   text-align: center;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 
   h1 {
     margin: 12px 0 4px;
@@ -170,6 +227,16 @@ async function handleRegister() {
   p {
     color: #64748b;
     font-size: 14px;
+  }
+}
+
+.backend-status-alert {
+  margin-bottom: 20px;
+
+  :deep(.el-alert__content) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 }
 

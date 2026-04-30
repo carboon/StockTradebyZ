@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker, scoped_session
 
+from app.auth import create_access_token, hash_password
 from app.database import Base, get_db
 from app.main import app
+from app.models import User
 
 
 # ============================================
@@ -91,6 +93,8 @@ def test_client() -> Generator[TestClient, None, None]:
 
     自动创建和管理测试数据库。
     此 fixture 创建独立的数据库实例，适合不需要直接访问数据库的测试。
+
+    注意：此客户端会自动绕过身份验证要求，方便测试。
     """
     # 创建测试数据库引擎
     engine = create_engine(
@@ -105,19 +109,49 @@ def test_client() -> Generator[TestClient, None, None]:
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = TestingSessionLocal()
 
+    # 创建测试用户
+    test_user = User(
+        username="testuser",
+        hashed_password=hash_password("testpass123"),
+        display_name="Test User",
+        role="user",
+        is_active=True,
+        daily_quota=1000,
+    )
+    db.add(test_user)
+    db.commit()
+    db.refresh(test_user)
+
     def override_get_db() -> Generator[Session, None, None]:
         try:
             yield db
         finally:
             pass
 
+    # 绕过身份验证依赖 - 返回测试用户
+    from app.api import deps
+    original_get_current_user = deps.get_current_user
+    original_require_user = deps.require_user
+
+    def mock_get_current_user():
+        return test_user
+
+    def mock_require_user():
+        return test_user
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = mock_get_current_user
+    app.dependency_overrides[deps.get_current_active_user] = mock_get_current_user
+    app.dependency_overrides[deps.require_user] = mock_require_user
 
     try:
         with TestClient(app) as client:
             yield client
     finally:
         app.dependency_overrides.clear()
+        # 恢复原始函数
+        deps.get_current_user = original_get_current_user
+        deps.require_user = original_require_user
         db.close()
         # 清理所有表
         Base.metadata.drop_all(bind=engine)
@@ -138,6 +172,8 @@ def test_client_with_db() -> Generator[Any, None, None]:
 
             # 直接访问数据库验证
             configs = test_client_with_db.db.query(Config).all()
+
+    注意：此客户端会自动绕过身份验证要求，方便测试。
     """
     # 创建测试数据库引擎
     engine = create_engine(
@@ -152,19 +188,49 @@ def test_client_with_db() -> Generator[Any, None, None]:
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = TestingSessionLocal()
 
+    # 创建测试用户
+    test_user = User(
+        username="testuser",
+        hashed_password=hash_password("testpass123"),
+        display_name="Test User",
+        role="user",
+        is_active=True,
+        daily_quota=1000,
+    )
+    db.add(test_user)
+    db.commit()
+    db.refresh(test_user)
+
     def override_get_db() -> Generator[Session, None, None]:
         try:
             yield db
         finally:
             pass
 
+    # 绕过身份验证依赖 - 返回测试用户
+    from app.api import deps
+    original_get_current_user = deps.get_current_user
+    original_require_user = deps.require_user
+
+    def mock_get_current_user():
+        return test_user
+
+    def mock_require_user():
+        return test_user
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = mock_get_current_user
+    app.dependency_overrides[deps.get_current_active_user] = mock_get_current_user
+    app.dependency_overrides[deps.require_user] = mock_require_user
 
     try:
         with TestClient(app) as client:
             yield ____TestClientWithDb(client, db)
     finally:
         app.dependency_overrides.clear()
+        # 恢复原始函数
+        deps.get_current_user = original_get_current_user
+        deps.require_user = original_require_user
         db.close()
         # 清理所有表
         Base.metadata.drop_all(bind=engine)
@@ -267,6 +333,87 @@ def sample_pick_date() -> date:
     提供一个固定的测试日期，方便在测试中使用。
     """
     return date(2024, 1, 15)
+
+
+# ============================================
+# Authentication Fixtures
+# ============================================
+
+
+@pytest.fixture(scope="function")
+def test_user(test_db: Session) -> User:
+    """
+    创建测试用户
+
+    为需要认证的测试提供一个已注册的测试用户。
+    """
+    user = User(
+        username="testuser",
+        hashed_password=hash_password("testpass123"),
+        display_name="Test User",
+        role="user",
+        is_active=True,
+        daily_quota=1000,
+    )
+    test_db.add(user)
+    test_db.commit()
+    test_db.refresh(user)
+    return user
+
+
+@pytest.fixture(scope="function")
+def test_admin(test_db: Session) -> User:
+    """
+    创建测试管理员
+
+    为需要管理员权限的测试提供一个管理员用户。
+    """
+    admin = User(
+        username="testadmin",
+        hashed_password=hash_password("adminpass123"),
+        display_name="Test Admin",
+        role="admin",
+        is_active=True,
+        daily_quota=10000,
+    )
+    test_db.add(admin)
+    test_db.commit()
+    test_db.refresh(admin)
+    return admin
+
+
+@pytest.fixture(scope="function")
+def auth_headers(test_user: User) -> dict:
+    """
+    生成认证请求头
+
+    为需要认证的API请求提供Bearer token。
+    """
+    token = create_access_token({"sub": str(test_user.id), "role": test_user.role})
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture(scope="function")
+def admin_headers(test_admin: User) -> dict:
+    """
+    生成管理员认证请求头
+
+    为需要管理员权限的API请求提供Bearer token。
+    """
+    token = create_access_token({"sub": str(test_admin.id), "role": test_admin.role})
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture(scope="function")
+def authenticated_client(test_client_with_db: Any, test_user: User) -> Any:
+    """
+    带认证的测试客户端
+
+    自动包含用户认证token的测试客户端。
+    """
+    token = create_access_token({"sub": str(test_user.id), "role": test_user.role})
+    test_client_with_db.headers.update({"Authorization": f"Bearer {token}"})
+    return test_client_with_db
 
 
 # ============================================

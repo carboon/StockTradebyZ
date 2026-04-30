@@ -116,7 +116,7 @@ async def search_stocks(
 
 @router.get("/{code}", response_model=StockResponse)
 async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
-    """获取股票基本信息"""
+    """获取股票基本信息（只读模式，不触发自动同步）"""
     code = code.zfill(6)
     stock = db.query(Stock).filter(Stock.code == code).first()
 
@@ -133,19 +133,9 @@ async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(
             exists=True,
         )
 
-    try:
-        synced_stock = TushareService().sync_stock_to_db(db, code)
-        if synced_stock:
-            return StockResponse(
-                code=synced_stock.code,
-                name=synced_stock.name,
-                market=synced_stock.market,
-                industry=synced_stock.industry,
-                exists=exists,
-            )
-    except Exception:
-        pass
-
+    # GET 接口不触发自动同步（只读模式）
+    # 如果数据库中不存在，返回基本信息，不调用 sync_stock_to_db
+    # 数据同步应由后台任务负责
     return StockResponse(code=code, exists=exists)
 
 

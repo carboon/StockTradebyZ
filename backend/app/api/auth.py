@@ -234,17 +234,33 @@ def admin_update_user(user_id: int, body: AdminUserUpdate, admin: User = Depends
 
 @router.delete("/admin/users/{user_id}")
 def admin_disable_user(user_id: int, admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    """管理员：禁用用户"""
+    """管理员：禁用用户并级联删除其观察数据"""
     if user_id == admin.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能禁用自己")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+
+    # 级联删除用户的观察数据
+    from app.models import Watchlist, WatchlistAnalysis
+
+    # 删除观察记录的分析历史
+    db.query(WatchlistAnalysis).filter(
+        WatchlistAnalysis.watchlist_id.in_(
+            db.query(Watchlist.id).filter(Watchlist.user_id == user_id)
+        )
+    ).delete(synchronize_session=False)
+
+    # 删除用户的观察记录
+    deleted_count = db.query(Watchlist).filter(Watchlist.user_id == user_id).delete()
+    logger.info(f"级联删除用户 {user_id} 的 {deleted_count} 条观察记录")
+
+    # 禁用用户
     user.is_active = False
     db.commit()
     log_audit(user_id=admin.id, action="admin_disable_user", target_type="user", target_id=str(user_id))
     logger.info("管理员禁用用户: admin_id=%s, target_user_id=%s", admin.id, user_id)
-    return {"message": "用户已禁用"}
+    return {"message": "用户已禁用，相关观察数据已清理"}
 
 
 @router.get("/admin/usage/{target_user_id}", response_model=UsageStatsResponse)
