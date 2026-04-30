@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     # WebSocket 配置
     ws_heartbeat_interval: int = 30
 
+    # 认证配置
+    secret_key: str = "change-me-in-production-use-a-random-string"
+    access_token_expire_minutes: int = 1440  # 24 hours
+    admin_default_username: str = "admin"
+    admin_default_password: str = "admin123"
+
+    # 运行环境
+    environment: str = "development"  # development / production
+
 
 @lru_cache
 def get_settings() -> Settings:

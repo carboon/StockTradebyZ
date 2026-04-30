@@ -9,6 +9,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import require_user
 from app.database import get_db
 from app.models import Watchlist, WatchlistAnalysis, Stock
 from app.services.tushare_service import TushareService
@@ -195,7 +196,7 @@ def _calc_support_resistance(df) -> tuple[float | None, float | None]:
 
 
 @router.get("/", response_model=WatchlistResponse)
-async def get_watchlist(db: Session = Depends(get_db)) -> WatchlistResponse:
+async def get_watchlist(db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistResponse:
     """获取观察列表"""
     watchlist = db.query(Watchlist).filter(Watchlist.is_active == True).all()
 
@@ -220,7 +221,7 @@ async def get_watchlist(db: Session = Depends(get_db)) -> WatchlistResponse:
 
 
 @router.post("/", response_model=WatchlistItem)
-async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db)) -> WatchlistItem:
+async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistItem:
     """添加到观察列表"""
     code = request.code.zfill(6)
 
@@ -273,6 +274,7 @@ async def update_watchlist_item(
     item_id: int,
     request: WatchlistUpdateRequest,
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> WatchlistItem:
     """更新观察列表项"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
@@ -311,7 +313,7 @@ async def update_watchlist_item(
 
 
 @router.delete("/{item_id}")
-async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db)) -> dict:
+async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """删除观察列表项"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
     if not w:
@@ -325,7 +327,7 @@ async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db)) -> 
 
 
 @router.get("/{item_id}/analysis")
-async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db)) -> dict:
+async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """获取观察股票分析历史"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
     if not w:
@@ -366,7 +368,7 @@ async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db)) ->
 
 
 @router.post("/{item_id}/analyze")
-async def analyze_watchlist_item(item_id: int, db: Session = Depends(get_db)) -> dict:
+async def analyze_watchlist_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """立即分析重点观察股票"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
     if not w:
@@ -477,7 +479,7 @@ async def analyze_watchlist_item(item_id: int, db: Session = Depends(get_db)) ->
 
 
 @router.get("/{item_id}/chart")
-async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db)) -> dict:
+async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """获取观察股票 K线图数据"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id).first()
     if not w:
@@ -488,7 +490,7 @@ async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db)) -> di
     from app.schemas import KLineDataRequest
 
     kline_request = KLineDataRequest(code=w.code, days=120, include_weekly=True)
-    kline_data = await get_kline_data(kline_request, db)
+    kline_data = await get_kline_data(kline_request)
 
     return {
         "code": w.code,

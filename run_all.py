@@ -324,6 +324,10 @@ def main() -> None:
         "--start-from", type=int, default=1, metavar="N",
         help="从第 N 步开始执行（1~5），跳过前面的步骤",
     )
+    parser.add_argument(
+        "--db", action="store_true",
+        help="将 K 线数据写入数据库（传递给 fetch_kline 步骤）",
+    )
     args = parser.parse_args()
 
     start = args.start_from
@@ -377,7 +381,7 @@ def main() -> None:
                     print("[INFO] 数据文件虽已存在，但无法确认已是最新交易日，将执行步骤 1。")
             _run(
                 "1  拉取 K 线数据（fetch_kline）",
-                [PYTHON, "-m", "pipeline.fetch_kline"],
+                [PYTHON, "-m", "pipeline.fetch_kline"] + (["--db"] if args.db else []),
             )
 
     # ── 步骤 2：量化初选 ─────────────────────────────────────────────

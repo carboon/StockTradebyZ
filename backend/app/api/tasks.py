@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_admin_user, require_user
 from app.config import settings
 from app.database import get_db
 from app.models import Config, Task, TaskLog
@@ -123,7 +124,7 @@ def _build_environment_sections(tushare_service: TushareService, db: Session) ->
 
 
 @router.get("/status", response_model=DataStatusResponse)
-async def get_data_status() -> DataStatusResponse:
+async def get_data_status(user=Depends(require_user)) -> DataStatusResponse:
     """获取数据更新状态"""
     tushare_service = TushareService()
     status = tushare_service.check_data_status()
@@ -139,7 +140,7 @@ async def get_data_status() -> DataStatusResponse:
 
 
 @router.post("/start", response_model=TaskResponse)
-async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db)) -> TaskResponse:
+async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> TaskResponse:
     """启动全量更新"""
     # 导入 manager 实例
     from app.main import manager
@@ -184,6 +185,7 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
 async def start_incremental_update(
     end_date: Optional[str] = None,
     db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
 ) -> dict:
     """启动增量数据更新
 
@@ -253,7 +255,7 @@ async def start_incremental_update(
 
 
 @router.get("/incremental-status")
-async def get_incremental_status() -> dict:
+async def get_incremental_status(user=Depends(require_user)) -> dict:
     """获取增量更新状态"""
     from app.services.market_service import MarketService
 
@@ -282,7 +284,7 @@ async def get_incremental_status() -> dict:
 
 
 @router.get("/overview", response_model=TaskOverviewResponse)
-async def get_task_overview(db: Session = Depends(get_db)) -> TaskOverviewResponse:
+async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskOverviewResponse:
     import time
 
     now = time.time()
@@ -393,7 +395,7 @@ async def get_task_overview(db: Session = Depends(get_db)) -> TaskOverviewRespon
 
 
 @router.get("/running", response_model=TaskRunningResponse)
-async def get_running_tasks(db: Session = Depends(get_db)) -> TaskRunningResponse:
+async def get_running_tasks(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskRunningResponse:
     tasks = (
         db.query(Task)
         .filter(Task.status.in_(["pending", "running"]))
@@ -407,13 +409,13 @@ async def get_running_tasks(db: Session = Depends(get_db)) -> TaskRunningRespons
 
 
 @router.get("/environment", response_model=TaskEnvironmentResponse)
-async def get_task_environment(db: Session = Depends(get_db)) -> TaskEnvironmentResponse:
+async def get_task_environment(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskEnvironmentResponse:
     tushare_service = TushareService()
     return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service, db))
 
 
 @router.get("/diagnostics", response_model=TaskDiagnosticsResponse)
-async def get_task_diagnostics(db: Session = Depends(get_db)) -> TaskDiagnosticsResponse:
+async def get_task_diagnostics(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskDiagnosticsResponse:
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
     environment = _build_environment_sections(tushare_service, db)
@@ -521,6 +523,7 @@ async def get_tasks(
     status: Optional[str] = None,
     limit: int = 20,
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> TaskListResponse:
     """获取任务列表"""
     query = db.query(Task)
@@ -545,7 +548,7 @@ async def get_tasks(
 
 
 @router.get("/{task_id}/logs", response_model=TaskLogListResponse)
-async def get_task_logs(task_id: int, limit: int = 300, db: Session = Depends(get_db)) -> TaskLogListResponse:
+async def get_task_logs(task_id: int, limit: int = 300, db: Session = Depends(get_db), user=Depends(require_user)) -> TaskLogListResponse:
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -565,7 +568,7 @@ async def get_task_logs(task_id: int, limit: int = 300, db: Session = Depends(ge
 
 
 @router.get("/{task_id}", response_model=TaskItem)
-async def get_task(task_id: int, db: Session = Depends(get_db)) -> TaskItem:
+async def get_task(task_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> TaskItem:
     """获取任务详情"""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -574,7 +577,7 @@ async def get_task(task_id: int, db: Session = Depends(get_db)) -> TaskItem:
 
 
 @router.post("/{task_id}/cancel")
-async def cancel_task(task_id: int, db: Session = Depends(get_db)) -> dict:
+async def cancel_task(task_id: int, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """取消任务"""
     task_service = TaskService(db)
     success = await task_service.cancel_task(task_id)
@@ -601,7 +604,7 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @router.delete("/clear")
-async def clear_tasks(db: Session = Depends(get_db)) -> dict:
+async def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """清空历史任务"""
     try:
         # 删除所有已完成的任务

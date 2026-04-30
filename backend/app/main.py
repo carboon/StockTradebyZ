@@ -10,7 +10,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from sqlalchemy.orm import Session as DBSession
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -32,8 +33,8 @@ if pythonpath_entries:
 from app.config import settings
 from sqlalchemy import text
 
-from app.database import engine, Base
-from app.api import config, stock, analysis, watchlist, tasks
+from app.database import engine, Base, get_db
+from app.api import auth, config, stock, analysis, watchlist, tasks
 
 # 创建数据库表
 Base.metadata.create_all(bind=engine)
@@ -139,6 +140,35 @@ def ensure_task_center_schema() -> None:
 ensure_task_center_schema()
 
 
+def ensure_admin_user() -> None:
+    """首次启动时创建默认管理员账户。"""
+    from datetime import datetime, timezone
+
+    from app.auth import hash_password
+    from app.models import User
+    from app.time_utils import utc_now
+
+    with engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+        if count == 0:
+            now = utc_now()
+            conn.execute(
+                text(
+                    "INSERT INTO users (username, hashed_password, role, is_active, daily_quota, created_at, updated_at) "
+                    "VALUES (:username, :password, 'admin', 1, 10000, :now, :now)"
+                ),
+                {
+                    "username": settings.admin_default_username,
+                    "password": hash_password(settings.admin_default_password),
+                    "now": now,
+                },
+            )
+            print(f"已创建默认管理员账户: {settings.admin_default_username}")
+
+
+ensure_admin_user()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage FastAPI startup/shutdown lifecycle without deprecated hooks."""
@@ -160,7 +190,20 @@ app = FastAPI(
 # CORS 配置
 cors_origins = settings.cors_origins
 if isinstance(cors_origins, str):
-    cors_origins = [origin.strip() for origin in cors_origins.split(",")]
+    cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+
+# 生产环境严格 CORS：仅允许配置的域名
+# 开发环境：自动补充 localhost 来源
+if settings.environment == "development":
+    dev_origins = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ]
+    for origin in dev_origins:
+        if origin not in cors_origins:
+            cors_origins.append(origin)
 
 app.add_middleware(
     CORSMiddleware,
@@ -169,6 +212,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 用量追踪中间件
+from app.middleware.usage import UsageTrackingMiddleware
+app.add_middleware(UsageTrackingMiddleware)
+
+# API 限流中间件
+from app.middleware.rate_limit import RateLimitMiddleware
+app.add_middleware(RateLimitMiddleware)
 
 # 挂载数据目录 (用于访问 K线图等静态资源)
 data_dir = ROOT / "data"
@@ -181,6 +232,7 @@ app.include_router(stock.router, prefix="/api/v1/stock", tags=["股票数据"])
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["分析"])
 app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["重点观察"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["任务调度"])
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["认证"])
 
 
 class SPAStaticFiles(StaticFiles):
@@ -240,9 +292,20 @@ manager = ConnectionManager()
 
 
 @app.get("/health")
-async def health_check():
-    """健康检查"""
-    return {"status": "ok", "version": app.version}
+async def health_check(db: DBSession = Depends(get_db)):
+    """健康检查，包含数据库连通性验证。"""
+    db_status = "ok"
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        db_status = "error"
+
+    return {
+        "status": "ok" if db_status == "ok" else "degraded",
+        "version": app.version,
+        "environment": settings.environment,
+        "database": db_status,
+    }
 
 
 @app.websocket("/ws/tasks/{task_id}")

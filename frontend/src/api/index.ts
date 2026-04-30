@@ -2,6 +2,8 @@ import axios from 'axios'
 import type { AxiosInstance, AxiosError } from 'axios'
 import type {
   AnalysisResultsResponse,
+  ApiKeyCreateResponse,
+  ApiKeyInfo,
   CandidatesResponse,
   ConfigItem,
   ConfigResponse,
@@ -13,6 +15,7 @@ import type {
   IncrementalUpdateResponse,
   IncrementalUpdateStatus,
   KLineData,
+  LoginResponse,
   SaveEnvResponse,
   StockInfo,
   StockSearchResponse,
@@ -27,6 +30,9 @@ import type {
   TomorrowStarDatesResponse,
   TushareStatusResponse,
   TushareVerifyResponse,
+  UsageStatsResponse,
+  UserListItem,
+  UserInfo,
   WatchlistAnalysisResponse,
   WatchlistAnalyzeResponse,
   WatchlistChartResponse,
@@ -65,6 +71,10 @@ const api: AxiosInstance = axios.create({
 // 请求拦截器
 api.interceptors.request.use(
   (config) => {
+    const saved = localStorage.getItem('stocktrade_token')
+    if (saved && config.headers) {
+      config.headers.Authorization = `Bearer ${saved}`
+    }
     return config
   },
   (error) => {
@@ -83,6 +93,15 @@ api.interceptors.response.use(
     }
     if (error.code === 'ECONNABORTED') {
       return Promise.reject(new Error('请求超时。若你刚启动了初始化或分析任务，它可能仍在后台运行，请前往任务中心继续查看。'))
+    }
+    // 401 未授权：清除 token 并跳转登录页
+    if (error.response?.status === 401) {
+      localStorage.removeItem('stocktrade_token')
+      // 避免在登录页循环跳转
+      if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
+        window.location.href = '/login'
+      }
+      return Promise.reject(new Error('登录已过期，请重新登录'))
     }
     const message = error.response?.data?.detail || error.response?.data?.message || error.message || '请求失败'
     return Promise.reject(new Error(message))
@@ -237,6 +256,61 @@ export const apiTasks = {
 
   // 清空历史任务
   clearTasks: () => api.delete<never, { status: string; message: string }>('/v1/tasks/clear', { timeout: TIMEOUTS.short }),
+}
+
+export const apiAuth = {
+  // 用户注册
+  register: (username: string, password: string, display_name?: string) =>
+    api.post<{ username: string; password: string; display_name?: string }, LoginResponse>(
+      '/v1/auth/register',
+      { username, password, display_name },
+    ),
+
+  // 用户登录
+  login: (username: string, password: string) =>
+    api.post<{ username: string; password: string }, LoginResponse>(
+      '/v1/auth/login',
+      { username, password },
+    ),
+
+  // 获取当前用户信息
+  getMe: () => api.get<never, UserInfo>('/v1/auth/me'),
+
+  // 修改密码
+  changePassword: (old_password: string, new_password: string) =>
+    api.put<{ old_password: string; new_password: string }, { message: string }>(
+      '/v1/auth/password',
+      { old_password, new_password },
+    ),
+
+  // 创建 API Key
+  createApiKey: (name?: string) =>
+    api.post<{ name?: string }, ApiKeyCreateResponse>('/v1/auth/keys', { name }),
+
+  // 列出 API Key
+  listApiKeys: () => api.get<never, ApiKeyInfo[]>('/v1/auth/keys'),
+
+  // 吊销 API Key
+  revokeApiKey: (id: number) =>
+    api.delete<never, { message: string }>(`/v1/auth/keys/${id}`),
+
+  // 获取用量统计
+  getUsage: () => api.get<never, UsageStatsResponse>('/v1/auth/usage'),
+
+  // 管理员：获取用户列表
+  adminGetUsers: () => api.get<never, UserListItem[]>('/v1/auth/admin/users'),
+
+  // 管理员：更新用户
+  adminUpdateUser: (userId: number, data: { is_active?: boolean; daily_quota?: number; role?: string }) =>
+    api.put<typeof data, { message: string }>(`/v1/auth/admin/users/${userId}`, data),
+
+  // 管理员：禁用用户
+  adminDisableUser: (userId: number) =>
+    api.delete<never, { message: string }>(`/v1/auth/admin/users/${userId}`),
+
+  // 管理员：获取用户用量
+  adminGetUsage: (userId: number) =>
+    api.get<never, UsageStatsResponse>(`/v1/auth/admin/usage/${userId}`),
 }
 
 export default api

@@ -21,6 +21,28 @@ from backend.app.utils.tushare_rate_limit import acquire_tushare_slot, MAX_REQUE
 
 warnings.filterwarnings("ignore")
 
+# --------------------------- 数据库写入（可选） --------------------------- #
+_DB_MODE = False  # 由 main() 中 --db 参数控制
+
+
+def _save_to_db(code: str, df, db_url: str) -> None:
+    """将 K 线数据写入 SQLite 数据库。每个线程使用独立 session。"""
+    if df is None or df.empty:
+        return
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from backend.app.services.kline_service import save_daily_data
+
+    engine = create_engine(db_url, connect_args={"check_same_thread": False})
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        save_daily_data(db, code, df)
+    except Exception as exc:
+        logging.getLogger("fetch_from_stocklist").error("写入数据库失败 %s: %s", code, exc)
+    finally:
+        db.close()
+
 # --------------------------- pandas 兼容补丁 --------------------------- #
 # tushare 内部使用了 fillna(method='ffill'/'bfill')，在 pandas 2.2+ 中已移除该参数。
 # 此补丁将旧式调用自动转发到 ffill()/bfill()，无需降级 pandas。
@@ -386,6 +408,7 @@ def fetch_one(
     start: str,
     end: str,
     out_dir: Path,
+    db_url: Optional[str] = None,
 ) -> dict[str, Any]:
     csv_path = out_dir / f"{code}.csv"
     result = {
@@ -404,6 +427,9 @@ def fetch_one(
                 new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
             new_df = validate(new_df)
             new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
+            # 写入数据库（如果启用）
+            if db_url:
+                _save_to_db(code, new_df, db_url)
             result["success"] = True
             return result
         except Exception as e:
@@ -427,6 +453,7 @@ def full_fetch(
     out_dir: Path,
     workers: int = 8,
     checkpoint_path: Optional[Path] = None,
+    db_url: Optional[str] = None,
 ) -> dict[str, Any]:
     """全量抓取并支持断点恢复。"""
     if not codes:
@@ -539,7 +566,7 @@ def full_fetch(
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(fetch_one, code, start, end, out_dir): code
+            executor.submit(fetch_one, code, start, end, out_dir, db_url): code
             for code in remaining_codes
         }
         for future in as_completed(futures):
@@ -618,6 +645,7 @@ def fetch_one_incremental(
     end: str,
     out_dir: Path,
     progress_callback: Optional[callable] = None,
+    db_url: Optional[str] = None,
 ) -> dict:
     """增量更新单只股票
 
@@ -682,6 +710,9 @@ def fetch_one_incremental(
                 result["new_count"] = len(new_df)
 
             combined_df.to_csv(csv_path, index=False)
+            # 写入数据库（如果启用）
+            if db_url:
+                _save_to_db(code, combined_df, db_url)
             result["success"] = True
             result["updated"] = True
             break
@@ -705,6 +736,7 @@ def incremental_update(
     out_dir: Optional[Path] = None,
     config_path: Optional[Path] = None,
     progress_callback: Optional[callable] = None,
+    db_url: Optional[str] = None,
 ) -> dict:
     """增量更新多只股票
 
@@ -748,7 +780,7 @@ def incremental_update(
     }
 
     def update_with_progress(code: str, index: int):
-        result = fetch_one_incremental(code, end, out_dir)
+        result = fetch_one_incremental(code, end, out_dir, db_url=db_url)
         result["index"] = index
         results["details"].append(result)
 
@@ -806,6 +838,7 @@ def main():
                         help="指定抓取板块：main=主板, gem=创业板, star=科创板, bj=北交所（覆盖配置文件）")
     parser.add_argument("--log", default=None, help="日志文件路径")
     parser.add_argument("--incremental", action="store_true", help="增量更新模式（只更新新数据）")
+    parser.add_argument("--db", action="store_true", help="将 K 线数据写入数据库（同时保留 CSV）")
     args = parser.parse_args()
 
     # ---------- 读取 YAML 配置 ---------- #
@@ -836,6 +869,14 @@ def main():
     global pro
     pro = ts.pro_api(ts_token)
 
+    # ---------- 数据库写入（--db 模式） ---------- #
+    db_url: Optional[str] = None
+    if args.db:
+        db_dir = _PROJECT_ROOT / "data" / "db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_url = f"sqlite:///{db_dir}/stocktrade.db"
+        logger.info("已启用数据库写入模式，目标：%s", db_url)
+
     # ---------- 日期解析 ---------- #
     raw_start = str(cfg.get("start", "20190101"))
     raw_end   = str(cfg.get("end",   "today"))
@@ -865,7 +906,7 @@ def main():
         def progress_cb(current, total, code, status):
             logger.info(f"进度: {current}/{total} | {code} | {status}")
 
-        results = incremental_update(codes, end=end, out_dir=out_dir, config_path=cfg_path, progress_callback=progress_cb)
+        results = incremental_update(codes, end=end, out_dir=out_dir, config_path=cfg_path, progress_callback=progress_cb, db_url=db_url)
 
         logger.info(
             "增量更新完成 | 成功:%d | 更新:%d | 跳过:%d | 失败:%d | 数据目录: %s",
@@ -887,6 +928,7 @@ def main():
         end=end,
         out_dir=out_dir,
         workers=workers,
+        db_url=db_url,
     )
 
     if not result["success"]:

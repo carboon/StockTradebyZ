@@ -402,3 +402,60 @@ export interface IncrementalUpdateResponse {
   running: boolean
   state?: IncrementalUpdateStatus
 }
+
+// =====================
+// 认证相关类型
+// =====================
+
+export interface UserInfo {
+  id: number
+  username: string
+  display_name: string | null
+  role: 'admin' | 'user'
+  is_active: boolean
+  daily_quota: number
+  created_at: string
+}
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  user: UserInfo
+}
+
+export interface ApiKeyInfo {
+  id: number
+  key_prefix: string
+  name: string | null
+  is_active: boolean
+  last_used_at: string | null
+  created_at: string
+}
+
+export interface ApiKeyCreateResponse {
+  id: number
+  key: string
+  key_prefix: string
+  name: string | null
+}
+
+export interface UsageStatsItem {
+  date: string
+  total_calls: number
+  endpoints: Record<string, number>
+}
+
+export interface UsageStatsResponse {
+  stats: UsageStatsItem[]
+  total_calls: number
+}
+
+export interface UserListItem {
+  id: number
+  username: string
+  display_name: string | null
+  role: 'admin' | 'user'
+  is_active: boolean
+  daily_quota: number
+  created_at: string
+}

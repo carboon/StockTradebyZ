@@ -6,7 +6,7 @@ API 请求和响应数据模型
 from datetime import date as date_class
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ==================== 配置相关 ====================
@@ -374,3 +374,105 @@ class KLineResponse(BaseModel):
     daily: List[KLineDataPoint]
     weekly: Optional[List[KLineDataPoint]] = None
     indicators: Optional[Dict[str, Any]] = None
+
+
+# =====================
+# 认证相关 Schema
+# =====================
+
+
+class UserRegister(BaseModel):
+    """用户注册请求"""
+    username: str = Field(..., min_length=3, max_length=50, description="用户名")
+    password: str = Field(..., min_length=6, max_length=100, description="密码")
+    display_name: str | None = Field(None, max_length=100, description="显示名称")
+
+
+class UserLogin(BaseModel):
+    """用户登录请求"""
+    username: str = Field(..., description="用户名")
+    password: str = Field(..., description="密码")
+
+
+class TokenResponse(BaseModel):
+    """登录成功响应"""
+    access_token: str
+    token_type: str = "bearer"
+    user: "UserInfo"
+
+
+class UserInfo(BaseModel):
+    """用户信息"""
+    id: int
+    username: str
+    display_name: str | None
+    role: str
+    is_active: bool
+    daily_quota: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ApiKeyCreate(BaseModel):
+    """创建 API Key 请求"""
+    name: str | None = Field(None, max_length=100, description="API Key 名称")
+
+
+class ApiKeyResponse(BaseModel):
+    """API Key 列表项"""
+    id: int
+    key_prefix: str
+    name: str | None
+    is_active: bool
+    last_used_at: datetime | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ApiKeyCreateResponse(BaseModel):
+    """创建 API Key 响应（仅创建时返回完整 key）"""
+    id: int
+    key: str
+    key_prefix: str
+    name: str | None
+
+
+class ChangePasswordRequest(BaseModel):
+    """修改密码请求"""
+    old_password: str = Field(..., description="旧密码")
+    new_password: str = Field(..., min_length=6, max_length=100, description="新密码")
+
+
+class AdminUserUpdate(BaseModel):
+    """管理员更新用户请求"""
+    is_active: bool | None = None
+    daily_quota: int | None = None
+    role: str | None = None
+
+
+class UsageStatsItem(BaseModel):
+    """单日用量统计"""
+    date: str
+    total_calls: int
+    endpoints: dict[str, int]
+
+
+class UsageStatsResponse(BaseModel):
+    """用量统计响应"""
+    stats: list[UsageStatsItem]
+    total_calls: int
+
+
+class UserListItem(BaseModel):
+    """用户列表项（管理员用）"""
+    id: int
+    username: str
+    display_name: str | None
+    role: str
+    is_active: bool
+    daily_quota: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

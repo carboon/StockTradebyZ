@@ -173,3 +173,78 @@ class DataUpdateLog(Base):
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class User(Base):
+    """用户表"""
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(200), nullable=False)
+    display_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")  # admin / user
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    daily_quota: Mapped[int] = mapped_column(Integer, default=1000)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ApiKey(Base):
+    """API Key 表"""
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(8), nullable=False)
+    name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class UsageLog(Base):
+    """API 调用日志表"""
+    __tablename__ = "usage_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    api_key_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("api_keys.id"), nullable=True)
+    endpoint: Mapped[str] = mapped_column(String(200), nullable=False)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    status_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class AuditLog(Base):
+    """审计日志表"""
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    target_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class StockDaily(Base):
+    """股票日线行情表（K线数据入库）"""
+    __tablename__ = "stock_daily"
+    __table_args__ = (
+        UniqueConstraint("code", "trade_date", name="uq_stock_daily_code_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    trade_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

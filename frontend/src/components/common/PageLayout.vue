@@ -84,6 +84,19 @@
           <el-button text @click="router.push('/config')">
             <el-icon><Setting /></el-icon>
           </el-button>
+          <el-dropdown trigger="click" @command="handleUserCommand">
+            <el-button text>
+              <el-icon><UserIcon /></el-icon>
+              <span style="margin-left: 4px">{{ authStore.user?.username || '用户' }}</span>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="profile">个人资料</el-dropdown-item>
+                <el-dropdown-item v-if="authStore.isAdmin" command="admin">用户管理</el-dropdown-item>
+                <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </el-header>
 
@@ -160,8 +173,10 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document,
+  User as UserIcon,
 } from '@element-plus/icons-vue'
 import { apiTasks } from '@/api'
+import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
 import type { IncrementalUpdateStatus, Task } from '@/types'
@@ -171,6 +186,7 @@ const router = useRouter()
 const route = useRoute()
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
+const authStore = useAuthStore()
 
 const isCollapsed = ref(false)
 const activeTasks = ref<Task[]>([])
@@ -255,13 +271,30 @@ const headerProgress = computed(() => {
   return null
 })
 
-const menuRoutes = [
-  { path: '/tomorrow-star', icon: Star, meta: { title: '明日之星', icon: 'Star' } },
-  { path: '/diagnosis', icon: Search, meta: { title: '单股诊断', icon: 'Search' } },
-  { path: '/watchlist', icon: View, meta: { title: '重点观察', icon: 'View' } },
-  { path: '/update', icon: Refresh, meta: { title: '任务中心', icon: 'Refresh' } },
-  { path: '/system-info', icon: Document, meta: { title: '系统说明', icon: 'Document' } },
-]
+const menuRoutes = computed(() => {
+  const routes = [
+    { path: '/tomorrow-star', icon: Star, meta: { title: '明日之星', icon: 'Star' } },
+    { path: '/diagnosis', icon: Search, meta: { title: '单股诊断', icon: 'Search' } },
+    { path: '/watchlist', icon: View, meta: { title: '重点观察', icon: 'View' } },
+    { path: '/update', icon: Refresh, meta: { title: '任务中心', icon: 'Refresh' } },
+    { path: '/system-info', icon: Document, meta: { title: '系统说明', icon: 'Document' } },
+  ]
+  if (authStore.isAdmin) {
+    routes.push({ path: '/admin', icon: Setting, meta: { title: '用户管理', icon: 'Setting' } })
+  }
+  return routes
+})
+
+function handleUserCommand(command: string) {
+  if (command === 'profile') {
+    router.push('/profile')
+  } else if (command === 'admin') {
+    router.push('/admin')
+  } else if (command === 'logout') {
+    authStore.logout()
+    router.push('/login')
+  }
+}
 
 function toggleSidebar() {
   isCollapsed.value = !isCollapsed.value

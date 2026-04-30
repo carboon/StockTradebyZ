@@ -4,7 +4,7 @@ Stock API
 股票数据相关 API
 """
 import csv
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -13,8 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
+from app.api.deps import require_user
 from app.database import get_db
 from app.models import Stock
+from app.services.kline_service import get_daily_data
 from app.schemas import (
     StockResponse,
     StockSearchItem,
@@ -51,6 +53,7 @@ async def search_stocks(
     q: str,
     limit: int = 10,
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> StockSearchResponse:
     """按代码或名称搜索股票，支持模糊匹配。"""
     keyword = str(q or "").strip()
@@ -112,7 +115,7 @@ async def search_stocks(
 
 
 @router.get("/{code}", response_model=StockResponse)
-async def get_stock_info(code: str, db: Session = Depends(get_db)) -> StockResponse:
+async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
     """获取股票基本信息"""
     code = code.zfill(6)
     stock = db.query(Stock).filter(Stock.code == code).first()
@@ -147,13 +150,27 @@ async def get_stock_info(code: str, db: Session = Depends(get_db)) -> StockRespo
 
 
 @router.post("/kline", response_model=KLineResponse)
-async def get_kline_data(request: KLineDataRequest) -> KLineResponse:
+async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> KLineResponse:
     """获取 K线数据"""
     code = request.code.zfill(6)
 
     try:
-        # 使用 analysis_service 加载数据
-        df = analysis_service.load_stock_data(code)
+        # --- 优先从数据库读取 K 线数据 ---
+        df: Optional[pd.DataFrame] = None
+        try:
+            end = date.today()
+            start = end - timedelta(days=request.days * 2)  # 多取一些确保足够
+            db_df = get_daily_data(db, code, start, end)
+            if db_df is not None and not db_df.empty:
+                # 统一列名：数据库返回 volume，CSV 可能是 vol
+                df = db_df.rename(columns={"volume": "vol"}) if "volume" in db_df.columns else db_df.copy()
+                df["date"] = pd.to_datetime(df["date"])
+        except Exception:
+            pass  # 数据库读取失败，回退到 CSV
+
+        # --- 回退：使用 analysis_service 从 CSV 加载 ---
+        if df is None or df.empty:
+            df = analysis_service.load_stock_data(code)
 
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail=f"股票 {code} 数据不存在")

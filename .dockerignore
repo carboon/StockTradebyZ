@@ -40,3 +40,6 @@ data/logs/
 # Git
 .git/
 .gitignore
+
+# Mistaken nested repo copy
+StockTradebyZ/

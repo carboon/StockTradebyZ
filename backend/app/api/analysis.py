@@ -12,6 +12,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 
+from app.api.deps import require_user
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, Stock, Task
 from app.services.analysis_service import analysis_service
@@ -41,7 +42,7 @@ def ensure_tushare_ready() -> None:
 
 
 @router.get("/tomorrow-star/dates")
-async def get_tomorrow_star_dates() -> dict:
+async def get_tomorrow_star_dates(user=Depends(require_user)) -> dict:
     """获取明日之星历史日期列表"""
     history = analysis_service.get_candidates_history(limit=100)
     return {
@@ -53,6 +54,7 @@ async def get_tomorrow_star_dates() -> dict:
 @router.get("/tomorrow-star/freshness")
 async def get_tomorrow_star_freshness(
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> dict:
     """获取明日之星数据新鲜度状态。"""
     from app.services.market_service import market_service, MarketService
@@ -139,6 +141,7 @@ async def get_candidates(
     date: Optional[str] = None,
     limit: int = 100,
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> CandidatesResponse:
     """获取候选股票列表（带缓存，实时筛选最新交易日数据）"""
     from app.config import settings
@@ -473,6 +476,7 @@ async def get_candidates(
 @router.get("/tomorrow-star/results", response_model=AnalysisResultResponse)
 async def get_analysis_results(
     date: Optional[str] = None,
+    user=Depends(require_user),
 ) -> AnalysisResultResponse:
     """获取指定日期的分析结果"""
     result = analysis_service.get_analysis_results(date)
@@ -505,6 +509,7 @@ async def get_diagnosis_history(
     code: str,
     days: int = 30,
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> DiagnosisHistoryResponse:
     """获取单股诊断历史"""
     code = code.zfill(6)
@@ -530,6 +535,7 @@ async def generate_diagnosis_history(
     background_tasks: BackgroundTasks,
     days: int = Query(default=30, description="生成最近N个交易日的历史数据"),
     clean: bool = Query(default=True, description="是否先清理旧数据"),
+    user=Depends(require_user),
 ) -> dict:
     """重新刷新单股诊断历史数据（后台任务）"""
     ensure_tushare_ready()
@@ -547,7 +553,7 @@ async def generate_diagnosis_history(
 
 
 @router.get("/diagnosis/{code}/history-status")
-async def get_history_status(code: str) -> dict:
+async def get_history_status(code: str, user=Depends(require_user)) -> dict:
     """获取历史数据生成状态"""
     import json
     from pathlib import Path
@@ -576,7 +582,7 @@ async def get_history_status(code: str) -> dict:
 
 
 @router.post("/diagnosis/analyze")
-async def analyze_stock(request: DiagnosisRequest, db: Session = Depends(get_db)) -> DiagnosisResponse:
+async def analyze_stock(request: DiagnosisRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> DiagnosisResponse:
     """启动单股分析"""
     ensure_tushare_ready()
     code = request.code.zfill(6)
@@ -645,6 +651,7 @@ async def generate_tomorrow_star(
     background_tasks: BackgroundTasks,
     reviewer: str = Query(default="quant", description="评审者类型"),
     db: Session = Depends(get_db),
+    user=Depends(require_user),
 ) -> dict:
     """手动生成明日之星"""
     ensure_tushare_ready()
