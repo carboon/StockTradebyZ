@@ -3,6 +3,7 @@ Pytest Configuration and Fixtures
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 测试基础设施配置，为所有测试提供公共支持
 """
+import uuid
 from datetime import date, datetime
 from typing import Any, AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,8 +23,9 @@ from app.models import User
 # Database Fixtures
 # ============================================
 
-# 使用命名内存数据库以支持跨连接共享
-TEST_DATABASE_URL = "sqlite:///file:test_db?mode=memory&cache=shared"
+def build_test_database_url() -> str:
+    """为每个测试构造独立的共享内存 SQLite 数据库。"""
+    return f"sqlite:///file:test_db_{uuid.uuid4().hex}?mode=memory&cache=shared"
 
 
 @pytest.fixture(scope="function")
@@ -34,10 +36,12 @@ def test_db() -> Generator[Session, None, None]:
     每个测试函数都会获得一个全新的数据库，测试结束后自动清理。
     使用事务回滚来确保测试之间的隔离。
     """
+    test_database_url = build_test_database_url()
+
     # 创建测试数据库引擎
     engine = create_engine(
-        TEST_DATABASE_URL,
-        connect_args={"check_same_thread": False},
+        test_database_url,
+        connect_args={"check_same_thread": False, "uri": True},
     )
 
     # 创建所有表
@@ -96,10 +100,12 @@ def test_client() -> Generator[TestClient, None, None]:
 
     注意：此客户端会自动绕过身份验证要求，方便测试。
     """
+    test_database_url = build_test_database_url()
+
     # 创建测试数据库引擎
     engine = create_engine(
-        TEST_DATABASE_URL,
-        connect_args={"check_same_thread": False},
+        test_database_url,
+        connect_args={"check_same_thread": False, "uri": True},
     )
 
     # 创建所有表
@@ -132,6 +138,7 @@ def test_client() -> Generator[TestClient, None, None]:
     from app.api import deps
     original_get_current_user = deps.get_current_user
     original_require_user = deps.require_user
+    original_get_admin_user = deps.get_admin_user
 
     def mock_get_current_user():
         return test_user
@@ -139,10 +146,14 @@ def test_client() -> Generator[TestClient, None, None]:
     def mock_require_user():
         return test_user
 
+    def mock_get_admin_user():
+        return test_user
+
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[deps.get_current_user] = mock_get_current_user
     app.dependency_overrides[deps.get_current_active_user] = mock_get_current_user
     app.dependency_overrides[deps.require_user] = mock_require_user
+    app.dependency_overrides[deps.get_admin_user] = mock_get_admin_user
 
     try:
         with TestClient(app) as client:
@@ -152,6 +163,7 @@ def test_client() -> Generator[TestClient, None, None]:
         # 恢复原始函数
         deps.get_current_user = original_get_current_user
         deps.require_user = original_require_user
+        deps.get_admin_user = original_get_admin_user
         db.close()
         # 清理所有表
         Base.metadata.drop_all(bind=engine)
@@ -175,10 +187,12 @@ def test_client_with_db() -> Generator[Any, None, None]:
 
     注意：此客户端会自动绕过身份验证要求，方便测试。
     """
+    test_database_url = build_test_database_url()
+
     # 创建测试数据库引擎
     engine = create_engine(
-        TEST_DATABASE_URL,
-        connect_args={"check_same_thread": False},
+        test_database_url,
+        connect_args={"check_same_thread": False, "uri": True},
     )
 
     # 创建所有表
@@ -211,6 +225,7 @@ def test_client_with_db() -> Generator[Any, None, None]:
     from app.api import deps
     original_get_current_user = deps.get_current_user
     original_require_user = deps.require_user
+    original_get_admin_user = deps.get_admin_user
 
     def mock_get_current_user():
         return test_user
@@ -218,10 +233,14 @@ def test_client_with_db() -> Generator[Any, None, None]:
     def mock_require_user():
         return test_user
 
+    def mock_get_admin_user():
+        return test_user
+
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[deps.get_current_user] = mock_get_current_user
     app.dependency_overrides[deps.get_current_active_user] = mock_get_current_user
     app.dependency_overrides[deps.require_user] = mock_require_user
+    app.dependency_overrides[deps.get_admin_user] = mock_get_admin_user
 
     try:
         with TestClient(app) as client:
@@ -231,6 +250,7 @@ def test_client_with_db() -> Generator[Any, None, None]:
         # 恢复原始函数
         deps.get_current_user = original_get_current_user
         deps.require_user = original_require_user
+        deps.get_admin_user = original_get_admin_user
         db.close()
         # 清理所有表
         Base.metadata.drop_all(bind=engine)

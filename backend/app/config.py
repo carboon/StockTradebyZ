@@ -40,9 +40,27 @@ class Settings(BaseSettings):
     kline_dir: Path = PROJECT_ROOT / "data" / "kline"
     logs_dir: Path = PROJECT_ROOT / "data" / "logs"
 
+    # 数据库配置
+    # 优先使用 DATABASE_URL 环境变量 (PostgreSQL)
+    # 否则使用 SQLite
+    database_url_env: str = ""
+
     @property
     def database_url(self) -> str:
-        """数据库 URL (绝对路径)"""
+        """数据库 URL (支持 PostgreSQL 和 SQLite)"""
+        import os
+
+        # 1. 优先使用环境变量 DATABASE_URL (PostgreSQL)
+        env_db_url = os.environ.get("DATABASE_URL") or self.database_url_env
+        if env_db_url:
+            return env_db_url
+
+        # 2. 测试环境：使用环境变量指定的测试数据库
+        test_db = os.environ.get("SQLITE_TEST_DB")
+        if test_db:
+            return test_db
+
+        # 3. 默认使用 SQLite
         self.db_dir.mkdir(parents=True, exist_ok=True)
         return f"sqlite:///{self.db_dir}/stocktrade.db"
 

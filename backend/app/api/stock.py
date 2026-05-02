@@ -141,29 +141,21 @@ async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(
 
 @router.post("/kline", response_model=KLineResponse)
 async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> KLineResponse:
-    """获取 K线数据"""
+    """获取 K线数据（纯数据库版本）"""
     code = request.code.zfill(6)
 
     try:
-        # --- 优先从数据库读取 K 线数据 ---
-        df: Optional[pd.DataFrame] = None
-        try:
-            end = date.today()
-            start = end - timedelta(days=request.days * 2)  # 多取一些确保足够
-            db_df = get_daily_data(db, code, start, end)
-            if db_df is not None and not db_df.empty:
-                # 统一列名：数据库返回 volume，CSV 可能是 vol
-                df = db_df.rename(columns={"volume": "vol"}) if "volume" in db_df.columns else db_df.copy()
-                df["date"] = pd.to_datetime(df["date"])
-        except Exception:
-            pass  # 数据库读取失败，回退到 CSV
+        # 从数据库获取数据
+        end = date.today()
+        start = end - timedelta(days=request.days * 2)  # 多取一些确保足够
+        db_df = get_daily_data(db, code, start, end)
 
-        # --- 回退：使用 analysis_service 从 CSV 加载 ---
-        if df is None or df.empty:
-            df = analysis_service.load_stock_data(code)
+        if db_df is None or db_df.empty:
+            raise HTTPException(status_code=404, detail=f"股票 {code} 数据不存在，请先执行数据初始化")
 
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail=f"股票 {code} 数据不存在")
+        # 统一列名：数据库返回 volume
+        df = db_df.rename(columns={"volume": "vol"}) if "volume" in db_df.columns else db_df.copy()
+        df["date"] = pd.to_datetime(df["date"])
 
         # 验证必需的列存在
         required_cols = ["date", "open", "high", "low", "close"]
@@ -171,7 +163,7 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
         if missing_cols:
             raise HTTPException(
                 status_code=500,
-                detail=f"数据文件缺少必需的列: {', '.join(missing_cols)}"
+                detail=f"数据缺少必需的列: {', '.join(missing_cols)}"
             )
 
         # 取最近 N 天
@@ -209,7 +201,7 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
                         ma60=float(row["ma60"]) if not pd.isna(row["ma60"]) else None,
                     )
                 )
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError):
                 # 跳过有问题的行
                 continue
 
@@ -224,16 +216,14 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
 
                 weekly = (
                     df_copy.groupby("week_key")
-                    .agg(
-                        {
-                            "date": "first",
-                            "open": "first",
-                            "high": "max",
-                            "low": "min",
-                            "close": "last",
-                            vol_col: "sum",
-                        }
-                    )
+                    .agg({
+                        "date": "first",
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        vol_col: "sum",
+                    })
                     .reset_index(drop=True)
                 )
 

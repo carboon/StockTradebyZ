@@ -148,7 +148,90 @@ async def test_create_task_single_analysis(task_service, sample_task_single_anal
 
 @pytest.mark.service
 @pytest.mark.asyncio
-async def test_create_task_tomorrow_star(task_service):
+async def test_create_single_analysis_reuses_running_same_reviewer(task_service):
+    """
+    测试单股分析任务去重 - 同股票同reviewer复用running任务
+
+    当同一股票同一reviewer已有running任务时，应复用该任务。
+    """
+    existing_task = Task(
+        task_type="single_analysis",
+        status="running",
+        progress=50,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=utc_now(),
+    )
+    task_service.db.add(existing_task)
+    task_service.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task") as mock_create_task:
+        result = await task_service.create_task("single_analysis", {"code": "600000", "reviewer": "quant"})
+
+        assert result["task_id"] == existing_task.id
+        assert result["existing"] is True
+        mock_create_task.assert_not_called()
+
+
+@pytest.mark.service
+@pytest.mark.asyncio
+async def test_create_single_analysis_different_reviewer_creates_new_task(task_service):
+    """
+    测试单股分析任务去重 - 不同reviewer创建新任务
+
+    当同一股票但不同reviewer时，应创建新任务（不复用）。
+    """
+    existing_task = Task(
+        task_type="single_analysis",
+        status="running",
+        progress=50,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=utc_now(),
+    )
+    task_service.db.add(existing_task)
+    task_service.db.commit()
+
+    with patch.object(task_service, '_run_task', return_value=None):
+        result = await task_service.create_task("single_analysis", {"code": "600000", "reviewer": "qwen"})
+
+        assert result["task_id"] != existing_task.id
+        assert result["existing"] is False
+
+        # 验证创建了新任务
+        new_task = task_service.db.query(Task).filter(Task.id == result["task_id"]).first()
+        assert new_task.params_json["reviewer"] == "qwen"
+
+
+@pytest.mark.service
+@pytest.mark.asyncio
+async def test_create_single_analysis_reuses_completed_same_day(task_service):
+    """
+    测试单股分析任务去重 - 同日复用已完成任务
+
+    当同一股票同一reviewer今日已有已完成任务时，应复用该任务。
+    """
+    existing_task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=utc_now(),
+        completed_at=utc_now(),
+        result_json={"verdict": "PASS", "score": 4.5},
+    )
+    task_service.db.add(existing_task)
+    task_service.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task") as mock_create_task:
+        result = await task_service.create_task("single_analysis", {"code": "600000", "reviewer": "quant"})
+
+        assert result["task_id"] == existing_task.id
+        assert result["existing"] is True
+        mock_create_task.assert_not_called()
+
+
+@pytest.mark.service
+@pytest.mark.asyncio
+async def test_create_tomorrow_star(task_service):
     """
     测试创建明日之星任务
 

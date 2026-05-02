@@ -192,10 +192,12 @@ const isCollapsed = ref(false)
 const activeTasks = ref<Task[]>([])
 const incrementalStatus = ref<IncrementalUpdateStatus | null>(null)
 let progressPoller: ReturnType<typeof setInterval> | null = null
+let progressPollIntervalMs = 30000
 
 const sidebarWidth = computed(() => isCollapsed.value ? '64px' : '200px')
 
 const activeMenu = computed(() => route.path)
+const isUpdateRoute = computed(() => route.path.startsWith('/update'))
 const activeFullTask = computed(() => {
   return activeTasks.value.find((task) => ['full_update', 'tomorrow_star'].includes(task.task_type)) || null
 })
@@ -342,27 +344,42 @@ async function refreshHeaderProgress() {
     ])
     activeTasks.value = runningResp.tasks || []
     incrementalStatus.value = incrementalResp
+    progressPollIntervalMs = activeTasks.value.length > 0 || incrementalStatus.value?.running ? 5000 : 30000
   } catch {
-    activeTasks.value = []
-    incrementalStatus.value = null
+    progressPollIntervalMs = Math.min(progressPollIntervalMs * 2, 120000)
   }
+}
+
+function shouldPollHeaderProgress() {
+  return authStore.isAuthenticated && (isUpdateRoute.value || activeTasks.value.length > 0 || Boolean(incrementalStatus.value?.running))
+}
+
+function stopPoller() {
+  if (progressPoller) {
+    clearInterval(progressPoller)
+    progressPoller = null
+  }
+}
+
+// 根据是否有运行中的任务动态调整轮询间隔
+function startPoller() {
+  stopPoller()
+  if (!shouldPollHeaderProgress()) return
+  progressPoller = setInterval(() => {
+    void refreshHeaderProgress()
+  }, progressPollIntervalMs)
 }
 
 onMounted(() => {
   // 只在已登录时启动轮询
   if (authStore.isAuthenticated) {
     void refreshHeaderProgress()
-    progressPoller = setInterval(() => {
-      void refreshHeaderProgress()
-    }, 5000)
+    startPoller()
   }
 })
 
 onUnmounted(() => {
-  if (progressPoller) {
-    clearInterval(progressPoller)
-    progressPoller = null
-  }
+  stopPoller()
 })
 
 // 监听登录状态变化
@@ -370,15 +387,18 @@ watch(() => authStore.isAuthenticated, (isLoggedIn) => {
   if (isLoggedIn && !progressPoller) {
     // 用户刚登录，启动轮询
     void refreshHeaderProgress()
-    progressPoller = setInterval(() => {
-      void refreshHeaderProgress()
-    }, 5000)
+    startPoller()
   } else if (!isLoggedIn && progressPoller) {
     // 用户已登出，停止轮询并清除数据
-    clearInterval(progressPoller)
-    progressPoller = null
+    stopPoller()
     activeTasks.value = []
     incrementalStatus.value = null
+  }
+})
+
+watch([() => activeTasks.value.length, () => incrementalStatus.value?.running, isUpdateRoute], () => {
+  if (authStore.isAuthenticated) {
+    startPoller()
   }
 })
 </script>

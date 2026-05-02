@@ -1,7 +1,8 @@
 """
 K-Line Data Service
 ~~~~~~~~~~~~~~~~~~~
-K 线数据的数据库读写服务层，支持 CSV 回退。
+K 线数据的数据库读写服务 - 纯数据库版本
+不再依赖 CSV 文件
 """
 import logging
 from datetime import date, datetime
@@ -9,17 +10,16 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import distinct
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models import StockDaily
 
 logger = logging.getLogger(__name__)
 
 
 def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
-    """将单只股票的日线数据 upsert 到数据库。
+    """将单只股票的日线数据 upsert 到数据库
 
     Args:
         db: 数据库 session
@@ -68,7 +68,7 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
 
 
 def bulk_save_daily_data(db: Session, data: dict[str, pd.DataFrame]) -> int:
-    """批量写入多只股票的日线数据。
+    """批量写入多只股票的日线数据
 
     Args:
         data: {code: DataFrame} 字典
@@ -88,7 +88,7 @@ def get_daily_data(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
 ) -> pd.DataFrame:
-    """从数据库读取 K 线数据。
+    """从数据库读取 K 线数据
 
     Args:
         db: 数据库 session
@@ -126,14 +126,13 @@ def get_daily_data(
 
 
 def get_all_codes_with_data(db: Session) -> list[str]:
-    """获取数据库中有 K 线数据的所有股票代码。"""
-    from sqlalchemy import distinct
+    """获取数据库中有 K 线数据的所有股票代码"""
     results = db.query(distinct(StockDaily.code)).all()
     return [r[0] for r in results]
 
 
 def get_latest_trade_date(db: Session, code: str) -> Optional[date]:
-    """获取指定股票在数据库中最新的交易日期。"""
+    """获取指定股票在数据库中最新的交易日期"""
     result = (
         db.query(StockDaily.trade_date)
         .filter(StockDaily.code == code)
@@ -143,63 +142,68 @@ def get_latest_trade_date(db: Session, code: str) -> Optional[date]:
     return result[0] if result else None
 
 
-def load_daily_data_from_csv(raw_dir: Optional[Path] = None) -> dict[str, pd.DataFrame]:
-    """从 CSV 文件加载 K 线数据（回退方法）。
-
-    Args:
-        raw_dir: CSV 文件目录，默认使用配置中的 raw_data_dir
+def get_all_daily_data(db: Session) -> dict[str, pd.DataFrame]:
+    """获取数据库中所有股票的 K 线数据
 
     Returns:
         {code: DataFrame} 字典
     """
-    data_dir = raw_dir or settings.raw_data_dir
-    data: dict[str, pd.DataFrame] = {}
+    codes = get_all_codes_with_data(db)
+    data = {}
 
-    if not data_dir.exists():
-        return data
+    logger.info("从数据库加载 %d 只股票的 K 线数据", len(codes))
 
-    csv_files = list(data_dir.glob("*.csv"))
-    logger.info("从 CSV 加载 K 线数据: %d 个文件", len(csv_files))
-
-    for csv_path in csv_files:
-        code = csv_path.stem
-        try:
-            df = pd.read_csv(csv_path)
-            if not df.empty and "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"])
-                data[code] = df
-        except Exception as e:
-            logger.warning("读取 CSV 失败 %s: %s", csv_path.name, e)
+    for code in codes:
+        df = get_daily_data(db, code)
+        if not df.empty:
+            data[code] = df
 
     return data
 
 
-def load_daily_data(
-    db: Session,
-    use_db: bool = True,
-    raw_dir: Optional[Path] = None,
-) -> dict[str, pd.DataFrame]:
-    """智能加载 K 线数据：优先 DB，回退 CSV。
+def check_data_completeness(db: Session, code: str, expected_days: int = 250) -> dict:
+    """检查股票数据完整性
 
     Args:
         db: 数据库 session
-        use_db: 是否尝试从数据库加载
-        raw_dir: CSV 回退目录
+        code: 股票代码
+        expected_days: 期望的交易日数量（默认250，约一年）
 
     Returns:
-        {code: DataFrame} 字典
+        {has_data, days_count, latest_date, is_complete} 字典
     """
-    if use_db:
-        codes = get_all_codes_with_data(db)
-        if codes:
-            logger.info("从数据库加载 %d 只股票的 K 线数据", len(codes))
-            data = {}
-            for code in codes:
-                df = get_daily_data(db, code)
-                if not df.empty:
-                    data[code] = df
-            if data:
-                return data
-            logger.info("数据库无有效数据，回退到 CSV")
+    latest = get_latest_trade_date(db, code)
 
-    return load_daily_data_from_csv(raw_dir)
+    if not latest:
+        return {
+            "has_data": False,
+            "days_count": 0,
+            "latest_date": None,
+            "is_complete": False
+        }
+
+    count = db.query(StockDaily).filter(
+        StockDaily.code == code
+    ).count()
+
+    # 计算最新日期到今天的交易日差距
+    today = date.today()
+    days_diff = (today - latest).days
+
+    return {
+        "has_data": True,
+        "days_count": count,
+        "latest_date": latest,
+        "is_complete": count >= expected_days and days_diff <= 7  # 允许一周延迟
+    }
+
+
+__all__ = [
+    "save_daily_data",
+    "bulk_save_daily_data",
+    "get_daily_data",
+    "get_all_codes_with_data",
+    "get_latest_trade_date",
+    "get_all_daily_data",
+    "check_data_completeness",
+]

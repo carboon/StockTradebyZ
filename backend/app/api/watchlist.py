@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_user
 from app.database import get_db
 from app.models import Watchlist, WatchlistAnalysis, Stock
+from app.services.analysis_cache import analysis_cache
 from app.services.tushare_service import TushareService
 from app.services.analysis_service import analysis_service
+from app.services.task_service import TaskService
 from app.schemas import (
     WatchlistResponse,
     WatchlistItem,
@@ -41,6 +43,19 @@ def _resolve_analysis_trade_date(result: dict, df) -> date_class:
         return date_class.fromisoformat(str(latest)[:10])
 
     return date_class.today()
+
+
+def _resolve_latest_trade_date(df) -> date_class:
+    """Resolve the latest trade date from a dataframe row with mixed date types."""
+    if df is None or df.empty or "date" not in df.columns:
+        return date_class.today()
+
+    latest_value = df.sort_values("date").iloc[-1]["date"]
+    if hasattr(latest_value, "date"):
+        return latest_value.date()
+    if isinstance(latest_value, date_class):
+        return latest_value
+    return date_class.fromisoformat(str(latest_value)[:10])
 
 
 def _build_trend_outlook(verdict: str | None, signal_type: str | None, score: float | None) -> str:
@@ -198,10 +213,10 @@ def _calc_support_resistance(df) -> tuple[float | None, float | None]:
 @router.get("/", response_model=WatchlistResponse)
 async def get_watchlist(db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistResponse:
     """获取当前用户的观察列表"""
-    # 按用户过滤并使用 join 优化查询
+    # 按用户过滤并使用 left outer join 支持股票不存在的情况
     watchlist = (
         db.query(Watchlist, Stock)
-        .join(Stock, Watchlist.code == Stock.code)
+        .outerjoin(Stock, Watchlist.code == Stock.code)
         .filter(Watchlist.user_id == user.id, Watchlist.is_active == True)
         .order_by(Watchlist.priority.desc(), Watchlist.added_at.desc())
         .all()
@@ -385,40 +400,84 @@ async def analyze_watchlist_item(
     优先命中已有分析结果：
     1. 检查当日是否已有该股票的分析结果（可来自单股诊断或其他观察列表）
     2. 如果存在，直接复用结果
-    3. 如果不存在，执行分析并缓存结果
+    3. 如果不存在，创建后台任务并返回 pending 状态（不阻塞请求）
+    4. 前端可轮询 /api/v1/tasks/{task_id} 或通过 WebSocket 获取结果
     """
-    from app.services.analysis_cache import analysis_cache
-
     w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
     # 先尝试加载数据以确定交易日
     df = analysis_service.load_stock_data(w.code)
-    if df is not None and not df.empty:
-        latest = df.sort_values("date").iloc[-1]
-        if hasattr(latest, "date"):
-            if hasattr(latest["date"], "date"):
-                tentative_date = latest["date"].date()
-            else:
-                tentative_date = latest["date"]
-        else:
-            tentative_date = date_class.today()
-    else:
-        tentative_date = date_class.today()
+    tentative_date = _resolve_latest_trade_date(df)
 
     # 检查是否有已缓存的分析结果（可来自单股诊断）
     trade_date_str = tentative_date.strftime("%Y-%m-%d")
     cached_result = analysis_cache.get_cached_analysis(w.code, trade_date_str)
 
     if cached_result is not None:
-        # 复用缓存结果
+        # 复用缓存结果，直接返回
         result = cached_result
     else:
-        # 执行分析（会自动处理去重和缓存）
-        result = analysis_service.analyze_stock(w.code, "quant", use_cache=True)
+        # 检查是否有正在进行的分析任务
+        cache_key = analysis_cache.make_cache_key(w.code, trade_date_str, analysis_cache.STRATEGY_VERSION)
+        if analysis_cache.is_analysis_in_progress(cache_key):
+            return {
+                "status": "pending",
+                "code": w.code,
+                "message": "分析正在进行中，请稍后再试",
+                "_cache_key": cache_key,
+            }
 
-    # 处理分析中的状态
+        # 冷缓存：创建后台分析任务（不阻塞请求）
+        task_service = TaskService(db)
+        task_response = await task_service.create_task(
+            task_type="single_analysis",
+            params={
+                "code": w.code,
+                "reviewer": "quant",
+                "trigger_source": "watchlist_analyze",
+                "watchlist_item_id": item_id,
+            }
+        )
+
+        # 如果复用了已存在的任务，检查任务状态
+        if task_response.get("existing"):
+            task_id = task_response["task_id"]
+            task_status = task_service.get_task_status(task_id)
+            if task_status and task_status.get("status") == "completed":
+                # 任务已完成，直接使用结果
+                result = task_status.get("result", {})
+                if result:
+                    result["_cached"] = True
+                else:
+                    # 结果为空，返回错误
+                    return {
+                        "status": "error",
+                        "code": w.code,
+                        "message": "分析任务已完成但结果为空",
+                        "task_id": task_id,
+                    }
+            else:
+                # 任务仍在进行中，返回 pending
+                return {
+                    "status": "pending",
+                    "code": w.code,
+                    "message": "分析任务正在进行中",
+                    "task_id": task_id,
+                    "ws_url": f"/ws/tasks/{task_id}",
+                }
+        else:
+            # 新任务已创建，返回 pending
+            return {
+                "status": "pending",
+                "code": w.code,
+                "message": "分析任务已创建",
+                "task_id": task_response["task_id"],
+                "ws_url": f"/ws/tasks/{task_response['task_id']}",
+            }
+
+    # 处理分析中的状态（用于兼容内存中的锁状态）
     if result.get("_status") in ("analyzing", "waiting"):
         return {
             "status": "pending",
@@ -427,15 +486,13 @@ async def analyze_watchlist_item(
             "_cache_key": result.get("_cache_key"),
         }
 
+    # 处理分析结果（缓存命中或直接完成的任务）
     support_level, resistance_level = _calc_support_resistance(df)
     current_price = result.get("close_price")
     verdict = result.get("verdict")
     score = result.get("score")
-    signal_type = result.get("signal_type")
-    support_level, resistance_level = _calc_support_resistance(df)
-    current_price = result.get("close_price")
-    verdict = result.get("verdict")
-    score = result.get("score")
+    if score is None:
+        score = result.get("total_score")
     signal_type = result.get("signal_type")
     trend_outlook = _build_trend_outlook(verdict, signal_type, score)
     buy_action = _build_buy_action(verdict, signal_type, score)

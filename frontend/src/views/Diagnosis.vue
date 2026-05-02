@@ -96,7 +96,7 @@
               <div class="analysis-item">
                 <span class="label">当前评分</span>
                 <el-tag :type="getScoreType(analysisResult.score)" size="large">
-                  {{ analysisResult.score ? analysisResult.score.toFixed(1) : '-' }}
+                  {{ analysisResult.score != null ? analysisResult.score.toFixed(1) : '-' }}
                 </el-tag>
               </div>
 
@@ -130,7 +130,7 @@
                           <el-icon class="info-icon"><InfoFilled /></el-icon>
                         </el-tooltip>
                       </span>
-                  <span class="detail-value">{{ analysisResult.kdj_j ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
+                  <span class="detail-value">{{ analysisResult.kdj_j != null ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
                 </div>
                 <div class="detail-item">
                   <span class="detail-label">
@@ -229,13 +229,15 @@
             </div>
           </div>
         </template>
-        <el-table
-          :data="historyData"
-          stripe
-          size="small"
-          max-height="300"
-          table-layout="auto"
-        >
+        <div class="history-table-wrap">
+          <el-table
+            :data="historyData"
+            stripe
+            size="small"
+            max-height="300"
+            table-layout="auto"
+            min-width="940"
+          >
           <el-table-column prop="check_date" label="交易日" width="110">
             <template #default="{ row }">
               {{ formatDate(row.check_date) }}
@@ -346,7 +348,8 @@
               </el-tag>
             </template>
           </el-table-column>
-        </el-table>
+          </el-table>
+        </div>
       </el-card>
     </template>
 
@@ -369,7 +372,7 @@ import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { B1Check, DiagnosisAnalysisDetails, KLineData, StockSearchItem, WatchlistItem } from '@/types'
+import type { B1Check, KLineData, StockSearchItem, WatchlistItem } from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const route = useRoute()
@@ -1092,7 +1095,6 @@ async function loadHistoryData() {
 
 // 分析任务轮询定时器
 let analysisPollingTimer: ReturnType<typeof setInterval> | null = null
-let currentAnalysisTaskId: number | null = null
 
 async function analyzeStock() {
   if (!configStore.dataInitialized) {
@@ -1107,7 +1109,6 @@ async function analyzeStock() {
   try {
     // 1. 提交分析任务
     const taskResponse = await apiAnalysis.analyze(stockCode.value, { signal })
-    currentAnalysisTaskId = taskResponse.task_id
 
     if (taskResponse.status === 'existing') {
       ElMessage.info(taskResponse.message || '复用现有分析任务')
@@ -1143,7 +1144,6 @@ function stopAnalysisPolling() {
     clearInterval(analysisPollingTimer)
     analysisPollingTimer = null
   }
-  currentAnalysisTaskId = null
 }
 
 async function checkAnalysisResult() {
@@ -1156,9 +1156,7 @@ async function checkAnalysisResult() {
     if (data.status === 'processing') {
       // 任务还在处理中，更新进度信息
       if (data.progress_meta) {
-        const meta = data.progress_meta
-        const progressText = meta.message || meta.stage_label || '分析中...'
-        // 可以在界面上显示进度
+        // 预留任务进度显示能力
       }
     } else if (data.status === 'completed') {
       // 任务完成，更新分析结果
@@ -1274,9 +1272,9 @@ function getScoreType(score?: number): string {
 }
 
 function getGateLabel(value?: boolean | null): string {
-  if (value === true) return '✓'
-  if (value === false) return '✗'
-  return '-'
+  if (value === true) return '是'
+  if (value === false) return '否'
+  return '待定'
 }
 
 function getGateTagType(value?: boolean | null): string {
@@ -1861,6 +1859,10 @@ function normalizeRouteCode(code: unknown): string {
         color: var(--color-warning);
       }
     }
+  }
+
+  .history-table-wrap {
+    overflow-x: auto;
   }
 
   .table-header-label {

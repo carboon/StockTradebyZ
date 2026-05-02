@@ -133,6 +133,33 @@ class MarketDataPreparer:
         self.selector        = selector
         self.n_jobs          = n_jobs
 
+    def _run_prepare_tasks(
+        self,
+        tasks: list[tuple],
+        *,
+        desc_process: str,
+        desc_thread: str,
+    ) -> Dict[str, pd.DataFrame]:
+        prepared: Dict[str, pd.DataFrame] = {}
+
+        def _collect(executor, desc: str) -> None:
+            futures = {executor.submit(_prepare_worker, args): args[0] for args in tasks}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc=desc, ncols=80):
+                code, df_out = fut.result()
+                if df_out is not None:
+                    prepared[code] = df_out
+
+        try:
+            with ProcessPoolExecutor(max_workers=self.n_jobs) as ex:
+                _collect(ex, desc_process)
+            return prepared
+        except (PermissionError, OSError):
+            prepared.clear()
+
+        with ThreadPoolExecutor(max_workers=self.n_jobs) as ex:
+            _collect(ex, desc_thread)
+        return prepared
+
     def prepare(self, data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         """完整预处理：turnover_n + selector.prepare_df()，多进程并行。"""
         tasks = [
@@ -140,15 +167,7 @@ class MarketDataPreparer:
              self.warmup_bars, self.n_turnover_days, self.selector)
             for code, df in data.items()
         ]
-        prepared: Dict[str, pd.DataFrame] = {}
-        with ProcessPoolExecutor(max_workers=self.n_jobs) as ex:
-            futures = {ex.submit(_prepare_worker, args): args[0] for args in tasks}
-            for fut in tqdm(as_completed(futures), total=len(futures),
-                            desc="准备数据 (mp)", ncols=80):
-                code, df_out = fut.result()
-                if df_out is not None:
-                    prepared[code] = df_out
-        return prepared
+        return self._run_prepare_tasks(tasks, desc_process="准备数据 (mp)", desc_thread="准备数据 (tp)")
 
     def prepare_base_only(
         self, data: Dict[str, pd.DataFrame]
@@ -162,15 +181,7 @@ class MarketDataPreparer:
              self.warmup_bars, self.n_turnover_days, None)
             for code, df in data.items()
         ]
-        prepared: Dict[str, pd.DataFrame] = {}
-        with ProcessPoolExecutor(max_workers=self.n_jobs) as ex:
-            futures = {ex.submit(_prepare_worker, args): args[0] for args in tasks}
-            for fut in tqdm(as_completed(futures), total=len(futures),
-                            desc="基础数据准备 (mp)", ncols=80):
-                code, df_out = fut.result()
-                if df_out is not None:
-                    prepared[code] = df_out
-        return prepared
+        return self._run_prepare_tasks(tasks, desc_process="基础数据准备 (mp)", desc_thread="基础数据准备 (tp)")
 
     def apply_selector_features(
         self,

@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import Stock, Watchlist, WatchlistAnalysis
+from app.models import Stock, User, Watchlist, WatchlistAnalysis
 
 
 # ========================================================================
@@ -34,6 +34,7 @@ from app.models import Stock, Watchlist, WatchlistAnalysis
 def create_watchlist_item(
     db,
     code: str,
+    user_id: int = None,
     reason: str = None,
     entry_price: float = None,
     position_ratio: float = None,
@@ -46,6 +47,7 @@ def create_watchlist_item(
     Args:
         db: 数据库会话
         code: 股票代码
+        user_id: 用户ID（如果为None，则查询数据库中的第一个用户）
         reason: 添加原因
         priority: 优先级
         is_active: 是否活跃
@@ -53,7 +55,15 @@ def create_watchlist_item(
     Returns:
         创建的Watchlist对象
     """
+    # 如果没有传入user_id，查询数据库中的第一个用户
+    if user_id is None:
+        user = db.query(User).first()
+        if user is None:
+            raise ValueError("数据库中没有用户，请先创建用户")
+        user_id = user.id
+
     item = Watchlist(
+        user_id=user_id,
         code=code,
         add_reason=reason,
         entry_price=entry_price,
@@ -870,7 +880,7 @@ def test_get_watchlist_analysis_other_watchlist_items(test_client_with_db) -> No
 @pytest.mark.api
 def test_analyze_watchlist_item_success(test_client_with_db) -> None:
     """
-    测试立即分析重点观察股票
+    测试立即分析重点观察股票 - 缓存命中场景
     """
     item = create_watchlist_item(
         test_client_with_db.db,
@@ -884,17 +894,23 @@ def test_analyze_watchlist_item_success(test_client_with_db) -> None:
         {"date": "2024-01-11", "open": 10.2, "high": 10.8, "low": 10.0, "close": 10.6, "volume": 1200000},
     ])
 
-    with patch("app.api.watchlist.analysis_service") as mock_service:
-        mock_service.analyze_stock.return_value = {
-            "close_price": 10.6,
-            "verdict": "PASS",
-            "score": 4.3,
-            "signal_type": "trend_start",
-            "comment": "结构良好",
-        }
-        mock_service.load_stock_data.return_value = mock_df
+    # Mock 缓存命中场景
+    cached_result = {
+        "close_price": 10.6,
+        "verdict": "PASS",
+        "score": 4.3,
+        "signal_type": "trend_start",
+        "comment": "结构良好",
+    }
 
-        response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        with patch("app.api.watchlist.analysis_cache") as mock_cache:
+            mock_service.load_stock_data.return_value = mock_df
+            mock_cache.get_cached_analysis.return_value = cached_result
+            mock_cache.make_cache_key.return_value = "600000_2024-01-11_v1"
+            mock_cache.STRATEGY_VERSION = "v1"
+
+            response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
 
     assert response.status_code == 200
     data = response.json()
@@ -937,17 +953,23 @@ def test_analyze_watchlist_item_updates_same_trade_day_record(test_client_with_d
         {"date": "2024-01-10", "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "volume": 1000000},
     ])
 
-    with patch("app.api.watchlist.analysis_service") as mock_service:
-        mock_service.analyze_stock.return_value = {
-            "close_price": 10.2,
-            "verdict": "FAIL",
-            "score": 2.8,
-            "signal_type": "distribution_risk",
-            "comment": "转弱",
-        }
-        mock_service.load_stock_data.return_value = mock_df
+    # Mock 缓存命中场景
+    cached_result = {
+        "close_price": 10.2,
+        "verdict": "FAIL",
+        "score": 2.8,
+        "signal_type": "distribution_risk",
+        "comment": "转弱",
+    }
 
-        response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        with patch("app.api.watchlist.analysis_cache") as mock_cache:
+            mock_service.load_stock_data.return_value = mock_df
+            mock_cache.get_cached_analysis.return_value = cached_result
+            mock_cache.make_cache_key.return_value = "600000_2024-01-10_v1"
+            mock_cache.STRATEGY_VERSION = "v1"
+
+            response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
 
     assert response.status_code == 200
     data = response.json()
@@ -989,18 +1011,24 @@ def test_analyze_watchlist_item_prefers_check_date(test_client_with_db) -> None:
         {"date": "2024-01-11", "open": 10.2, "high": 10.8, "low": 10.0, "close": 10.6, "volume": 1200000},
     ])
 
-    with patch("app.api.watchlist.analysis_service") as mock_service:
-        mock_service.analyze_stock.return_value = {
-            "close_price": 10.6,
-            "verdict": "PASS",
-            "score": 4.1,
-            "signal_type": "trend_start",
-            "comment": "结构良好",
-            "check_date": "2024-01-09",
-        }
-        mock_service.load_stock_data.return_value = mock_df
+    # Mock 缓存命中场景，结果中包含 check_date
+    cached_result = {
+        "close_price": 10.6,
+        "verdict": "PASS",
+        "score": 4.1,
+        "signal_type": "trend_start",
+        "comment": "结构良好",
+        "check_date": "2024-01-09",
+    }
 
-        response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        with patch("app.api.watchlist.analysis_cache") as mock_cache:
+            mock_service.load_stock_data.return_value = mock_df
+            mock_cache.get_cached_analysis.return_value = cached_result
+            mock_cache.make_cache_key.return_value = "600000_2024-01-11_v1"
+            mock_cache.STRATEGY_VERSION = "v1"
+
+            response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
 
     assert response.status_code == 200
     data = response.json()
@@ -1011,6 +1039,51 @@ def test_analyze_watchlist_item_prefers_check_date(test_client_with_db) -> None:
         WatchlistAnalysis.analysis_date == date(2024, 1, 9),
     ).first()
     assert saved is not None
+
+
+@pytest.mark.api
+def test_analyze_watchlist_item_cold_cache_creates_task(test_client_with_db) -> None:
+    """
+    测试冷缓存场景下会创建后台任务并返回 pending
+    """
+    item = create_watchlist_item(
+        test_client_with_db.db,
+        code="600000",
+        entry_price=10.0,
+        position_ratio=0.3,
+    )
+
+    mock_df = pd.DataFrame([
+        {"date": "2024-01-10", "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "volume": 1000000},
+    ])
+
+    # Mock 冷缓存场景：缓存未命中，没有正在进行的分析
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        with patch("app.api.watchlist.analysis_cache") as mock_cache:
+            with patch("app.api.watchlist.TaskService") as mock_task_service_class:
+                mock_service.load_stock_data.return_value = mock_df
+                mock_cache.get_cached_analysis.return_value = None  # 冷缓存
+                mock_cache.is_analysis_in_progress.return_value = False  # 无进行中的分析
+                mock_cache.make_cache_key.return_value = "600000_2024-01-10_v1"
+                mock_cache.STRATEGY_VERSION = "v1"
+
+                # Mock TaskService 实例和 create_task 方法
+                mock_task_service = MagicMock()
+                mock_task_service.create_task = AsyncMock(return_value={
+                    "task_id": 123,
+                    "ws_url": "/ws/tasks/123",
+                    "existing": False,
+                })
+                mock_task_service_class.return_value = mock_task_service
+
+                response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["code"] == "600000"
+    assert data["task_id"] == 123
+    assert data["ws_url"] == "/ws/tasks/123"
 
 
 @pytest.mark.api

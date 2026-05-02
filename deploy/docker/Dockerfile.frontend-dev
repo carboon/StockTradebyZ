@@ -1,0 +1,18 @@
+# 前端开发环境 Dockerfile
+# 支持热更新 (HMR)
+
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+
+# 安装依赖
+COPY frontend/package*.json /app/
+RUN npm ci
+
+# 复制源代码
+COPY frontend/ /app/
+
+EXPOSE 5173
+
+# 开发服务器支持热更新
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

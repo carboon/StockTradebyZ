@@ -26,10 +26,10 @@
 ### 2.1 一键启动
 
 ```bash
-./start-local.sh
+./start.sh
 ```
 
-这会调用共享控制器 `tools/localctl.py`，完成：
+这会调用共享控制器 `scripts/utils/localctl.py`（`tools/localctl.py` 为兼容入口），完成：
 
 - 判断运行环境并检查 Python 3.11+ / Node.js 18+
 - 如果缺少系统级 Python / Node / npm，会自动执行 `brew` / `apt-get` / `dnf` / `yum`
@@ -50,6 +50,7 @@
 ### 2.2 常用入口
 
 ```bash
+./start.sh
 ./start-local.sh
 ./stop-local.sh
 ./uninstall-local.sh
@@ -65,22 +66,23 @@ python3 tools/localctl.py status
 
 这时推荐路径是：
 
-1. 执行 `./start-local.sh`
+1. 执行 `./start.sh`
 2. 打开 `http://127.0.0.1:8000`
 3. 进入“配置管理”页面填写并验证 Token
 4. 进入“运维管理”页面启动首次初始化
 
 ### 2.4 常用入口脚本和真实行为
 
-当前面向普通用户只保留这 3 个脚本：
+当前面向普通用户保留这些入口脚本：
 
+- `start.sh`
 - `start-local.sh`
 - `stop-local.sh`
 - `uninstall-local.sh`
 
 其中：
 
-- `start-local.sh` 负责系统级依赖自举和应用启动
+- `start.sh` / `start-local.sh` 负责系统级依赖自举和应用启动
 - `stop-local.sh` / `uninstall-local.sh` 是原生 shell 脚本，不依赖 Python
 
 高级操作仍然可以直接调用：

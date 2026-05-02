@@ -13,6 +13,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_admin_user, require_user
+from app.api.rate_limit import status_api_rate_limit
+from app.cache import cache
 from app.config import settings
 from app.database import get_db
 from app.models import Config, Task, TaskLog
@@ -37,8 +39,16 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+# 缓存 TTL 配置（秒）
+STATUS_CACHE_TTL = 30      # 状态缓存 30 秒
+RUNNING_CACHE_TTL = 10     # 运行中任务缓存 10 秒
 OVERVIEW_CACHE_TTL_SECONDS = 20
 _overview_cache: dict = {"data": None, "expires_at": 0.0}
+
+
+def _is_test_mode() -> bool:
+    return "PYTEST_CURRENT_TEST" in os.environ
 
 
 def _is_failure_resolved(
@@ -59,6 +69,32 @@ def _ensure_tushare_ready() -> None:
     valid, message = service.verify_token()
     if not valid:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
+
+
+def _resolve_full_update_params(request: UpdateStartRequest, service: TushareService) -> dict:
+    """根据当前数据状态自动选择全量初始化的起点。"""
+    params = {
+        "reviewer": request.reviewer,
+        "skip_fetch": request.skip_fetch,
+        "start_from": request.start_from,
+    }
+    if request.skip_fetch or request.start_from > 1:
+        return params
+
+    try:
+        status = service.check_data_status()
+    except Exception:
+        return params
+
+    raw_status = status.get("raw_data") if isinstance(status, dict) else None
+    if not isinstance(raw_status, dict):
+        return params
+
+    if raw_status.get("exists") and raw_status.get("is_latest") is True:
+        params["skip_fetch"] = True
+        params["start_from"] = 2
+
+    return params
 
 
 def _resolve_runtime_config_value(db: Session, key: str) -> str:
@@ -124,8 +160,16 @@ def _build_environment_sections(tushare_service: TushareService, db: Session) ->
 
 
 @router.get("/status", response_model=DataStatusResponse)
-async def get_data_status(user=Depends(require_user)) -> DataStatusResponse:
-    """获取数据更新状态"""
+async def get_data_status(
+    _rate_limit: None = Depends(status_api_rate_limit),
+    user=Depends(require_user)
+) -> DataStatusResponse:
+    """获取数据更新状态（缓存 30 秒）"""
+    # 尝试从缓存获取
+    cached = None if _is_test_mode() else cache.get("data_status")
+    if cached:
+        return cached
+
     tushare_service = TushareService()
     status = tushare_service.check_data_status()
 
@@ -136,7 +180,10 @@ async def get_data_status(user=Depends(require_user)) -> DataStatusResponse:
         if isinstance(ts, (int, float)):
             status["raw_data"]["latest_date"] = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
-    return DataStatusResponse(**status)
+    result = DataStatusResponse(**status)
+    if not _is_test_mode():
+        cache.set("data_status", result, STATUS_CACHE_TTL)
+    return result
 
 
 @router.post("/start", response_model=TaskResponse)
@@ -163,15 +210,10 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
 
     _ensure_tushare_ready()
 
-    result = await task_service.create_task(
-        "full_update",
-        {
-            "reviewer": request.reviewer,
-            "skip_fetch": request.skip_fetch,
-            "start_from": request.start_from,
-            "trigger_source": "manual",
-        }
-    )
+    effective_params = _resolve_full_update_params(request, TushareService())
+    effective_params["trigger_source"] = "manual"
+
+    result = await task_service.create_task("full_update", effective_params)
 
     task = db.query(Task).filter(Task.id == result["task_id"]).first()
 
@@ -187,14 +229,22 @@ async def start_incremental_update(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> dict:
-    """启动增量数据更新
+    """启动增量数据更新（数据库版本）
 
     Args:
         end_date: 结束日期 (YYYY-MM-DD)，默认为今天
+
+    更新逻辑：
+    1. 获取所有股票列表
+    2. 对每只股票，检查数据库中最新日期
+    3. 从 Tushare 拉取新数据并存入数据库
     """
-    from app.services.market_service import market_service, MarketService
+    from app.services.daily_data_service import get_daily_data_service
+    from app.services.market_service import MarketService
+
     task_service = TaskService(db)
 
+    # 检查是否有全量任务在运行
     active_full_task = task_service.get_active_full_task()
     if active_full_task:
         return {
@@ -211,7 +261,6 @@ async def start_incremental_update(
             "success": False,
             "message": "已有更新任务正在运行",
             "running": True,
-            "state": update_state,
         }
 
     # 开始更新
@@ -222,26 +271,50 @@ async def start_incremental_update(
             "running": False,
         }
 
+    daily_data_service = get_daily_data_service()
+
     async def run_incremental_update():
         try:
             # 定义进度回调
-            def progress_cb(payload):
+            def progress_cb(*args, **kwargs):
+                """兼容旧式位置参数和新式 payload 字典的进度回调。"""
+                if args and isinstance(args[0], dict):
+                    payload = dict(args[0])
+                elif kwargs:
+                    payload = dict(kwargs)
+                elif len(args) >= 4:
+                    current, total, code, status = args[:4]
+                    payload = {
+                        "current": current,
+                        "total": total,
+                        "current_code": code,
+                        "status": status,
+                    }
+                else:
+                    return
+
                 MarketService.update_progress(payload)
 
-            result = market_service.incremental_update(
+            # 使用 asyncio.to_thread 在线程池中运行同步函数，避免阻塞事件循环
+            result = await asyncio.to_thread(
+                daily_data_service.incremental_update,
                 end_date=end_date,
                 progress_callback=progress_cb,
             )
 
-            if result.get("ok"):
-                MarketService.finish_update("增量更新完成")
+            if result.get("success"):
+                MarketService.finish_update(
+                    f"增量更新完成: {result.get('updated')} 更新, {result.get('skipped')} 跳过, {result.get('failed')} 失败"
+                )
             else:
-                failed_count = result.get("failed", 0)
-                MarketService.fail_update(f"增量更新失败，仍有 {failed_count} 只股票未完成，可稍后继续恢复。")
-        except Exception:
+                MarketService.fail_update(result.get("message", "增量更新失败"))
+        except Exception as e:
             import traceback
             traceback.print_exc()
-            MarketService.fail_update("增量更新异常中断，可稍后继续恢复。")
+            MarketService.fail_update(f"增量更新异常: {str(e)}")
+        finally:
+            # 清除缓存
+            cache.delete("data_status")
 
     # 在后台运行
     import asyncio
@@ -255,7 +328,13 @@ async def start_incremental_update(
 
 
 @router.get("/incremental-status")
-async def get_incremental_status(user=Depends(require_user)) -> dict:
+
+
+@router.get("/incremental-status")
+async def get_incremental_status(
+    _rate_limit: None = Depends(status_api_rate_limit),
+    user=Depends(require_user)
+) -> dict:
     """获取增量更新状态"""
     from app.services.market_service import MarketService
 
@@ -395,27 +474,47 @@ async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_
 
 
 @router.get("/running", response_model=TaskRunningResponse)
-async def get_running_tasks(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskRunningResponse:
+async def get_running_tasks(
+    _rate_limit: None = Depends(status_api_rate_limit),
+    db: Session = Depends(get_db),
+    user=Depends(require_user)
+) -> TaskRunningResponse:
+    """获取运行中的任务（缓存 10 秒）"""
+    # 尝试从缓存获取
+    cached = cache.get("running_tasks")
+    if cached:
+        return cached
+
     tasks = (
         db.query(Task)
         .filter(Task.status.in_(["pending", "running"]))
         .order_by(Task.created_at.desc())
         .all()
     )
-    return TaskRunningResponse(
+    result = TaskRunningResponse(
         tasks=[TaskItem.model_validate(t, from_attributes=True) for t in tasks],
         total=len(tasks),
     )
+    cache.set("running_tasks", result, RUNNING_CACHE_TTL)
+    return result
 
 
 @router.get("/environment", response_model=TaskEnvironmentResponse)
-async def get_task_environment(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskEnvironmentResponse:
+async def get_task_environment(
+    _rate_limit: None = Depends(status_api_rate_limit),
+    db: Session = Depends(get_db),
+    user=Depends(require_user)
+) -> TaskEnvironmentResponse:
     tushare_service = TushareService()
     return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service, db))
 
 
 @router.get("/diagnostics", response_model=TaskDiagnosticsResponse)
-async def get_task_diagnostics(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskDiagnosticsResponse:
+async def get_task_diagnostics(
+    _rate_limit: None = Depends(status_api_rate_limit),
+    db: Session = Depends(get_db),
+    user=Depends(require_user)
+) -> TaskDiagnosticsResponse:
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
     environment = _build_environment_sections(tushare_service, db)

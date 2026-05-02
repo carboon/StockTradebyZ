@@ -42,10 +42,12 @@ def get_current_user(
     """
     user = _try_bearer_token(credentials, db)
     if user:
+        _stash_user_context(request, user)
         return user
 
     user = _try_api_key(request, db)
     if user:
+        _stash_user_context(request, user, api_key_id=getattr(request.state, "api_key_id", None))
         return user
 
     raise HTTPException(
@@ -90,8 +92,12 @@ def get_optional_user(
     """
     user = _try_bearer_token(credentials, db)
     if user:
+        _stash_user_context(request, user)
         return user
-    return _try_api_key(request, db)
+    user = _try_api_key(request, db)
+    if user:
+        _stash_user_context(request, user, api_key_id=getattr(request.state, "api_key_id", None))
+    return user
 
 
 def require_user(
@@ -108,6 +114,14 @@ def require_user(
 
 
 # --- 内部辅助函数 ---
+
+
+def _stash_user_context(request: Request, user: User, *, api_key_id: int | None = None) -> None:
+    """将认证结果写入 request.state，供限流与用量统计复用。"""
+    request.state.user_id = user.id
+    request.state.user_role = user.role
+    if api_key_id is not None:
+        request.state.api_key_id = api_key_id
 
 
 def _try_bearer_token(
@@ -167,4 +181,5 @@ def _try_api_key(request: Request, db: Session) -> User | None:
         _api_key_last_update_cache[api_key_record.id] = current_time
 
     # 返回关联的用户
+    request.state.api_key_id = api_key_record.id
     return db.query(User).filter(User.id == api_key_record.user_id).first()

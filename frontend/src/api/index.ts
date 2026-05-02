@@ -8,7 +8,6 @@ import type {
   ConfigItem,
   ConfigResponse,
   DataStatus,
-  DiagnosisAnalyzeResponse,
   DiagnosisAnalyzeTaskResponse,
   DiagnosisHistoryResponse,
   DiagnosisHistoryStatusResponse,
@@ -27,7 +26,6 @@ import type {
   TaskListResponse,
   TaskLogListResponse,
   TaskOverviewResponse,
-  TaskProgressMeta,
   TaskRunningResponse,
   TaskResponse,
   TomorrowStarDatesResponse,
@@ -99,6 +97,12 @@ api.interceptors.response.use(
     }
     // 401 未授权：清除 token 并跳转登录页
     if (error.response?.status === 401) {
+      console.error('[401 Error]', {
+        url: error.config?.url,
+        method: error.config?.method,
+        hasToken: !!localStorage.getItem('stocktrade_token'),
+        currentPath: window.location.pathname
+      })
       localStorage.removeItem('stocktrade_token')
       // 避免在登录页循环跳转
       if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {

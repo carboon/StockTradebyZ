@@ -151,6 +151,21 @@ class Task(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
+    @classmethod
+    def filter_by_code(cls, code: str):
+        """构建过滤 params_json 中 code 字段的查询条件。
+
+        兼容 SQLite 和 PostgreSQL 的 JSON 查询。
+
+        Args:
+            code: 股票代码
+
+        Returns:
+            可用于 filter() 的查询表达式
+        """
+        # SQLAlchemy 2.x 中使用 as_string() 替代 astext
+        return cls.params_json["code"].as_string() == code
+
 
 class TaskLog(Base):
     """任务日志表"""

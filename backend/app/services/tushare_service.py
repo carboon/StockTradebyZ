@@ -5,6 +5,7 @@ Tushare 数据服务
 """
 import os
 import pandas as pd
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 import subprocess
@@ -218,6 +219,30 @@ class TushareService:
             end_date=end_date
         )
 
+    def get_latest_trade_date(self) -> Optional[str]:
+        """获取最近一个交易日；失败时返回 None。"""
+        if not self.token:
+            return None
+
+        try:
+            from datetime import timedelta
+
+            acquire_tushare_slot("trade_cal")
+            today = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+            df = self.pro.trade_cal(exchange="SSE", start_date=start_date, end_date=today)
+            if df is None or df.empty:
+                return None
+
+            trade_days = df[df["is_open"] == 1].sort_values("cal_date", ascending=False)
+            if trade_days.empty:
+                return None
+
+            latest = str(trade_days.iloc[0]["cal_date"])
+            return f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+        except Exception:
+            return None
+
     def is_trade_date_data_ready(
         self,
         trade_date: str,
@@ -248,69 +273,117 @@ class TushareService:
         return ready
 
     def get_raw_data_path(self, code: str) -> Path:
-        """获取原始数据文件路径"""
+        """获取原始数据文件路径（已弃用，保留用于兼容）"""
         from app.config import settings
         raw_dir = ROOT / settings.raw_data_dir
         return raw_dir / f"{code}.csv"
 
     def load_stock_data(self, code: str) -> Optional[pd.DataFrame]:
-        """从本地加载股票数据"""
-        csv_path = self.get_raw_data_path(code)
-        if not csv_path.exists():
+        """从数据库加载股票数据（替代原来的 CSV 读取）"""
+        from app.services.kline_service import get_daily_data
+        from app.database import SessionLocal
+        from datetime import timedelta
+
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=365)
+
+        with SessionLocal() as db:
+            df = get_daily_data(db, code, start_date, end_date)
+
+        if df is None or df.empty:
             return None
-        df = pd.read_csv(csv_path)
+
         df.columns = [c.lower() for c in df.columns]
-        df["date"] = pd.to_datetime(df["date"])
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+        else:
+            return None
+
         return df.sort_values("date").reset_index(drop=True)
 
     def check_data_status(self) -> dict:
-        """检查数据状态"""
+        """检查数据状态（基于数据库）"""
         from app.config import settings
+        from app.database import SessionLocal
+        from app.models import StockDaily, Candidate, AnalysisResult
+        from sqlalchemy import func, select, distinct
         import json
-        from datetime import datetime
 
-        data_dir = ROOT / settings.data_dir
+        latest_trade_date = self.get_latest_trade_date()
+
         status = {
-            "raw_data": {"exists": False, "count": 0, "latest_date": None},
+            "raw_data": {
+                "exists": False,
+                "count": 0,
+                "latest_date": None,
+                "latest_trade_date": latest_trade_date,
+                "is_latest": False,
+            },
             "candidates": {"exists": False, "count": 0, "latest_date": None},
             "analysis": {"exists": False, "count": 0, "latest_date": None},
             "kline": {"exists": False, "count": 0, "latest_date": None},
         }
 
-        # 检查原始数据
-        raw_dir = data_dir / "raw"
-        if raw_dir.exists():
-            csv_files = list(raw_dir.glob("*.csv"))
-            status["raw_data"]["exists"] = len(csv_files) > 0
-            status["raw_data"]["count"] = len(csv_files)
-            if csv_files:
-                status["raw_data"]["latest_date"] = max(f.stat().st_mtime for f in csv_files)
+        with SessionLocal() as db:
+            # 检查 K线数据（数据库）
+            kline_count = db.execute(select(func.count()).select_from(StockDaily)).scalar()
+            if kline_count and kline_count > 0:
+                status["raw_data"]["exists"] = True
+                status["raw_data"]["count"] = kline_count
 
-        # 检查候选数据
-        candidates_file = data_dir / "candidates" / "candidates_latest.json"
-        if candidates_file.exists():
-            try:
-                with open(candidates_file, "r") as f:
-                    data = json.load(f)
-                    status["candidates"]["exists"] = True
-                    status["candidates"]["latest_date"] = data.get("pick_date")
-            except:
-                pass
+                # 获取最新日期
+                latest = db.execute(
+                    select(StockDaily.trade_date)
+                    .order_by(StockDaily.trade_date.desc())
+                    .limit(1)
+                ).first()
+                if latest:
+                    latest_local_date = latest[0].isoformat() if hasattr(latest[0], "isoformat") else str(latest[0])
+                    status["raw_data"]["latest_date"] = latest_local_date
+                    status["raw_data"]["is_latest"] = bool(
+                        latest_trade_date and latest_local_date == latest_trade_date
+                    )
 
-        # 检查分析数据
-        review_dir = data_dir / "review"
-        if review_dir.exists():
-            date_dirs = [d for d in review_dir.iterdir() if d.is_dir()]
-            status["analysis"]["exists"] = len(date_dirs) > 0
-            status["analysis"]["count"] = len(date_dirs)
-            if date_dirs:
-                status["analysis"]["latest_date"] = max(d.name for d in date_dirs)
+                # 获取有数据的股票数
+                stocks_with_data = db.execute(
+                    select(func.count(distinct(StockDaily.code)))
+                ).scalar()
+                if stocks_with_data:
+                    status["kline"]["exists"] = True
+                    status["kline"]["count"] = stocks_with_data
 
-        # 检查K线图
-        kline_dir = data_dir / "kline"
-        if kline_dir.exists():
-            jpg_files = list(kline_dir.rglob("*.jpg"))
-            status["kline"]["exists"] = len(jpg_files) > 0
-            status["kline"]["count"] = len(jpg_files)
+            # 检查候选数据
+            candidate_count = db.execute(
+                select(func.count()).select_from(Candidate)
+            ).scalar()
+            if candidate_count and candidate_count > 0:
+                status["candidates"]["exists"] = True
+                status["candidates"]["count"] = candidate_count
+
+                # 获取最新候选日期
+                latest_candidate = db.execute(
+                    select(Candidate.pick_date)
+                    .order_by(Candidate.pick_date.desc())
+                    .limit(1)
+                ).first()
+                if latest_candidate:
+                    status["candidates"]["latest_date"] = latest_candidate[0].isoformat()
+
+            # 检查分析结果
+            analysis_count = db.execute(
+                select(func.count()).select_from(AnalysisResult)
+            ).scalar()
+            if analysis_count and analysis_count > 0:
+                status["analysis"]["exists"] = True
+                status["analysis"]["count"] = analysis_count
+
+                # 获取最新分析日期
+                latest_analysis = db.execute(
+                    select(AnalysisResult.pick_date)
+                    .order_by(AnalysisResult.pick_date.desc())
+                    .limit(1)
+                ).first()
+                if latest_analysis:
+                    status["analysis"]["latest_date"] = latest_analysis[0].isoformat()
 
         return status

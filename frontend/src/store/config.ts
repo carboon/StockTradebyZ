@@ -42,6 +42,18 @@ export const useConfigStore = defineStore('config', () => {
     if (!status.candidates?.exists) missing.push('候选结果')
     if (!status.analysis?.exists) missing.push('分析结果')
 
+    if (status.raw_data?.exists && status.raw_data?.is_latest) {
+      if (!status.candidates?.exists && !status.analysis?.exists) {
+        return '原始数据已存在且已是最新交易日，当前只需补全候选结果和分析结果；重新初始化时会自动跳过重新抓取。'
+      }
+      if (!status.candidates?.exists) {
+        return '原始数据已存在且已是最新交易日，当前只需补全候选结果；重新初始化时会自动跳过重新抓取。'
+      }
+      if (!status.analysis?.exists) {
+        return '原始数据已存在且已是最新交易日，当前只需补全分析结果；重新初始化时会自动跳过重新抓取。'
+      }
+    }
+
     if (missing.length > 0) {
       return `尚未完成首次初始化，当前缺少：${missing.join('、')}。请前往任务中心继续初始化。`
     }

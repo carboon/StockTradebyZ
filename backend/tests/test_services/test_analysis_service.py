@@ -475,7 +475,7 @@ def test_single_stock_analysis(analysis_service, sample_stock_df_b1_pass, mock_q
                 "comment": mock_quant_reviewer["comment"],
                 "signal_type": mock_quant_reviewer["signal_type"]
             }):
-                result = analysis_service.analyze_stock("600000", reviewer="quant")
+                result = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=False)
 
                 assert result["code"] == "600000"
                 assert "b1_passed" in result
@@ -498,21 +498,26 @@ def test_single_stock_analysis_persists_result_by_check_date(analysis_service, t
             mock_settings.review_dir = review_dir
             mock_settings.raw_data_dir = test_root / "raw"
 
-            with patch.object(analysis_service, "check_b1_strategy", return_value={
-                "code": "600000",
-                "b1_passed": True,
-                "kdj_j": 12.3,
-                "close_price": 10.8,
-                "check_date": "2024-01-15",
-            }):
-                with patch.object(analysis_service, "_quant_review", return_value={
-                    "score": 4.6,
-                    "verdict": "PASS",
-                    "comment": "趋势健康",
-                    "signal_type": "trend_start",
-                    "scores": {"trend_structure": 4},
-                }):
-                    result = analysis_service.analyze_stock("600000", reviewer="quant")
+            # Also patch the cache service's ROOT and settings for saving
+            with patch("app.services.analysis_cache.settings") as cache_settings:
+                with patch("app.services.analysis_cache.ROOT", test_root):
+                    cache_settings.review_dir = review_dir
+
+                    with patch.object(analysis_service, "check_b1_strategy", return_value={
+                        "code": "600000",
+                        "b1_passed": True,
+                        "kdj_j": 12.3,
+                        "close_price": 10.8,
+                        "check_date": "2024-01-15",
+                    }):
+                        with patch.object(analysis_service, "_quant_review", return_value={
+                            "score": 4.6,
+                            "verdict": "PASS",
+                            "comment": "趋势健康",
+                            "signal_type": "trend_start",
+                            "scores": {"trend_structure": 4},
+                        }):
+                            result = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=False)
 
             saved_file = review_dir / "2024-01-15" / "600000.json"
             assert result["score"] == 4.6
@@ -546,7 +551,7 @@ def test_single_stock_analysis_llm_reviewer(analysis_service, sample_stock_df):
             }
             mock_b1.return_value = selector_instance
 
-            result = analysis_service.analyze_stock("600000", reviewer="glm")
+            result = analysis_service.analyze_stock("600000", reviewer="glm", use_cache=False)
 
             assert result["code"] == "600000"
             assert result["score"] is None
@@ -1156,17 +1161,31 @@ def test_analyze_stock_uses_cache(analysis_service, tmp_path):
             mock_settings.review_dir = review_dir
             mock_settings.raw_data_dir = test_root / "raw"
 
-            # 清空内存缓存，强制从文件读取
-            from app.services.analysis_cache import analysis_cache
-            analysis_cache.clear_memory_cache()
+            # Also patch the cache service's ROOT and settings
+            with patch("app.services.analysis_cache.settings") as cache_settings:
+                with patch("app.services.analysis_cache.ROOT", test_root):
+                    cache_settings.review_dir = review_dir
 
-            # 分析应返回缓存结果
-            result = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=True)
+                    # Mock check_b1_strategy to return the expected date
+                    with patch.object(analysis_service, "check_b1_strategy", return_value={
+                        "code": "600000",
+                        "b1_passed": True,
+                        "kdj_j": 12.3,
+                        "close_price": 10.5,
+                        "check_date": "2024-01-15",
+                    }):
+                        # 清空内存缓存，强制从文件读取
+                        from app.services.analysis_cache import analysis_cache
+                        analysis_cache.clear_memory_cache()
 
-            assert result["_cached"] is True
-            assert result["total_score"] == 4.5
-            assert result["verdict"] == "PASS"
-            assert result["comment"] == "缓存结果"
+                        # 分析应返回缓存结果
+                        result = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=True)
+
+                        assert result["_cached"] is True
+                        assert result["total_score"] == 4.5
+                        assert result["score"] == 4.5
+                        assert result["verdict"] == "PASS"
+                        assert result["comment"] == "缓存结果"
 
 
 @pytest.mark.service
@@ -1184,30 +1203,35 @@ def test_analyze_stock_duplicate_prevention(analysis_service, tmp_path):
             mock_settings.review_dir = review_dir
             mock_settings.raw_data_dir = test_root / "raw"
 
-            # Mock B1 策略检查
-            with patch.object(analysis_service, "check_b1_strategy", return_value={
-                "code": "600000",
-                "b1_passed": True,
-                "check_date": "2024-01-15",
-            }):
-                # Mock 量化评分（设置一个模拟耗时操作）
-                import time
-                def slow_quant_review(code):
-                    time.sleep(0.1)  # 模拟耗时
-                    return {
-                        "score": 4.5,
-                        "verdict": "PASS",
-                        "comment": "计算结果",
-                    }
+            # Also patch the cache service's ROOT and settings
+            with patch("app.services.analysis_cache.settings") as cache_settings:
+                with patch("app.services.analysis_cache.ROOT", test_root):
+                    cache_settings.review_dir = review_dir
 
-                with patch.object(analysis_service, "_quant_review", side_effect=slow_quant_review):
-                    from app.services.analysis_cache import analysis_cache
-                    analysis_cache.clear_memory_cache()
+                    # Mock B1 策略检查
+                    with patch.object(analysis_service, "check_b1_strategy", return_value={
+                        "code": "600000",
+                        "b1_passed": True,
+                        "check_date": "2024-01-15",
+                    }):
+                        # Mock 量化评分（设置一个模拟耗时操作）
+                        import time
+                        def slow_quant_review(code):
+                            time.sleep(0.1)  # 模拟耗时
+                            return {
+                                "score": 4.5,
+                                "verdict": "PASS",
+                                "comment": "计算结果",
+                            }
 
-                    # 第一次分析
-                    result1 = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=True)
-                    assert result1.get("_status") not in ("analyzing", "waiting")
-                    assert result1.get("_cached") is False
+                        with patch.object(analysis_service, "_quant_review", side_effect=slow_quant_review):
+                            from app.services.analysis_cache import analysis_cache
+                            analysis_cache.clear_memory_cache()
+
+                            # 第一次分析
+                            result1 = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=True)
+                            assert result1.get("_status") not in ("analyzing", "waiting")
+                            assert result1.get("_cached") is False
 
                     # 在第一次分析完成前，再次请求
                     # 由于第一次已经完成，这里测试需要更复杂的并发控制

@@ -54,7 +54,8 @@ htmlcov/
 
 # Local databases and runtime data
 data/
-file:test_db
+file:test_db*
+file:memdb*
 *.db
 *.db-shm
 *.db-wal

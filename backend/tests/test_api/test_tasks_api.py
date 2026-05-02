@@ -247,6 +247,42 @@ def test_start_full_update_default_params(test_client_with_db: Any) -> None:
 
 
 @pytest.mark.api
+def test_start_full_update_auto_resume_when_raw_data_is_latest(test_client_with_db: Any) -> None:
+    """
+    测试默认初始化在原始数据已最新时自动从第2步补全。
+    """
+    with patch("app.api.tasks.TushareService") as mock_service_class, \
+            patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task) as mock_create_task, \
+            patch("app.main.manager", MagicMock()):
+        mock_service = MagicMock()
+        mock_service.verify_token.return_value = (True, "ok")
+        mock_service.check_data_status.return_value = {
+            "raw_data": {
+                "exists": True,
+                "count": 8199265,
+                "latest_date": "2026-04-30",
+                "latest_trade_date": "2026-04-30",
+                "is_latest": True,
+            },
+            "candidates": {"exists": False, "count": 0, "latest_date": None},
+            "analysis": {"exists": False, "count": 0, "latest_date": None},
+            "kline": {"exists": True, "count": 5512, "latest_date": None},
+        }
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.post(
+            "/api/v1/tasks/start",
+            json={},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task"]["params_json"]["skip_fetch"] is True
+    assert data["task"]["params_json"]["start_from"] == 2
+    mock_create_task.assert_called_once()
+
+
+@pytest.mark.api
 def test_start_full_update_with_params(test_client_with_db: Any) -> None:
     """
     测试启动全量更新 - 自定义参数
@@ -967,9 +1003,9 @@ def test_single_analysis_task_allows_different_stock(test_client_with_db: Any) -
 @pytest.mark.api
 def test_single_analysis_task_allows_expired_old_task(test_client_with_db: Any) -> None:
     """
-    测试单股分析任务去重 - 过期任务后允许新任务
+    测试单股分析任务去重 - 同日复用已完成任务
 
-    超过1小时的已完成任务不应阻止新任务创建。
+    当日已完成的任务应被复用，无论创建时间。
     """
     from datetime import timedelta
     old_time = utc_now() - timedelta(hours=2)
@@ -1003,5 +1039,48 @@ def test_single_analysis_task_allows_expired_old_task(test_client_with_db: Any) 
         finally:
             loop.close()
 
+    # 同日的已完成任务应该被复用
+    assert result["existing"] is True
+    assert result["task_id"] == old_task.id
+
+
+@pytest.mark.api
+def test_single_analysis_task_allows_different_reviewer(test_client_with_db: Any) -> None:
+    """
+    测试单股分析任务去重 - 不同reviewer创建新任务
+
+    当同一股票但不同reviewer时，应创建新任务。
+    """
+    now = utc_now()
+    existing_task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "600000", "reviewer": "quant"},
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add(existing_task)
+    test_client_with_db.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task", side_effect=_close_scheduled_task):
+        from app.services.task_service import TaskService
+        task_service = TaskService(test_client_with_db.db)
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                task_service.create_task(
+                    "single_analysis",
+                    {"code": "600000", "reviewer": "qwen"}
+                )
+            )
+        finally:
+            loop.close()
+
+    # 不同reviewer应该创建新任务
     assert result["existing"] is False
-    assert result["task_id"] != old_task.id
+    assert result["task_id"] != existing_task.id

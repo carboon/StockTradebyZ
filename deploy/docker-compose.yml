@@ -1,0 +1,130 @@
+# 统一的 Docker Compose 配置
+# 使用环境变量 MODE 控制模式: dev (默认) 或 prod
+#
+# 开发模式:
+#   cd deploy && docker compose up
+#   或 MODE=dev docker compose up
+#
+# 生产模式:
+#   MODE=prod docker compose up
+#
+# PostgreSQL 模式:
+#   USE_POSTGRES=true docker compose up
+
+services:
+  # PostgreSQL 数据库 (可选)
+  postgres:
+    image: postgres:16-alpine
+    container_name: stocktrade-postgres
+    profiles:
+      - postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-stocktrade}
+      - POSTGRES_USER=${POSTGRES_USER:-stocktrade}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-stocktrade123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stocktrade}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - stocktrade-net
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.${MODE:-dev}
+    container_name: stocktrade-backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # 使用命名卷代替相对路径挂载 (解决 Docker Desktop for Mac 路径问题)
+      - stocktrade_data:/app/data
+      # 开发模式：代码热更新 (生产模式挂载到 /dev/null 禁用)
+      - stocktrade_backend:/app/backend${MOUNT_DISABLED:-}
+      - stocktrade_pipeline:/app/pipeline${MOUNT_DISABLED:-}
+      - stocktrade_agent:/app/agent${MOUNT_DISABLED:-}
+      - stocktrade_config:/app/config:ro
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app:/app/backend
+      # PostgreSQL 模式使用 DATABASE_URL，否则使用 SQLite
+      # 默认使用 SQLite (可随时切换)
+      - DATABASE_URL=${DATABASE_URL:-}
+      - BACKEND_HOST=0.0.0.0
+      - BACKEND_PORT=8000
+      - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://frontend
+      # 开发模式标识
+      - ENVIRONMENT=${MODE:-dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: ${RESTART:-unless-stopped}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - stocktrade-net
+
+  # 开发模式的前端服务 (带热更新)
+  frontend-dev:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.frontend-dev
+    container_name: stocktrade-frontend-dev
+    profiles:
+      - dev
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - stocktrade_frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_BASE_URL=/api
+      - VITE_API_PROXY_TARGET=http://backend:8000
+    command: npm run dev -- --host 0.0.0.0
+    networks:
+      - stocktrade-net
+
+  # 生产模式的 Nginx 服务
+  nginx:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.nginx
+    container_name: stocktrade-nginx
+    profiles:
+      - prod
+    ports:
+      - "${NGINX_PORT:-127.0.0.1:80}:80"
+    volumes:
+      - stocktrade_nginx_config:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    networks:
+      - stocktrade-net
+
+networks:
+  stocktrade-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  stocktrade_data:
+  stocktrade_backend:
+  stocktrade_pipeline:
+  stocktrade_agent:
+  stocktrade_config:
+  stocktrade_frontend:
+  stocktrade_nginx_config:

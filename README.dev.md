@@ -34,7 +34,7 @@
 ### 本地部署模式调试
 
 ```bash
-./start-local.sh
+./start.sh
 ```
 
 这不是双服务模式。它会：

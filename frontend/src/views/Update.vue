@@ -186,6 +186,7 @@
                 <div class="incremental-progress-card__title">最新交易日增量更新进行中</div>
                 <div class="incremental-progress-card__meta">
                   进度 {{ incrementalStatus.current }}/{{ incrementalStatus.total }}
+                  <span v-if="incrementalStatus.total > 0"> / {{ incrementalProgressLabel }}</span>
                   <span v-if="incrementalStatus.eta_seconds != null"> / 预计剩余 {{ formatSeconds(incrementalStatus.eta_seconds) }}</span>
                   <span v-if="incrementalStatus.current_code"> / 当前 {{ incrementalStatus.current_code }}</span>
                 </div>
@@ -195,7 +196,7 @@
               </div>
             </div>
             <el-progress
-              :percentage="incrementalStatus.progress"
+              :percentage="incrementalProgressBarValue"
               :stroke-width="10"
             />
           </el-card>
@@ -550,13 +551,26 @@ const activeWorkHint = computed(() => {
     return `当前有 ${runningTasksCount.value} 个全量任务正在运行`
   }
   if (incrementalStatus.value.running) {
-    return `增量更新进行中：${incrementalStatus.value.current}/${incrementalStatus.value.total || '-'}`
+    return `增量更新进行中：${incrementalStatus.value.current}/${incrementalStatus.value.total || '-'}${incrementalStatus.value.total > 0 ? ` (${incrementalProgressLabel.value})` : ''}`
   }
   if (runningTasksCount.value > 0) {
     return `当前有 ${runningTasksCount.value} 个任务正在运行`
   }
   return ''
 })
+
+const incrementalProgressPrecise = computed(() => {
+  const total = incrementalStatus.value.total
+  if (!total || total <= 0) return 0
+  return Math.min(100, Math.max(0, (incrementalStatus.value.current / total) * 100))
+})
+
+const incrementalProgressBarValue = computed(() => {
+  const precise = incrementalProgressPrecise.value
+  return precise > 0 && precise < 1 ? 1 : Math.round(precise)
+})
+
+const incrementalProgressLabel = computed(() => `${incrementalProgressPrecise.value.toFixed(2)}%`)
 
 const bootstrapFinished = computed(() => {
   return dataLoaded.value
@@ -1461,7 +1475,7 @@ function buildDiagnosticsSummary() {
   ]
   if (incrementalStatus.value.running) {
     lines.push(
-      `增量更新: ${incrementalStatus.value.current}/${incrementalStatus.value.total} / 预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}`
+      `增量更新: ${incrementalStatus.value.current}/${incrementalStatus.value.total} / ${incrementalProgressLabel.value} / 预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}`
     )
   }
   for (const check of diagnosticChecks.value) {

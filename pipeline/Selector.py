@@ -28,7 +28,20 @@ from typing import Dict, List, Optional, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
-from numba import njit as _njit
+
+try:
+    from numba import njit as _njit
+except Exception:  # pragma: no cover
+    # 某些环境下 numba 会因 coverage 兼容性问题导入失败，此时退回纯 Python 实现。
+    def _njit(*args, **kwargs):
+        del kwargs
+        if args and callable(args[0]) and len(args) == 1:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
 
 # =============================================================================
 # Numba 加速核心函数
@@ -176,11 +189,13 @@ def compute_weekly_close(df: pd.DataFrame) -> pd.Series:
     不依赖固定 resample 锚点（周日/周五），而是直接按
     ISO 周编号分组取最后一行，index 保持为真实交易日日期。
     """
-    close = (
-        df["close"].astype(float)
-        if isinstance(df.index, pd.DatetimeIndex)
-        else df.set_index("date")["close"].astype(float)
-    )
+    if isinstance(df.index, pd.DatetimeIndex):
+        close = df["close"].astype(float)
+    else:
+        indexed = df.copy()
+        indexed["date"] = pd.to_datetime(indexed["date"])
+        indexed = indexed.set_index("date")
+        close = indexed["close"].astype(float)
     # 按 ISO 年+周分组，取每组最后一个交易日的收盘价
     # isocalendar().week 返回 1-53，加上年份避免跨年混淆
     idx = close.index

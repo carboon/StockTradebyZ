@@ -133,7 +133,13 @@ export interface TaskProgressMeta {
 }
 
 export interface DataStatus {
-  raw_data: { exists: boolean; count: number; latest_date?: number | string }
+  raw_data: {
+    exists: boolean
+    count: number
+    latest_date?: number | string
+    latest_trade_date?: string | null
+    is_latest?: boolean
+  }
   candidates: { exists: boolean; count: number; latest_date?: string }
   analysis: { exists: boolean; count: number; latest_date?: string }
   kline: { exists: boolean; count: number; latest_date?: string | null }

@@ -33,11 +33,16 @@ if pythonpath_entries:
 from app.config import settings
 from sqlalchemy import text
 
-from app.database import engine, Base, get_db
+from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
 
-# 创建数据库表
-Base.metadata.create_all(bind=engine)
+# 测试环境检测：当 pytest 正在运行时，跳过数据库初始化
+# pytest 会自动设置 PYTEST_CURRENT_TEST 环境变量
+_TEST_MODE = "PYTEST_CURRENT_TEST" in os.environ
+
+# 创建数据库表（仅在非测试环境）
+if not _TEST_MODE:
+    Base.metadata.create_all(bind=engine)
 
 
 def hydrate_runtime_env_from_db() -> None:
@@ -72,7 +77,8 @@ def hydrate_runtime_env_from_db() -> None:
             os.environ[env_key] = value
 
 
-hydrate_runtime_env_from_db()
+if not _TEST_MODE:
+    hydrate_runtime_env_from_db()
 
 
 def ensure_watchlist_schema() -> None:
@@ -137,7 +143,8 @@ def ensure_task_center_schema() -> None:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN progress_meta_json JSON"))
 
 
-ensure_task_center_schema()
+if not _TEST_MODE:
+    ensure_task_center_schema()
 
 
 def ensure_watchlist_user_schema() -> None:
@@ -195,7 +202,8 @@ def ensure_watchlist_user_schema() -> None:
             print("迁移完成：watchlist 表已添加 user_id 列")
 
 
-ensure_watchlist_user_schema()
+if not _TEST_MODE:
+    ensure_watchlist_user_schema()
 
 
 def ensure_admin_user() -> None:
@@ -213,7 +221,7 @@ def ensure_admin_user() -> None:
             conn.execute(
                 text(
                     "INSERT INTO users (username, hashed_password, role, is_active, daily_quota, created_at, updated_at) "
-                    "VALUES (:username, :password, 'admin', 1, 10000, :now, :now)"
+                    "VALUES (:username, :password, 'admin', true, 10000, :now, :now)"
                 ),
                 {
                     "username": settings.admin_default_username,
@@ -224,7 +232,8 @@ def ensure_admin_user() -> None:
             print(f"已创建默认管理员账户: {settings.admin_default_username}")
 
 
-ensure_admin_user()
+if not _TEST_MODE:
+    ensure_admin_user()
 
 
 @asynccontextmanager
@@ -275,9 +284,28 @@ app.add_middleware(
 from app.middleware.usage import UsageTrackingMiddleware
 app.add_middleware(UsageTrackingMiddleware)
 
-# API 限流中间件
-from app.middleware.rate_limit import RateLimitMiddleware
-app.add_middleware(RateLimitMiddleware)
+
+@app.middleware("http")
+async def db_session_middleware(request: Request, call_next):
+    """为每个 HTTP 请求提供并回收独立数据库会话。"""
+    request.state.db_session = SessionLocal()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        app_db = getattr(request.state, "db_session", None)
+        if app_db is not None:
+            try:
+                app_db.rollback()
+            except Exception:
+                pass
+            try:
+                app_db.close()
+            except Exception:
+                pass
+
+# 注意：速率限制已改为依赖注入方式（在各个路由中使用），
+# 这样可以在认证之后执行，正确获取用户身份
 
 # 挂载数据目录 (用于访问 K线图等静态资源)
 data_dir = ROOT / "data"
@@ -350,6 +378,7 @@ manager = ConnectionManager()
 
 
 @app.get("/health")
+@app.get("/api/health")
 async def health_check(db: DBSession = Depends(get_db)):
     """健康检查，包含数据库连通性验证。"""
     db_status = "ok"

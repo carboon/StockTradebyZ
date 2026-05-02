@@ -2,9 +2,10 @@
 Analysis Service
 ~~~~~~~~~~~~~~~~
 股票分析服务，集成现有 Selector 和 quant_reviewer
+优先使用数据库；测试和迁移场景下兼容 CSV 回退。
 """
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 import pandas as pd
@@ -17,6 +18,8 @@ if str(ROOT) not in sys.path:
 
 from app.config import settings
 from app.services.analysis_cache import analysis_cache
+from app.services.kline_service import get_daily_data
+from app.database import SessionLocal
 
 
 class AnalysisService:
@@ -30,15 +33,75 @@ class AnalysisService:
         self._reviewer = None
         self._history_active_pool_cache: dict[tuple[str, str, int, int], dict[pd.Timestamp, set[str]]] = {}
 
-    def load_stock_data(self, code: str) -> Optional[pd.DataFrame]:
-        """加载股票数据"""
-        raw_dir = ROOT / settings.raw_data_dir
-        csv_path = raw_dir / f"{code}.csv"
-        if not csv_path.exists():
+    def load_stock_data(self, code: str, days: int = 365) -> Optional[pd.DataFrame]:
+        """加载股票数据。
+
+        Args:
+            code: 股票代码
+            days: 加载最近多少天的数据（默认365天）
+
+        Returns:
+            DataFrame with columns: date, open, close, high, low, volume
+        """
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=days * 2)  # 多取一些，过滤交易日
+
+        with SessionLocal() as db:
+            df = get_daily_data(db, code, start_date, end_date)
+
+        if df is not None and not df.empty:
+            # 标准化列名
+            df.columns = [c.lower() for c in df.columns]
+
+            # 确保 date 列存在
+            if "date" not in df.columns:
+                return None
+
+            # 只取最近的 N 天数据
+            df = df.tail(days).copy()
+            return df.sort_values("date").reset_index(drop=True)
+
+        return self._load_stock_data_from_csv(code, days)
+
+    def _load_stock_data_from_csv(self, code: str, days: int) -> Optional[pd.DataFrame]:
+        """兼容旧数据目录结构，从 CSV 读取股票数据。"""
+        raw_data_dir = Path(settings.raw_data_dir)
+        candidate_dirs = []
+        if raw_data_dir.is_absolute():
+            candidate_dirs.append(raw_data_dir)
+        else:
+            candidate_dirs.append(ROOT / raw_data_dir)
+        candidate_dirs.append(ROOT)
+
+        csv_path = None
+        for candidate_dir in candidate_dirs:
+            path = candidate_dir / f"{code}.csv"
+            if path.exists():
+                csv_path = path
+                break
+
+        if csv_path is None:
             return None
+
         df = pd.read_csv(csv_path)
+        if df.empty:
+            return None
+
+        # 标准化列名
         df.columns = [c.lower() for c in df.columns]
-        df["date"] = pd.to_datetime(df["date"])
+
+        # 确保 date 列存在
+        if "date" not in df.columns:
+            return None
+
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
+        if df.empty:
+            return None
+
+        # 只取最近的 N 天数据
+        df = df.tail(days).copy()
+
         return df.sort_values("date").reset_index(drop=True)
 
     def _build_b1_selector(self):
@@ -128,6 +191,24 @@ class AnalysisService:
             and verdict == "PASS"
             and signal_type == "trend_start"
         )
+
+    @staticmethod
+    def _calculate_volume_health(df: pd.DataFrame) -> Optional[bool]:
+        """基于最近成交量判断量能是否健康。"""
+        vol_col = None
+        if "volume" in df.columns:
+            vol_col = "volume"
+        elif "vol" in df.columns:
+            vol_col = "vol"
+
+        if not vol_col:
+            return None
+
+        recent_vol = df[vol_col].tail(5).mean()
+        ma_vol = df[vol_col].tail(20).mean()
+        if pd.notna(ma_vol) and ma_vol > 0:
+            return bool(recent_vol >= ma_vol * 0.5)
+        return None
 
     def _build_active_pool_sets(
         self,
@@ -271,19 +352,7 @@ class AnalysisService:
             if "wma_bull" in last_row and pd.notna(last_row["wma_bull"]):
                 weekly_ma_aligned = bool(last_row["wma_bull"])
 
-            # 量能健康判断（简单判断：最近几天成交量是否健康）
-            volume_healthy = None
-            vol_col = None
-            if "volume" in df_prepared.columns:
-                vol_col = "volume"
-            elif "vol" in df_prepared.columns:
-                vol_col = "vol"
-
-            if vol_col:
-                recent_vol = df_prepared[vol_col].tail(5).mean()
-                ma_vol = df_prepared[vol_col].tail(20).mean()
-                if pd.notna(ma_vol) and ma_vol > 0:
-                    volume_healthy = bool(recent_vol >= ma_vol * 0.5)
+            volume_healthy = self._calculate_volume_health(df_prepared)
 
             # 获取日期
             check_date = None
@@ -356,12 +425,40 @@ class AnalysisService:
             cached_result = analysis_cache.get_cached_analysis(code, analysis_date)
 
             if cached_result is not None:
-                # 返回缓存结果，添加标识
-                return {
-                    **cached_result,
+                # 规范化缓存结果，确保与实时计算返回结构一致
+                # 缓存文件使用 total_score，运行时使用 score，需要统一
+                # 注意：使用 'is not None' 检查以支持 score 为 0 的有效值
+                cached_score = cached_result.get("score")
+                cached_total_score = cached_result.get("total_score")
+                normalized_score = cached_score if cached_score is not None else cached_total_score
+
+                normalized = {
+                    "code": cached_result.get("code", code),
+                    "score": normalized_score,
+                    "verdict": cached_result.get("verdict"),
+                    "comment": cached_result.get("comment"),
+                    "signal_type": cached_result.get("signal_type"),
+                    "b1_passed": cached_result.get("b1_passed", b1_result.get("b1_passed")),
+                    "kdj_j": cached_result.get("kdj_j", b1_result.get("kdj_j")),
+                    "zx_long_pos": cached_result.get("zx_long_pos", b1_result.get("zx_long_pos")),
+                    "weekly_ma_aligned": cached_result.get("weekly_ma_aligned", b1_result.get("weekly_ma_aligned")),
+                    "volume_healthy": cached_result.get("volume_healthy", b1_result.get("volume_healthy")),
+                    "close_price": cached_result.get("close_price", b1_result.get("close_price")),
+                    "analysis_date": cached_result.get("analysis_date") or cached_result.get("pick_date") or analysis_date,
+                    # 保留原始 total_score 以兼容现有代码
+                    "total_score": cached_total_score if cached_total_score is not None else cached_score,
+                    # 保留其他可能存在的字段
+                    "scores": cached_result.get("scores"),
+                    "trend_reasoning": cached_result.get("trend_reasoning"),
+                    "position_reasoning": cached_result.get("position_reasoning"),
+                    "volume_reasoning": cached_result.get("volume_reasoning"),
+                    "abnormal_move_reasoning": cached_result.get("abnormal_move_reasoning"),
+                    "signal_reasoning": cached_result.get("signal_reasoning"),
+                    # 内部状态字段
                     "_cached": True,
                     "_cache_key": cache_key,
                 }
+                return normalized
 
             # 检查是否正在进行
             if analysis_cache.is_analysis_in_progress(cache_key):
@@ -396,9 +493,13 @@ class AnalysisService:
             if reviewer == "quant":
                 score_result = self._quant_review(code)
                 result.update(score_result)
+                # 同时设置 total_score 以保持与缓存结构一致
+                if "score" in result:
+                    result["total_score"] = result["score"]
             else:
                 # TODO: 调用 LLM 评分
                 result["score"] = None
+                result["total_score"] = None
                 result["verdict"] = "UNKNOWN"
                 result["comment"] = "LLM 评分待实现"
 
@@ -418,6 +519,7 @@ class AnalysisService:
                         "total_score": result.get("score"),
                         "verdict": result.get("verdict"),
                         "signal_type": result.get("signal_type"),
+                        "signal_reasoning": result.get("signal_reasoning"),
                         "comment": result.get("comment"),
                         "trend_reasoning": result.get("trend_reasoning"),
                         "position_reasoning": result.get("position_reasoning"),
@@ -426,6 +528,9 @@ class AnalysisService:
                         "scores": result.get("scores"),
                         "b1_passed": result.get("b1_passed"),
                         "kdj_j": result.get("kdj_j"),
+                        "zx_long_pos": result.get("zx_long_pos"),
+                        "weekly_ma_aligned": result.get("weekly_ma_aligned"),
+                        "volume_healthy": result.get("volume_healthy"),
                         "close_price": close_price,
                         "analysis_date": analysis_date,
                         "pick_date": analysis_date,
@@ -443,6 +548,10 @@ class AnalysisService:
 
             # 标记为非缓存结果
             result["_cached"] = False
+
+            # 确保 analysis_date 字段存在（与缓存路径保持一致）
+            if "analysis_date" not in result:
+                result["analysis_date"] = analysis_date
 
             return result
 
@@ -560,9 +669,10 @@ class AnalysisService:
         return history[:limit]
 
     def get_analysis_results(self, pick_date: Optional[str] = None) -> Dict[str, Any]:
-        """获取分析结果
+        """获取分析结果（仅读模式，不触发任何写入操作）
 
-        如果分析结果不存在，会自动触发对候选股票的量化分析评分
+        仅返回已存在的分析结果，不执行评分，不保存文件。
+        如需重建 suggestion.json，请使用后台任务或离线脚本。
         """
         import json
         pick_date = self._normalize_pick_date(pick_date)
@@ -579,8 +689,7 @@ class AnalysisService:
         _, candidate_codes_list = self.load_candidate_codes(pick_date)
         candidate_codes = set(candidate_codes_list)
 
-        # 创建 review 目录
-        review_dir.mkdir(parents=True, exist_ok=True)
+        # 仅读模式：不创建目录，不写入文件
 
         try:
             detailed_results = []
@@ -602,8 +711,7 @@ class AnalysisService:
                         "comment": item.get("comment"),
                     })
 
-            # GET 接口不触发自动评分，直接跳过缺失的分析结果
-            # 当有缺失时，只返回已存在的分析结果
+            # 仅读模式：记录缺失但不触发补算
             if missing_analysis_codes:
                 print(f"[get_analysis_results] 检测到 {len(missing_analysis_codes)} 个候选股票缺少分析结果（仅读模式，不触发补算）")
 
@@ -618,18 +726,9 @@ class AnalysisService:
                     ),
                     reverse=True
                 )
-                top5 = sorted_results[:5]
 
-                # 保存 suggestion.json（Top 5）
-                suggestion_data = {
-                    "date": pick_date,
-                    "min_score_threshold": settings.min_score_threshold,
-                    "total_reviewed": len(detailed_results),
-                    "recommendations": top5,
-                    "excluded": [],  # 可选：记录被排除的股票
-                }
-                with open(suggestion_file, "w", encoding="utf-8") as f:
-                    json.dump(suggestion_data, f, ensure_ascii=False, indent=2)
+                # 仅读模式：不保存 suggestion.json
+                # suggestion.json 的重建应由后台任务或离线脚本完成
 
                 return {
                     "pick_date": pick_date,
@@ -638,7 +737,7 @@ class AnalysisService:
                     "min_score_threshold": settings.min_score_threshold,
                 }
 
-            # 如果没有候选代码，尝试从 suggestion.json 读取
+            # 如果没有从个股文件获取到结果，尝试从 suggestion.json 读取
             if not suggestion_file.exists():
                 return {"pick_date": pick_date, "results": [], "total": 0, "min_score_threshold": 4.0}
 
@@ -728,13 +827,14 @@ class AnalysisService:
         recent_trading_days = df.tail(days).iloc[::-1]
 
         for _, row in recent_trading_days.iterrows():
-            date_str = row["date"].strftime("%Y-%m-%d")
+            check_ts = pd.Timestamp(row["date"])
+            date_str = check_ts.strftime("%Y-%m-%d")
             price_data = date_to_price.get(date_str, {})
 
             # 计算B1指标
             try:
                 # 找到该日期在股票数据中的位置
-                df_before = df[df["date"] <= date_str].copy()
+                df_before = df[pd.to_datetime(df["date"]) <= check_ts].copy()
                 if len(df_before) < 60:
                     continue
 
@@ -750,7 +850,7 @@ class AnalysisService:
                     "kdj_low_rank": None,
                     "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
                     "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
-                    "volume_healthy": None,
+                    "volume_healthy": self._calculate_volume_health(df_prepared),
                     "b1_passed": bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False,
                     "in_active_pool": None,
                     "prefilter_passed": None,
@@ -889,7 +989,7 @@ class AnalysisService:
                     "kdj_low_rank": None,
                     "zx_long_pos": zx_long_pos,
                     "weekly_ma_aligned": weekly_ma_aligned,
-                    "volume_healthy": None,
+                    "volume_healthy": self._calculate_volume_health(df_prepared),
                     "in_active_pool": in_active_pool,
                     "b1_passed": b1_passed,
                     "prefilter_passed": prefilter_passed,

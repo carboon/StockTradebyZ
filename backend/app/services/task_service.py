@@ -15,12 +15,15 @@ Task Service
 - 减少对任务执行性能的影响
 """
 import asyncio
+import json
 import locale
 import logging
+import os
 import sys
 import threading
 import time
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
@@ -79,6 +82,7 @@ class TaskLogBuffer:
         from app.models import TaskLog
 
         db = SessionLocal()
+        should_close = "PYTEST_CURRENT_TEST" not in os.environ
         try:
             log = TaskLog(
                 task_id=task_id,
@@ -92,7 +96,8 @@ class TaskLogBuffer:
             db.rollback()
             logger.warning("写入任务日志失败: %s", e)
         finally:
-            db.close()
+            if should_close:
+                db.close()
 
     def _flush_task(self, task_id: int) -> None:
         """刷新指定任务的日志。"""
@@ -106,6 +111,7 @@ class TaskLogBuffer:
         self._buffer[task_id].clear()
 
         db = SessionLocal()
+        should_close = "PYTEST_CURRENT_TEST" not in os.environ
         try:
             logs = [
                 TaskLog(
@@ -123,7 +129,8 @@ class TaskLogBuffer:
             db.rollback()
             logger.warning("批量写入任务日志失败: %s", e)
         finally:
-            db.close()
+            if should_close:
+                db.close()
 
     def flush_all(self) -> None:
         """刷新所有缓冲日志。"""
@@ -206,11 +213,12 @@ class TaskService:
                         "existing": True,
                     }
 
-            # 单股分析任务去重：检查同一股票、同一交易日是否有进行中或已完成的任务
+            # 单股分析任务去重：检查同一股票、同一reviewer、同一交易日是否有进行中或已完成的任务
             if task_type == self.SINGLE_ANALYSIS_TASK_TYPE:
                 code = params.get("code")
+                reviewer = params.get("reviewer", "quant")
                 if code:
-                    existing_task = self._get_active_single_analysis_task(code)
+                    existing_task = self._get_active_single_analysis_task(code, reviewer)
                     if existing_task:
                         return {
                             "task_id": existing_task.id,
@@ -255,35 +263,39 @@ class TaskService:
             .first()
         )
 
-    def _get_active_single_analysis_task(self, code: str) -> Optional[Any]:
-        """返回指定股票的活跃分析任务（pending/running/completed）。
+    def _get_active_single_analysis_task(self, code: str, reviewer: str = "quant") -> Optional[Any]:
+        """返回指定股票的活跃分析任务（pending/running）。
 
-        用于防止重复创建同一股票的分析任务。如果存在已完成（completed）
-        或运行中的任务，则复用该任务。
+        用于防止重复创建同一股票的分析任务。业务键为：code + reviewer + analysis_date。
+        仅复用同业务键的 pending/running 任务，已完成任务允许重新发起，以便在
+        规则修复或数据更新后重新生成结果。
 
         Args:
             code: 股票代码
+            reviewer: 评审者类型 (quant/glm/qwen/gemini)
 
         Returns:
             Task对象或None
         """
         from app.models import Task
-        from datetime import timedelta
+        from datetime import timedelta, date
 
-        # 查找最近1小时内的相关任务（包括已完成的）
-        cutoff_time = utc_now() - timedelta(hours=1)
-
-        return (
+        # 优先复用同业务键的 pending/running 任务
+        running_task = (
             self.db.query(Task)
             .filter(
                 Task.task_type == self.SINGLE_ANALYSIS_TASK_TYPE,
-                Task.params_json["code"].astext == code,
-                Task.status.in_(self.ACTIVE_STATUSES + ("completed",)),
-                Task.created_at >= cutoff_time,
+                Task.filter_by_code(code),
+                Task.params_json["reviewer"].as_string() == reviewer,
+                Task.status.in_(self.ACTIVE_STATUSES),
             )
             .order_by(Task.created_at.desc(), Task.id.desc())
             .first()
         )
+        if running_task:
+            return running_task
+
+        return None
 
     async def _run_task(self, task_id: int):
         """运行任务"""
@@ -291,9 +303,19 @@ class TaskService:
         from app.database import SessionLocal
 
         db = SessionLocal()
+        owns_session = db is not self.db
         task = db.query(Task).filter(Task.id == task_id).first()
         if not task:
+            if owns_session:
+                db.close()
             return
+
+        # 保存 task_id, task_type, params_json 和 progress 以便后续使用，避免在 task 对象可能过期后访问
+        saved_task_id = task.id
+        task_type = task.task_type
+        params_json = task.params_json or {}
+        # 使用 task.progress 的初始值，避免在异常处理时访问可能过期的 task 对象
+        initial_progress = 0
 
         task.status = "running"
         task.started_at = utc_now()
@@ -302,18 +324,18 @@ class TaskService:
         task.progress_meta_json = self._build_stage_meta("starting", progress=0, message="任务启动中")
         db.commit()
         # 关键状态变更立即记录
-        self._record_task_log(task, "任务已启动", "info", immediate=True)
+        self._record_task_log(task, "任务已启动", "info", immediate=True, task_id=saved_task_id, task_stage="starting")
         await self._publish_ops_task_event(task, "task_started")
 
         try:
-            if task.task_type == "full_update":
+            if task_type == "full_update":
                 await self._run_full_update(task, db)
-            elif task.task_type == "single_analysis":
-                await self._run_single_analysis(task, db)
-            elif task.task_type == "tomorrow_star":
+            elif task_type == "single_analysis":
+                await self._run_single_analysis(task, db, params_json)
+            elif task_type == "tomorrow_star":
                 await self._run_tomorrow_star(task, db)
 
-            if task_id in self._cancelled_tasks:
+            if saved_task_id in self._cancelled_tasks:
                 raise asyncio.CancelledError()
 
             task.status = "completed"
@@ -321,7 +343,8 @@ class TaskService:
             task.task_stage = "completed"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("completed", progress=100, message="任务执行完成")
-            self._record_task_log(task, "任务执行完成", "success", immediate=True)
+            db.commit()
+            self._record_task_log(task, "任务执行完成", "success", immediate=True, task_id=saved_task_id, task_stage="completed")
             await self._publish_ops_task_event(task, "task_completed")
 
         except asyncio.CancelledError:
@@ -329,24 +352,33 @@ class TaskService:
             task.task_stage = "cancelled"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("cancelled", progress=task.progress, message="任务已取消")
-            self._record_task_log(task, "任务已取消", "warning", immediate=True)
+            db.commit()
+            self._record_task_log(task, "任务已取消", "warning", immediate=True, task_id=saved_task_id, task_stage="cancelled")
             await self._publish_ops_task_event(task, "task_cancelled")
         except Exception as e:
+            # 在异常处理中，task 对象可能已经过期，使用保存的值
+            try:
+                current_progress = task.progress
+            except Exception:
+                current_progress = initial_progress
             task.status = "failed"
             task.error_message = str(e)
             task.task_stage = "failed"
             task.completed_at = utc_now()
-            task.progress_meta_json = self._build_stage_meta("failed", progress=task.progress, message=f"任务执行失败: {str(e)}")
-            self._record_task_log(task, f"任务执行失败: {str(e)}", "error", immediate=True)
+            task.progress_meta_json = self._build_stage_meta("failed", progress=current_progress, message=f"任务执行失败: {str(e)}")
+            db.commit()
+            self._record_task_log(task, f"任务执行失败: {str(e)}", "error", immediate=True, task_id=saved_task_id, task_stage="failed")
             await self._publish_ops_task_event(task, "task_failed")
 
         finally:
-            db.commit()
             # 确保任务结束前刷新所有日志
             _task_log_buffer.flush_all()
-            if task_id in self.running_tasks:
-                del self.running_tasks[task_id]
-            self._cancelled_tasks.discard(task_id)
+            if saved_task_id in self.running_tasks:
+                del self.running_tasks[saved_task_id]
+            self._cancelled_tasks.discard(saved_task_id)
+            # 仅关闭当前方法内部创建的 session，避免误关测试注入的共享 session。
+            if owns_session:
+                db.close()
 
     async def _run_full_update(self, task: Any, db: Session):
         """运行全量更新"""
@@ -362,7 +394,8 @@ class TaskService:
         cmd = [
             sys.executable or "python",
             str(ROOT / "run_all.py"),
-            "--reviewer", reviewer
+            "--reviewer", reviewer,
+            "--db",  # 始终使用数据库模式存储 K 线数据
         ]
 
         if skip_fetch or start_from > 1:
@@ -444,15 +477,27 @@ class TaskService:
         except Exception as exc:
             synced_count = 0
             print(f"同步股票基础信息失败: {exc}")
+        try:
+            candidate_synced = self._sync_candidates_from_files(db)
+        except Exception as exc:
+            candidate_synced = 0
+            print(f"同步候选结果失败: {exc}")
+        try:
+            analysis_synced = self._sync_analysis_results_from_files(db, reviewer=reviewer)
+        except Exception as exc:
+            analysis_synced = 0
+            print(f"同步分析结果失败: {exc}")
         status = tushare_service.check_data_status()
         task.result_json = {
             "data_status": status,
             "stock_basic_synced": synced_count,
+            "candidate_synced": candidate_synced,
+            "analysis_synced": analysis_synced,
         }
 
-    async def _run_single_analysis(self, task: Any, db: Session):
+    async def _run_single_analysis(self, task: Any, db: Session, params_json: dict = None):
         """运行单股分析"""
-        params = task.params_json or {}
+        params = params_json or task.params_json or {}
         code = params.get("code")
         if not code:
             raise Exception("缺少股票代码")
@@ -493,20 +538,23 @@ class TaskService:
         from app.database import SessionLocal
 
         db = SessionLocal()
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            return {
-                "id": task.id,
-                "task_type": task.task_type,
-                "trigger_source": task.trigger_source,
-                "status": task.status,
-                "task_stage": task.task_stage,
-                "progress": task.progress,
-                "progress_meta_json": task.progress_meta_json,
-                "result": task.result_json,
-                "error": task.error_message
-            }
-        return None
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if task:
+                return {
+                    "id": task.id,
+                    "task_type": task.task_type,
+                    "trigger_source": task.trigger_source,
+                    "status": task.status,
+                    "task_stage": task.task_stage,
+                    "progress": task.progress,
+                    "progress_meta_json": task.progress_meta_json,
+                    "result": task.result_json,
+                    "error": task.error_message
+                }
+            return None
+        finally:
+            db.close()
 
     async def _publish_ops_task_event(self, task: Any, event_type: str) -> None:
         if not self.manager:
@@ -567,6 +615,112 @@ class TaskService:
             return "finalize"
         return None
 
+    @staticmethod
+    def _load_json_file(path: Path) -> dict[str, Any]:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+
+    def _sync_candidates_from_files(self, db: Session) -> int:
+        from app.config import settings
+        from app.models import Candidate
+        from app.services.tushare_service import TushareService
+
+        latest_file = settings.candidates_dir / "candidates_latest.json"
+        if not latest_file.exists():
+            return 0
+
+        data = self._load_json_file(latest_file)
+        pick_date_text = str(data.get("pick_date") or "").strip()
+        if not pick_date_text:
+            return 0
+
+        items = data.get("candidates") or []
+        if not isinstance(items, list):
+            return 0
+
+        pick_date = date.fromisoformat(pick_date_text)
+        codes = [str(item.get("code", "")).zfill(6) for item in items if str(item.get("code", "")).strip()]
+        if codes:
+            TushareService().sync_stock_names_to_db(db, codes)
+
+        db.query(Candidate).filter(Candidate.pick_date == pick_date).delete(synchronize_session=False)
+
+        rows: list[Candidate] = []
+        for item in items:
+            code = str(item.get("code", "")).zfill(6)
+            if not code or code == "000000":
+                continue
+            extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+            rows.append(
+                Candidate(
+                    pick_date=pick_date,
+                    code=code,
+                    strategy=item.get("strategy"),
+                    close_price=float(item["close"]) if item.get("close") is not None else None,
+                    turnover=float(item["turnover_n"]) if item.get("turnover_n") is not None else None,
+                    b1_passed=item.get("strategy") == "b1",
+                    kdj_j=float(extra["kdj_j"]) if extra.get("kdj_j") is not None else None,
+                )
+            )
+
+        if rows:
+            db.add_all(rows)
+            db.commit()
+        return len(rows)
+
+    def _sync_analysis_results_from_files(self, db: Session, reviewer: str = "quant") -> int:
+        from app.config import settings
+        from app.models import AnalysisResult
+        from app.services.analysis_service import analysis_service
+        from app.services.tushare_service import TushareService
+
+        pick_date_text = analysis_service.get_latest_candidate_date()
+        if not pick_date_text:
+            return 0
+
+        review_dir = settings.review_dir / pick_date_text
+        if not review_dir.exists():
+            return 0
+
+        pick_date = date.fromisoformat(pick_date_text)
+        stock_files = sorted(
+            p for p in review_dir.glob("*.json")
+            if p.name != "suggestion.json"
+        )
+        if not stock_files:
+            return 0
+
+        codes = [p.stem.zfill(6) for p in stock_files if p.stem.isdigit()]
+        if codes:
+            TushareService().sync_stock_names_to_db(db, codes)
+
+        db.query(AnalysisResult).filter(AnalysisResult.pick_date == pick_date).delete(synchronize_session=False)
+
+        rows: list[AnalysisResult] = []
+        for path in stock_files:
+            payload = self._load_json_file(path)
+            code = str(payload.get("code") or path.stem).zfill(6)
+            if not code or code == "000000":
+                continue
+            rows.append(
+                AnalysisResult(
+                    pick_date=pick_date,
+                    code=code,
+                    reviewer=reviewer,
+                    verdict=payload.get("verdict"),
+                    total_score=float(payload["total_score"]) if payload.get("total_score") is not None else None,
+                    signal_type=payload.get("signal_type"),
+                    comment=payload.get("comment"),
+                    details_json=payload,
+                )
+            )
+
+        if rows:
+            db.add_all(rows)
+            db.commit()
+        return len(rows)
+
     @classmethod
     def _build_stage_meta(
         cls,
@@ -602,21 +756,28 @@ class TaskService:
         return meta
 
     @staticmethod
-    def _record_task_log(task: Any, message: str, level: str, stage: Optional[str] = None, immediate: bool = False) -> None:
+    def _record_task_log(task: Any, message: str, level: str, stage: Optional[str] = None, immediate: bool = False, task_id: int = None, task_stage: str = None) -> None:
         """记录任务日志到缓冲区。
 
         Args:
-            task: 任务对象
+            task: 任务对象（可选，如果提供则从中获取 task_id 和 task_stage）
             message: 日志消息
             level: 日志级别
-            stage: 任务阶段
+            stage: 任务阶段（优先使用此值，其次使用 task_stage 参数，最后使用 task.task_stage）
             immediate: 是否立即写入（关键状态变更使用）
+            task_id: 任务ID（如果 task 对象可能过期，则使用此参数）
+            task_stage: 任务阶段（如果 task 对象可能过期，则使用此参数）
         """
+        # 如果提供了 task_id，使用它；否则尝试从 task 对象获取
+        tid = task_id if task_id is not None else (task.id if task is not None else None)
+        # 确定使用的 stage 值
+        used_stage = stage or task_stage or (task.task_stage if task is not None else None)
+
         _task_log_buffer.add(
-            task_id=task.id,
+            task_id=tid,
             level=level,
             message=message,
-            stage=stage or task.task_stage,
+            stage=used_stage,
             immediate=immediate,
         )
 

@@ -618,7 +618,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
         db.query(Task)
         .filter(
             Task.task_type == "single_analysis",
-            Task.params_json["code"].astext == code,
+            Task.filter_by_code(code),
             Task.created_at >= cutoff_time,
         )
         .order_by(Task.created_at.desc(), Task.id.desc())
@@ -660,6 +660,18 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
 
     # 任务已完成，返回结果
     result_json = task.result_json or {}
+    b1_fields = ("b1_passed", "kdj_j", "zx_long_pos", "weekly_ma_aligned", "volume_healthy", "close_price")
+    if any(result_json.get(field) is None for field in b1_fields):
+        try:
+            b1_result = analysis_service.check_b1_strategy(code)
+            for field in b1_fields:
+                if result_json.get(field) is None and field in b1_result:
+                    result_json[field] = b1_result.get(field)
+            task.result_json = result_json
+            db.commit()
+        except Exception:
+            db.rollback()
+
     return {
         "code": code,
         "name": stock.name if stock else None,
