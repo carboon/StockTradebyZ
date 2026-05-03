@@ -8,7 +8,7 @@ import platform
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,10 @@ from app.models import Config, Task, TaskLog
 from app.services.task_service import TaskService
 from app.services.tushare_service import TushareService
 from app.schemas import (
+    AdminSummaryCard,
+    AdminSummaryDataGap,
+    AdminSummaryResponse,
+    AdminSummaryTaskInfo,
     DataStatusResponse,
     TaskAlertItem,
     TaskDiagnosticCheck,
@@ -335,7 +339,11 @@ async def get_incremental_status(
     _rate_limit: None = Depends(status_api_rate_limit),
     user=Depends(require_user)
 ) -> dict:
-    """获取增量更新状态"""
+    """获取增量更新状态
+
+    注意：前端应根据 running 字段决定是否继续轮询。
+    当 running=False 时，应停止或大幅降低轮询频率以减少服务器压力。
+    """
     from app.services.market_service import MarketService
 
     state = MarketService.get_update_state()
@@ -479,7 +487,11 @@ async def get_running_tasks(
     db: Session = Depends(get_db),
     user=Depends(require_user)
 ) -> TaskRunningResponse:
-    """获取运行中的任务（缓存 10 秒）"""
+    """获取运行中的任务（缓存 10 秒）
+
+    注意：前端应根据返回的 total 数值决定是否继续轮询。
+    当 total=0 时，应停止或大幅降低轮询频率以减少服务器压力。
+    """
     # 尝试从缓存获取
     cached = cache.get("running_tasks")
     if cached:
@@ -720,3 +732,634 @@ async def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_use
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"清空失败: {str(e)}"}
+
+
+# ==================== 阶段3：区间增量更新 API ====================
+
+@router.get("/incremental/fill-status")
+async def get_incremental_fill_status(
+    _rate_limit: None = Depends(status_api_rate_limit),
+    user=Depends(require_user)
+) -> dict:
+    """获取区间增量更新状态总览
+
+    返回当前数据缺口情况、各阶段补齐状态等信息。
+    """
+    from app.services.incremental_service import get_incremental_fill_service
+
+    service = get_incremental_fill_service()
+    return service.get_fill_summary()
+
+
+@router.post("/incremental/detect-gap")
+async def detect_data_gap(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> dict:
+    """检测数据缺口（任务 3.1）
+
+    识别当前最新交易日与本地数据之间的缺口。
+
+    Returns:
+        包含缺口信息的字典
+    """
+    from app.services.incremental_service import get_incremental_fill_service
+
+    service = get_incremental_fill_service()
+    gap_status = service.detect_gap_status()
+
+    return {
+        "success": True,
+        "gap": gap_status,
+        "recommended_action": service._get_recommended_action(
+            gap_status,
+            service._get_existing_tomorrow_star_dates() and max(service._get_existing_tomorrow_star_dates()),
+        ),
+    }
+
+
+@router.post("/incremental/fill-kline")
+async def fill_kline_gap(
+    target_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> dict:
+    """补齐行情数据（任务 3.2）
+
+    按缺失交易日逐步补齐行情数据。
+
+    Args:
+        target_date: 目标日期 (YYYY-MM-DD)，默认补齐到最新交易日
+
+    Returns:
+        补齐状态
+    """
+    from app.services.incremental_service import get_incremental_fill_service
+    from app.main import manager
+
+    service = get_incremental_fill_service()
+
+    # 检查是否有全量任务在运行
+    task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        return {
+            "success": False,
+            "message": f"当前有全量初始化任务 #{active_full_task.id} 正在运行，请稍后再执行增量更新。",
+        }
+
+    # 执行补齐
+    result = service.fill_kline_data(target_date=target_date)
+
+    # 清除缓存
+    cache.delete("data_status")
+    _overview_cache["expires_at"] = 0.0
+
+    return {
+        "success": result.status in ["completed", "partial"],
+        "result": result.to_dict(),
+    }
+
+
+@router.post("/incremental/fill-tomorrow-star")
+async def fill_tomorrow_star_gap(
+    target_date: Optional[str] = None,
+    reviewer: str = "quant",
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> dict:
+    """补齐明日之星结果（任务 3.3）
+
+    对增量新增交易日逐日生成候选结果、评分结果、Top5推荐。
+
+    Args:
+        target_date: 目标日期
+        reviewer: 评审者类型
+
+    Returns:
+        补齐状态
+    """
+    from app.services.incremental_service import get_incremental_fill_service
+
+    service = get_incremental_fill_service()
+
+    # 执行补齐
+    result = service.fill_tomorrow_star_results(
+        target_date=target_date,
+        reviewer=reviewer,
+    )
+
+    # 清除缓存
+    cache.delete("data_status")
+    _overview_cache["expires_at"] = 0.0
+
+    return {
+        "success": result.status in ["completed", "partial"],
+        "result": result.to_dict(),
+    }
+
+
+@router.post("/incremental/fill-top5-diagnosis")
+async def fill_top5_diagnosis_gap(
+    target_date: Optional[str] = None,
+    reviewer: str = "quant",
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> dict:
+    """补齐 Top5 诊断与历史（任务 3.4）
+
+    对区间内每个交易日的 Top5 股票生成单股诊断结果，
+    并补齐每日检查历史。
+
+    Args:
+        target_date: 目标日期
+        reviewer: 评审者类型
+
+    Returns:
+        补齐状态
+    """
+    from app.services.incremental_service import get_incremental_fill_service
+
+    service = get_incremental_fill_service()
+
+    # 执行补齐
+    result = service.fill_top5_diagnosis_and_history(
+        target_date=target_date,
+        reviewer=reviewer,
+    )
+
+    # 清除缓存
+    cache.delete("data_status")
+    _overview_cache["expires_at"] = 0.0
+
+    return {
+        "success": result.status in ["completed", "partial"],
+        "result": result.to_dict(),
+    }
+
+
+@router.post("/incremental/fill-all")
+async def fill_all_gaps(
+    target_date: Optional[str] = None,
+    reviewer: str = "quant",
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> dict:
+    """一键补齐所有缺口
+
+    按顺序执行：
+    1. 补齐行情数据
+    2. 补齐明日之星结果
+    3. 补齐 Top5 诊断与历史
+
+    Args:
+        target_date: 目标日期
+        reviewer: 评审者类型
+
+    Returns:
+        整体补齐状态
+    """
+    from app.services.incremental_service import get_incremental_fill_service
+    from app.main import manager
+
+    service = get_incremental_fill_service()
+
+    # 检查是否有全量任务在运行
+    task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        return {
+            "success": False,
+            "message": f"当前有全量初始化任务 #{active_full_task.id} 正在运行，请稍后再执行增量更新。",
+        }
+
+    results = {}
+
+    # 1. 补齐行情数据
+    kline_result = service.fill_kline_data(target_date=target_date)
+    results["kline"] = kline_result.to_dict()
+
+    # 2. 补齐明日之星结果
+    if kline_result.status in ["completed", "partial"]:
+        star_result = service.fill_tomorrow_star_results(
+            target_date=target_date,
+            reviewer=reviewer,
+        )
+        results["tomorrow_star"] = star_result.to_dict()
+
+        # 3. 补齐 Top5 诊断
+        if star_result.status in ["completed", "partial"]:
+            diagnosis_result = service.fill_top5_diagnosis_and_history(
+                target_date=target_date,
+                reviewer=reviewer,
+            )
+            results["top5_diagnosis"] = diagnosis_result.to_dict()
+
+    # 清除缓存
+    cache.delete("data_status")
+    _overview_cache["expires_at"] = 0.0
+
+    # 计算整体状态
+    all_completed = all(
+        r.get("status") in ["completed", "partial"]
+        for r in results.values()
+    )
+
+    return {
+        "success": all_completed,
+        "results": results,
+        "summary": {
+            "total_stages": len(results),
+            "completed_stages": sum(1 for r in results.values() if r.get("status") == "completed"),
+            "partial_stages": sum(1 for r in results.values() if r.get("status") == "partial"),
+            "failed_stages": sum(1 for r in results.values() if r.get("status") == "failed"),
+        },
+    }
+
+
+@router.get("/admin/summary", response_model=AdminSummaryResponse)
+async def get_admin_summary(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> AdminSummaryResponse:
+    """获取管理员总览摘要（仅管理员）
+
+    合并分散的运行状态信息，为管理员任务中心首页提供一站式数据。
+    包括：最新交易日、数据缺口、当前任务状态、最近任务结果等。
+    """
+    from datetime import date, datetime, timedelta
+    from app.models import Candidate, AnalysisResult, StockDaily
+    from sqlalchemy import select, func
+
+    tushare_service = TushareService()
+    data_status = tushare_service.check_data_status()
+
+    # 1. 获取最新交易日
+    latest_trade_date = data_status.get("raw_data", {}).get("latest_trade_date")
+    latest_db_date = data_status.get("raw_data", {}).get("latest_date")
+
+    # 2. 获取最新候选日期
+    latest_candidate_result = db.execute(
+        select(Candidate.pick_date)
+        .order_by(Candidate.pick_date.desc())
+        .limit(1)
+    ).first()
+    latest_candidate_date = latest_candidate_result[0].isoformat() if latest_candidate_result else None
+
+    # 3. 获取最新分析日期
+    latest_analysis_result = db.execute(
+        select(AnalysisResult.pick_date)
+        .order_by(AnalysisResult.pick_date.desc())
+        .limit(1)
+    ).first()
+    latest_analysis_date = latest_analysis_result[0].isoformat() if latest_analysis_result else None
+
+    # 4. 计算缺口天数
+    gap_days = 0
+    has_gap = False
+    if latest_trade_date and latest_db_date:
+        try:
+            trade_dt = datetime.fromisoformat(latest_trade_date).date() if isinstance(latest_trade_date, str) else latest_trade_date
+            db_dt = datetime.fromisoformat(latest_db_date).date() if isinstance(latest_db_date, str) else latest_db_date
+            gap = (trade_dt - db_dt).days
+            if gap > 0:
+                gap_days = gap
+                has_gap = True
+        except (ValueError, TypeError):
+            pass
+
+    # 5. 当前任务状态
+    running_tasks = (
+        db.query(Task)
+        .filter(Task.status.in_(["pending", "running"]))
+        .order_by(Task.created_at.desc())
+        .all()
+    )
+
+    current_task_info = None
+    task_status = "idle"
+    if running_tasks:
+        task = running_tasks[0]
+        task_status = "running"
+        meta = task.progress_meta_json or {}
+        current_task_info = AdminSummaryTaskInfo(
+            id=task.id,
+            task_type=task.task_type,
+            status=task.status,
+            stage_label=meta.get("stage_label") or task.task_stage,
+            progress=task.progress,
+            summary=task.summary,
+        )
+
+    # 6. 最近任务结果
+    latest_completed = (
+        db.query(Task)
+        .filter(Task.status == "completed")
+        .order_by(Task.completed_at.desc(), Task.id.desc())
+        .first()
+    )
+    latest_failed = (
+        db.query(Task)
+        .filter(Task.status == "failed")
+        .order_by(Task.completed_at.desc(), Task.id.desc())
+        .first()
+    )
+
+    latest_task_summary = None
+    if latest_completed:
+        latest_task_summary = latest_completed.summary or f"任务 #{latest_completed.id} 于 {latest_completed.completed_at.strftime('%Y-%m-%d %H:%M')} 完成"
+    elif latest_failed:
+        latest_task_summary = latest_failed.error_message or latest_failed.summary or f"任务 #{latest_failed.id} 失败"
+
+    # 7. 系统就绪状态
+    system_ready = all([
+        data_status.get("raw_data", {}).get("exists"),
+        data_status.get("candidates", {}).get("exists"),
+        data_status.get("analysis", {}).get("exists"),
+    ])
+
+    # 8. 构建今日状态卡片
+    raw_count = data_status.get("raw_data", {}).get("count", 0)
+    candidate_count = data_status.get("candidates", {}).get("count", 0)
+    analysis_count = data_status.get("analysis", {}).get("count", 0)
+
+    today_status = [
+        AdminSummaryCard(
+            key="raw_data",
+            label="K线数据",
+            value=f"{raw_count:,}" if raw_count else "待生成",
+            status="success" if data_status.get("raw_data", {}).get("exists") else "warning",
+            meta=f"最新: {latest_db_date or '-'}",
+        ),
+        AdminSummaryCard(
+            key="candidates",
+            label="候选结果",
+            value=f"{candidate_count} 条" if candidate_count else "待生成",
+            status="success" if data_status.get("candidates", {}).get("exists") else "warning",
+            meta=f"最新: {latest_candidate_date or '-'}",
+        ),
+        AdminSummaryCard(
+            key="analysis",
+            label="分析结果",
+            value=f"{analysis_count} 条" if analysis_count else "待生成",
+            status="success" if data_status.get("analysis", {}).get("exists") else "warning",
+            meta=f"最新: {latest_analysis_date or '-'}",
+        ),
+        AdminSummaryCard(
+            key="task",
+            label="任务状态",
+            value=f"{len(running_tasks)} 运行中" if running_tasks else "空闲",
+            status="warning" if running_tasks else ("danger" if latest_failed else "success"),
+            meta=current_task_info.stage_label if current_task_info else (latest_task_summary or "系统正常"),
+        ),
+    ]
+
+    # 9. 数据生产状态
+    data_production = {
+        "raw_data_exists": data_status.get("raw_data", {}).get("exists", False),
+        "raw_data_count": raw_count,
+        "raw_data_latest": latest_db_date,
+        "candidates_exists": data_status.get("candidates", {}).get("exists", False),
+        "candidates_count": candidate_count,
+        "candidates_latest": latest_candidate_date,
+        "analysis_exists": data_status.get("analysis", {}).get("exists", False),
+        "analysis_count": analysis_count,
+        "analysis_latest": latest_analysis_date,
+    }
+
+    # 10. 数据缺口
+    data_gap = AdminSummaryDataGap(
+        has_gap=has_gap,
+        gap_days=gap_days if has_gap else None,
+        latest_local_date=latest_db_date,
+        latest_trade_date=latest_trade_date,
+    )
+
+    # 11. 待处理事项
+    pending_actions = []
+    if has_gap and gap_days > 0:
+        pending_actions.append({
+            "type": "warning",
+            "title": "数据缺口",
+            "message": f"K线数据落后 {gap_days} 个交易日",
+            "action": "增量更新",
+            "route": "/update?tab=tasks&action=incremental",
+        })
+    if latest_failed and not (latest_completed and latest_completed.completed_at > latest_failed.completed_at):
+        pending_actions.append({
+            "type": "error",
+            "title": "失败任务",
+            "message": f"任务 #{latest_failed.id} 失败: {latest_failed.error_message or '未知错误'}",
+            "action": "查看日志",
+            "route": f"/update?tab=logs&taskId={latest_failed.id}",
+        })
+    if not system_ready:
+        missing = []
+        if not data_status.get("raw_data", {}).get("exists"):
+            missing.append("K线数据")
+        if not data_status.get("candidates", {}).get("exists"):
+            missing.append("候选结果")
+        if not data_status.get("analysis", {}).get("exists"):
+            missing.append("分析结果")
+        pending_actions.append({
+            "type": "info",
+            "title": "首次初始化",
+            "message": f"待生成: {', '.join(missing)}",
+            "action": "开始初始化",
+            "route": "/update?tab=tasks&action=init",
+        })
+
+    return AdminSummaryResponse(
+        today_status=today_status,
+        data_production=data_production,
+        data_gap=data_gap,
+        current_task=current_task_info,
+        latest_task={
+            "id": latest_completed.id if latest_completed else None,
+            "status": "completed" if latest_completed else ("failed" if latest_failed else None),
+            "summary": latest_task_summary,
+            "completed_at": latest_completed.completed_at.isoformat() if latest_completed and latest_completed.completed_at else None,
+        },
+        gap_days=gap_days,
+        task_status=task_status,
+        latest_task_summary=latest_task_summary,
+        latest_trade_date=latest_trade_date,
+        latest_db_date=latest_db_date,
+        latest_candidate_date=latest_candidate_date,
+        latest_analysis_date=latest_analysis_date,
+        system_ready=system_ready,
+        pending_actions=pending_actions,
+    )
+
+
+# ==================== 阶段6：历史回溯相关 API ====================
+
+@router.get("/history-backfill/status/{code}")
+async def get_history_backfill_status(
+    code: str,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """获取股票的历史回溯状态
+
+    Args:
+        code: 股票代码
+
+    Returns:
+        历史回溯状态信息
+    """
+    from app.services.history_backfill_service import get_history_backfill_service
+
+    service = get_history_backfill_service()
+    status = service.get_stock_backfill_status(code)
+    return status.to_dict()
+
+
+@router.post("/history-backfill/initialize/{code}")
+async def initialize_history_backfill(
+    code: str,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """初始化股票历史回溯（补齐近一年历史）
+
+    Args:
+        code: 股票代码
+
+    Returns:
+        初始化任务状态
+    """
+    from app.services.history_backfill_service import get_history_backfill_service
+    from app.main import manager
+
+    service = get_history_backfill_service()
+
+    # 创建后台任务
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        "history_backfill_initialize",
+        {
+            "code": code,
+            "reviewer": "quant",
+            "trigger_source": "manual"
+        }
+    )
+
+    return {
+        "task_id": result["task_id"],
+        "code": code,
+        "status": "pending" if not result.get("existing") else "existing",
+        "ws_url": result["ws_url"],
+        "message": f"历史回溯初始化任务已创建" if not result.get("existing") else "复用现有任务",
+    }
+
+
+@router.post("/history-backfill/incremental/{code}")
+async def incremental_history_backfill(
+    code: str,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """增量补齐股票最新交易日历史
+
+    只补齐最新交易日，不重复回算已有历史。
+
+    Args:
+        code: 股票代码
+
+    Returns:
+        增量补齐状态
+    """
+    from app.services.history_backfill_service import get_history_backfill_service
+    from app.main import manager
+
+    service = get_history_backfill_service()
+
+    # 创建后台任务
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        "history_backfill_incremental",
+        {
+            "code": code,
+            "reviewer": "quant",
+            "trigger_source": "manual"
+        }
+    )
+
+    return {
+        "task_id": result["task_id"],
+        "code": code,
+        "status": "pending" if not result.get("existing") else "existing",
+        "ws_url": result["ws_url"],
+        "message": f"增量历史补齐任务已创建" if not result.get("existing") else "复用现有任务",
+    }
+
+
+@router.get("/history-backfill/batch-status")
+async def get_batch_backfill_status(
+    codes: str = Query(default="", description="股票代码列表，逗号分隔"),
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """获取批量股票的历史回溯状态
+
+    Args:
+        codes: 股票代码列表，逗号分隔
+
+    Returns:
+        批量回溯状态汇总
+    """
+    from app.services.history_backfill_service import get_history_backfill_service
+
+    if not codes:
+        raise HTTPException(status_code=400, detail="缺少股票代码")
+
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+
+    service = get_history_backfill_service()
+    return service.get_batch_backfill_status(code_list)
+
+
+@router.post("/history-backfill/batch")
+async def batch_history_backfill(
+    codes: str = Query(default="", description="股票代码列表，逗号分隔"),
+    target_date: Optional[str] = Query(default=None, description="目标日期"),
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """批量历史回溯
+
+    Args:
+        codes: 股票代码列表，逗号分隔
+        target_date: 目标日期
+
+    Returns:
+        批量回溯任务信息
+    """
+    from app.services.history_backfill_service import get_history_backfill_service
+    from app.main import manager
+
+    if not codes:
+        raise HTTPException(status_code=400, detail="缺少股票代码")
+
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+
+    # 创建后台任务
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        "history_backfill_batch",
+        {
+            "codes": code_list,
+            "target_date": target_date,
+            "reviewer": "quant",
+            "trigger_source": "manual"
+        }
+    )
+
+    return {
+        "task_id": result["task_id"],
+        "codes": code_list,
+        "status": "pending" if not result.get("existing") else "existing",
+        "ws_url": result["ws_url"],
+        "message": f"批量历史回溯任务已创建 ({len(code_list)} 只股票)" if not result.get("existing") else "复用现有任务",
+    }

@@ -1,70 +1,38 @@
 """
 Database Configuration
 ~~~~~~~~~~~~~~~~~~~~~~
-支持 SQLite 和 PostgreSQL 的数据库连接和会话管理
-单实例 100 人规模优化配置
+PostgreSQL 数据库连接和会话管理
 """
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import QueuePool, NullPool
+from sqlalchemy.pool import QueuePool
 from fastapi import Request
 
 from app.config import settings
 
 
 def _create_engine():
-    """根据数据库 URL 创建对应的引擎"""
+    """根据数据库 URL 创建引擎。当前仅支持 PostgreSQL。"""
     db_url = settings.database_url
 
-    if db_url.startswith("sqlite"):
-        # SQLite 配置
-        sqlite_connect_args = {
-            "check_same_thread": False,
-            "timeout": 60,
-        }
-        engine = create_engine(
-            db_url,
-            connect_args=sqlite_connect_args,
-            echo=settings.debug,
-            poolclass=QueuePool,
-            pool_size=50,
-            max_overflow=20,
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            pool_timeout=30,
+    if not db_url.startswith("postgresql"):
+        raise RuntimeError(
+            "Unsupported DATABASE_URL. StockTrader now requires PostgreSQL."
         )
-        # SQLite WAL 模式 + 性能优化
-        from sqlalchemy import event
-        @event.listens_for(engine, "connect")
-        def set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA cache_size=-20000")
-            cursor.execute("PRAGMA page_size=8192")
-            cursor.execute("PRAGMA temp_store=MEMORY")
-            cursor.execute("PRAGMA busy_timeout=60000")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
 
-    elif db_url.startswith("postgresql"):
-        # PostgreSQL 配置
-        engine = create_engine(
-            db_url,
-            echo=settings.debug,
-            poolclass=QueuePool,
-            pool_size=20,          # PostgreSQL 连接更昂贵，减少池大小
-            max_overflow=30,       # 突发流量时额外连接
-            pool_pre_ping=True,    # 连接前检查有效性
-            pool_recycle=3600,     # 1 小时回收连接
-            pool_timeout=30,       # 获取连接超时
-        )
-    else:
-        # 其他数据库使用默认配置
-        engine = create_engine(db_url, echo=settings.debug)
+    engine = create_engine(
+        db_url,
+        echo=settings.debug,
+        poolclass=QueuePool,
+        pool_size=20,
+        max_overflow=30,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        pool_timeout=30,
+    )
 
     return engine
 
@@ -84,7 +52,7 @@ class Base(DeclarativeBase):
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
-def close_db_session(db: Session | None) -> None:
+def close_db_session(db: Optional[Session]) -> None:
     """安全关闭会话，确保未提交事务被回滚。"""
     if db is None:
         return

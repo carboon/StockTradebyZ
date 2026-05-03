@@ -267,9 +267,21 @@ class AnalysisService:
         return pick_date
 
     def get_latest_candidate_date(self) -> Optional[str]:
-        """读取最新候选日期。"""
-        import json
+        """读取最新候选日期（优先从数据库，回退到文件）。"""
+        from app.services.candidate_service import get_candidate_service
 
+        # 优先从数据库读取
+        try:
+            candidate_service = get_candidate_service()
+            db_date = candidate_service.get_latest_candidate_date()
+            if db_date:
+                return db_date.isoformat()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+        # 回退到文件读取
+        import json
         latest_file = ROOT / settings.candidates_dir / "candidates_latest.json"
         if not latest_file.exists():
             return None
@@ -292,10 +304,31 @@ class AnalysisService:
         return max(date_dirs) if date_dirs else None
 
     def load_candidate_codes(self, pick_date: Optional[str] = None) -> tuple[Optional[str], list[str]]:
-        """读取指定日期的候选代码；未指定则读取 latest。"""
-        import json
+        """读取指定日期的候选代码（优先从数据库，回退到文件）。
+
+        Args:
+            pick_date: 选拔日期 (YYYY-MM-DD)，None 表示读取最新
+
+        Returns:
+            (pick_date, codes) 元组
+        """
+        from app.services.candidate_service import get_candidate_service
 
         normalized_date = self._normalize_pick_date(pick_date)
+
+        # 优先从数据库读取
+        try:
+            candidate_service = get_candidate_service()
+            db_date, candidates = candidate_service.load_candidates(pick_date, limit=1000)
+            if candidates:
+                codes = [c.get("code", "") for c in candidates if c.get("code")]
+                return db_date or normalized_date, codes
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+        # 回退到文件读取
+        import json
         candidates_dir = ROOT / settings.candidates_dir
         if normalized_date:
             candidate_file = candidates_dir / f"candidates_{normalized_date}.json"
@@ -627,9 +660,21 @@ class AnalysisService:
             }
 
     def get_candidates_history(self, limit: int = 30) -> list:
-        """获取候选历史"""
-        import json
+        """获取候选历史（优先从数据库，回退到文件）"""
+        from app.services.candidate_service import get_candidate_service
 
+        # 优先从数据库读取
+        try:
+            candidate_service = get_candidate_service()
+            db_history = candidate_service.get_candidate_dates(limit)
+            if db_history:
+                return db_history
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+        # 回退到文件读取
+        import json
         candidates_dir = ROOT / settings.candidates_dir
         review_dir = ROOT / settings.review_dir
         history_by_date: dict[str, dict[str, Any]] = {}
@@ -762,22 +807,24 @@ class AnalysisService:
 
     def get_stock_history_checks(self, code: str, days: int = 30) -> list:
         """
-        获取股票历史检查记录（优先从持久化文件读取）
+        获取股票历史检查记录（只读模式，仅从持久化文件读取）
 
         注意：check_date 代表交易日日期，数据为该交易日收盘后的检查结果。
         由于只能获取收盘后的数据，所以日期含义是交易日而非检查执行时间。
+
+        只读模式：如果历史文件不存在，返回空列表，不触发实时计算。
+        历史数据应由后台任务（generate_stock_history_checks）生成。
 
         Args:
             code: 股票代码
             days: 返回最近N个交易日的数据，最多30天
         """
         import json
-        from datetime import datetime, timedelta
 
         # 限制最多返回30天
         days = min(days, 30)
 
-        # 优先尝试从持久化文件读取
+        # 只读模式：仅从持久化文件读取
         history_dir = ROOT / settings.review_dir / "history"
         stock_history_file = history_dir / f"{code}.json"
 
@@ -793,80 +840,10 @@ class AnalysisService:
                 import traceback
                 traceback.print_exc()
 
-        # 如果没有持久化数据，则实时计算（但不包含评分数据）
-        df = self.load_stock_data(code)
-        if df is None or df.empty:
-            return []
-
-        # 计算涨跌幅（如果不存在）
-        if "change_pct" not in df.columns:
-            df["change_pct"] = df["close"].pct_change() * 100
-
-        selector = self._build_b1_selector()
-
-        # 建立日期到股票数据的映射
-        date_to_price = {}  # {date_str: {close_price, change_pct}}
-        for _, row in df.iterrows():
-            date_str = row["date"].strftime("%Y-%m-%d")
-            change_pct = row.get("change_pct")
-            if pd.isna(change_pct):
-                change_pct = None
-            elif isinstance(change_pct, (int, float)):
-                change_pct = float(change_pct)
-            else:
-                change_pct = None
-
-            date_to_price[date_str] = {
-                "close_price": float(row["close"]) if pd.notna(row.get("close")) else None,
-                "change_pct": change_pct,
-            }
-
-        history = []
-
-        # 获取最近days个交易日的日期
-        recent_trading_days = df.tail(days).iloc[::-1]
-
-        for _, row in recent_trading_days.iterrows():
-            check_ts = pd.Timestamp(row["date"])
-            date_str = check_ts.strftime("%Y-%m-%d")
-            price_data = date_to_price.get(date_str, {})
-
-            # 计算B1指标
-            try:
-                # 找到该日期在股票数据中的位置
-                df_before = df[pd.to_datetime(df["date"]) <= check_ts].copy()
-                if len(df_before) < 60:
-                    continue
-
-                # 准备数据并获取最后一行
-                df_prepared = selector.prepare_df(df_before)
-                last_row = df_prepared.iloc[-1]
-
-                history.append({
-                    "check_date": date_str,
-                    "close_price": price_data.get("close_price"),
-                    "change_pct": price_data.get("change_pct"),
-                    "kdj_j": float(last_row["J"]) if pd.notna(last_row.get("J")) else None,
-                    "kdj_low_rank": None,
-                    "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
-                    "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
-                    "volume_healthy": self._calculate_volume_health(df_prepared),
-                    "b1_passed": bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False,
-                    "in_active_pool": None,
-                    "prefilter_passed": None,
-                    "prefilter_blocked_by": None,
-                    "score": None,
-                    "verdict": None,
-                    "signal_type": None,
-                    "tomorrow_star_pass": None,
-                })
-            except Exception as e:
-                # 跳过计算失败的日期
-                import traceback
-                traceback.print_exc()
-                continue
-
-        return history
+        # 只读模式：文件不存在时返回空列表，不触发实时计算
+        # 历史数据应由后台任务生成，前端应提示用户"暂无历史数据"
+        print(f"[get_stock_history_checks] 股票 {code} 历史数据文件不存在（只读模式，不触发计算）")
+        return []
 
     def generate_stock_history_checks(self, code: str, days: int = 30, clean: bool = True) -> dict:
         """

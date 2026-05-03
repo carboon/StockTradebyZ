@@ -1,18 +1,16 @@
 # 统一的 Docker Compose 配置
-# 使用环境变量 MODE 控制模式: dev (默认) 或 prod
+# 使用环境变量 MODE 控制 backend 镜像/运行模式: dev (默认) 或 prod
 #
 # 开发模式:
-#   cd deploy && docker compose up
-#   或 MODE=dev docker compose up
+#   cd deploy && docker compose -f docker-compose.yml --profile postgres --profile dev up
 #
 # 生产模式:
-#   MODE=prod docker compose up
+#   cd deploy && MODE=prod docker compose -f docker-compose.yml --profile postgres --profile prod up
 #
-# PostgreSQL 模式:
-#   USE_POSTGRES=true docker compose up
+# PostgreSQL 作为正式主库，默认启动
 
 services:
-  # PostgreSQL 数据库 (可选)
+  # PostgreSQL 数据库 (正式主库)
   postgres:
     image: postgres:16-alpine
     container_name: stocktrade-postgres
@@ -43,20 +41,17 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
-      # 使用命名卷代替相对路径挂载 (解决 Docker Desktop for Mac 路径问题)
-      - stocktrade_data:/app/data
-      # 开发模式：代码热更新 (生产模式挂载到 /dev/null 禁用)
-      - stocktrade_backend:/app/backend${MOUNT_DISABLED:-}
-      - stocktrade_pipeline:/app/pipeline${MOUNT_DISABLED:-}
-      - stocktrade_agent:/app/agent${MOUNT_DISABLED:-}
-      - stocktrade_config:/app/config:ro
+      - ../data:/app/data
+      - ../backend:/app/backend
+      - ../pipeline:/app/pipeline
+      - ../agent:/app/agent
+      - ../config:/app/config:ro
     env_file:
       - .env
     environment:
       - PYTHONPATH=/app:/app/backend
-      # PostgreSQL 模式使用 DATABASE_URL，否则使用 SQLite
-      # 默认使用 SQLite (可随时切换)
-      - DATABASE_URL=${DATABASE_URL:-}
+      # PostgreSQL 模式使用 DATABASE_URL (正式主库)
+      - DATABASE_URL=${DATABASE_URL:-postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade}
       - BACKEND_HOST=0.0.0.0
       - BACKEND_PORT=8000
       - BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://frontend
@@ -87,7 +82,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     volumes:
-      - stocktrade_frontend:/app
+      - ../frontend:/app
       - /app/node_modules
     environment:
       - VITE_API_BASE_URL=/api
@@ -107,7 +102,7 @@ services:
     ports:
       - "${NGINX_PORT:-127.0.0.1:80}:80"
     volumes:
-      - stocktrade_nginx_config:/etc/nginx/nginx.conf:ro
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -121,10 +116,3 @@ networks:
 
 volumes:
   postgres_data:
-  stocktrade_data:
-  stocktrade_backend:
-  stocktrade_pipeline:
-  stocktrade_agent:
-  stocktrade_config:
-  stocktrade_frontend:
-  stocktrade_nginx_config:

@@ -170,6 +170,11 @@ class TaskService:
     ACTIVE_STATUSES = ("pending", "running")
     FULL_TASK_TYPES = ("full_update", "tomorrow_star")
     SINGLE_ANALYSIS_TASK_TYPE = "single_analysis"
+    GENERATE_HISTORY_TASK_TYPE = "generate_history"
+    # 阶段6：历史回溯任务类型
+    HISTORY_BACKFILL_INIT_TASK_TYPE = "history_backfill_initialize"
+    HISTORY_BACKFILL_INCR_TASK_TYPE = "history_backfill_incremental"
+    HISTORY_BACKFILL_BATCH_TASK_TYPE = "history_backfill_batch"
     _creation_lock = threading.Lock()
     _running_tasks: Dict[int, asyncio.subprocess.Process] = {}
     _cancelled_tasks: set[int] = set()
@@ -183,7 +188,11 @@ class TaskService:
         "pre_filter": {"label": "生成评分结果", "index": 4, "total": 6, "percent": 72},
         "score_review": {"label": "导出 PASS 图表", "index": 5, "total": 6, "percent": 88},
         "finalize": {"label": "输出推荐结果", "index": 6, "total": 6, "percent": 96},
-        "analysis": {"label": "单股分析", "index": 1, "total": 1, "percent": 100},
+        "analysis": {"label": "单股分析", "index": 1, "total": 1, "percent": 50},
+        "generating_history": {"label": "生成历史数据", "index": 1, "total": 2, "percent": 50},
+        # 阶段6：历史回溯阶段
+        "backfill_initializing": {"label": "初始化历史回溯", "index": 1, "total": 2, "percent": 10},
+        "backfill_processing": {"label": "回溯处理中", "index": 2, "total": 2, "percent": 50},
         "completed": {"label": "已完成", "index": 6, "total": 6, "percent": 100},
         "failed": {"label": "执行失败", "index": 6, "total": 6, "percent": 100},
         "cancelled": {"label": "已取消", "index": 6, "total": 6, "percent": 100},
@@ -219,6 +228,33 @@ class TaskService:
                 reviewer = params.get("reviewer", "quant")
                 if code:
                     existing_task = self._get_active_single_analysis_task(code, reviewer)
+                    if existing_task:
+                        return {
+                            "task_id": existing_task.id,
+                            "ws_url": f"/ws/tasks/{existing_task.id}",
+                            "existing": True,
+                        }
+
+            # 历史生成任务去重：检查同一股票是否有进行中的历史生成任务
+            if task_type == self.GENERATE_HISTORY_TASK_TYPE:
+                code = params.get("code")
+                if code:
+                    existing_task = self._get_active_generate_history_task(code)
+                    if existing_task:
+                        return {
+                            "task_id": existing_task.id,
+                            "ws_url": f"/ws/tasks/{existing_task.id}",
+                            "existing": True,
+                        }
+
+            # 阶段6：历史回溯任务去重
+            if task_type in (
+                self.HISTORY_BACKFILL_INIT_TASK_TYPE,
+                self.HISTORY_BACKFILL_INCR_TASK_TYPE,
+            ):
+                code = params.get("code")
+                if code:
+                    existing_task = self._get_active_backfill_task(code)
                     if existing_task:
                         return {
                             "task_id": existing_task.id,
@@ -297,6 +333,32 @@ class TaskService:
 
         return None
 
+    def _get_active_generate_history_task(self, code: str) -> Optional[Any]:
+        """返回指定股票的活跃历史生成任务（pending/running）。
+
+        阶段5新增：防止重复创建同一股票的历史生成任务。
+        只复用同股票的 pending/running 任务，已完成任务允许重新发起。
+
+        Args:
+            code: 股票代码
+
+        Returns:
+            Task对象或None
+        """
+        from app.models import Task
+
+        running_task = (
+            self.db.query(Task)
+            .filter(
+                Task.task_type == self.GENERATE_HISTORY_TASK_TYPE,
+                Task.filter_by_code(code),
+                Task.status.in_(self.ACTIVE_STATUSES),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+        return running_task
+
     async def _run_task(self, task_id: int):
         """运行任务"""
         from app.models import Task
@@ -334,6 +396,15 @@ class TaskService:
                 await self._run_single_analysis(task, db, params_json)
             elif task_type == "tomorrow_star":
                 await self._run_tomorrow_star(task, db)
+            elif task_type == "generate_history":
+                await self._run_generate_history(task, db, params_json)
+            # 阶段6：历史回溯任务
+            elif task_type == self.HISTORY_BACKFILL_INIT_TASK_TYPE:
+                await self._run_history_backfill_initialize(task, db, params_json)
+            elif task_type == self.HISTORY_BACKFILL_INCR_TASK_TYPE:
+                await self._run_history_backfill_incremental(task, db, params_json)
+            elif task_type == self.HISTORY_BACKFILL_BATCH_TASK_TYPE:
+                await self._run_history_backfill_batch(task, db, params_json)
 
             if saved_task_id in self._cancelled_tasks:
                 raise asyncio.CancelledError()
@@ -515,6 +586,230 @@ class TaskService:
         # 相当于执行到步骤6的全量更新
         await self._run_full_update(task, db)
 
+    async def _run_generate_history(self, task: Any, db: Session, params_json: dict = None):
+        """运行历史数据生成任务
+
+        阶段5新增：从 BackgroundTasks 改为 TaskService 统一管理。
+        """
+        params = params_json or task.params_json or {}
+        code = params.get("code")
+        if not code:
+            raise Exception("缺少股票代码")
+
+        days = params.get("days", 30)
+        clean = params.get("clean", True)
+
+        from app.services.analysis_service import analysis_service
+
+        # 更新任务状态
+        task.task_stage = "generating_history"
+        task.progress = 10
+        task.progress_meta_json = self._build_stage_meta(
+            "generating_history",
+            progress=10,
+            message=f"开始生成 {code} 最近{days}个交易日的历史数据"
+        )
+        db.commit()
+
+        # 执行历史数据生成（在异步上下文中运行同步函数）
+        import asyncio
+        result = await asyncio.to_thread(
+            analysis_service.generate_stock_history_checks,
+            code,
+            days=days,
+            clean=clean,
+        )
+
+        if not result.get("success"):
+            raise Exception(result.get("error", "历史数据生成失败"))
+
+        task.result_json = result
+        task.task_stage = "completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "completed",
+            progress=100,
+            message=f"历史数据生成完成: {code}, 共{result.get('generated_count', 0)}条记录"
+        )
+
+    async def _run_history_backfill_initialize(
+        self, task: Any, db: Session, params_json: dict = None
+    ):
+        """运行历史回溯初始化任务（阶段6）
+
+        初始化时补齐近一年历史数据。
+        """
+        params = params_json or task.params_json or {}
+        code = params.get("code")
+        if not code:
+            raise Exception("缺少股票代码")
+
+        from app.services.history_backfill_service import get_history_backfill_service
+
+        # 更新任务状态
+        task.task_stage = "backfill_initializing"
+        task.progress = 5
+        task.progress_meta_json = self._build_stage_meta(
+            "backfill_initializing",
+            progress=5,
+            message=f"开始初始化 {code} 的历史回溯数据"
+        )
+        db.commit()
+
+        # 执行历史回溯初始化
+        service = get_history_backfill_service()
+
+        def progress_callback(progress_info: dict):
+            """进度回调"""
+            current_progress = 5 + int(progress_info.get("progress_pct", 0) * 0.9)
+            task.progress = min(95, current_progress)
+            task.progress_meta_json = self._build_stage_meta(
+                "backfill_processing",
+                progress=task.progress,
+                message=f"回溯处理中: {progress_info.get('current_date', '')} ({progress_info.get('completed', 0)}/{progress_info.get('total', 0)})"
+            )
+            db.commit()
+
+        result = await asyncio.to_thread(
+            service.initialize_year_history,
+            code,
+            progress_callback=progress_callback,
+        )
+
+        task.result_json = result.to_dict()
+        task.task_stage = "completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "completed",
+            progress=100,
+            message=f"历史回溯初始化完成: {code}, 共{result.backfilled_days}天"
+        )
+
+    async def _run_history_backfill_incremental(
+        self, task: Any, db: Session, params_json: dict = None
+    ):
+        """运行增量历史回溯任务（阶段6）
+
+        只补齐最新交易日的历史记录，不重复回算已有历史。
+        """
+        params = params_json or task.params_json or {}
+        code = params.get("code")
+        if not code:
+            raise Exception("缺少股票代码")
+
+        from app.services.history_backfill_service import get_history_backfill_service
+
+        # 更新任务状态
+        task.task_stage = "backfill_processing"
+        task.progress = 10
+        task.progress_meta_json = self._build_stage_meta(
+            "backfill_processing",
+            progress=10,
+            message=f"开始增量补齐 {code} 的最新交易日"
+        )
+        db.commit()
+
+        # 执行增量历史回溯
+        service = get_history_backfill_service()
+        result = await asyncio.to_thread(
+            service.incremental_backfill_latest_trade_date,
+            code,
+        )
+
+        task.result_json = result.to_dict()
+        task.task_stage = "completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "completed",
+            progress=100,
+            message=f"增量历史回溯完成: {code}, 最新日期 {result.latest_date}"
+        )
+
+    async def _run_history_backfill_batch(
+        self, task: Any, db: Session, params_json: dict = None
+    ):
+        """运行批量历史回溯任务（阶段6）
+
+        批量补齐多只股票的历史数据。
+        """
+        params = params_json or task.params_json or {}
+        codes = params.get("codes", [])
+        if not codes:
+            raise Exception("缺少股票代码列表")
+
+        target_date = params.get("target_date")
+
+        from app.services.history_backfill_service import get_history_backfill_service
+
+        # 更新任务状态
+        task.task_stage = "backfill_initializing"
+        task.progress = 5
+        task.progress_meta_json = self._build_stage_meta(
+            "backfill_initializing",
+            progress=5,
+            message=f"开始批量历史回溯 ({len(codes)} 只股票)"
+        )
+        db.commit()
+
+        # 执行批量历史回溯
+        service = get_history_backfill_service()
+
+        def progress_callback(progress_info: dict):
+            """进度回调"""
+            current_progress = 5 + int(progress_info.get("progress_pct", 0) * 0.9)
+            task.progress = min(95, current_progress)
+            task.progress_meta_json = self._build_stage_meta(
+                "backfill_processing",
+                progress=task.progress,
+                message=f"批量处理中: {progress_info.get('current_code', '')} ({progress_info.get('completed', 0)}/{progress_info.get('total', 0)})"
+            )
+            db.commit()
+
+        result = await asyncio.to_thread(
+            service.backfill_multiple_stocks,
+            codes,
+            target_date=target_date,
+            progress_callback=progress_callback,
+        )
+
+        task.result_json = result
+        task.task_stage = "completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "completed",
+            progress=100,
+            message=f"批量历史回溯完成: {result.get('completed', 0)} 成功, {result.get('failed', 0)} 失败"
+        )
+
+    def _get_active_backfill_task(self, code: str) -> Optional[Any]:
+        """返回指定股票的活跃历史回溯任务（pending/running）。
+
+        阶段6新增：防止重复创建同一股票的历史回溯任务。
+        只复用同股票的 pending/running 任务，已完成任务允许重新发起。
+
+        Args:
+            code: 股票代码
+
+        Returns:
+            Task对象或None
+        """
+        from app.models import Task
+
+        running_task = (
+            self.db.query(Task)
+            .filter(
+                Task.task_type.in_([
+                    self.HISTORY_BACKFILL_INIT_TASK_TYPE,
+                    self.HISTORY_BACKFILL_INCR_TASK_TYPE,
+                ]),
+                Task.filter_by_code(code),
+                Task.status.in_(self.ACTIVE_STATUSES),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+        return running_task
+
     async def cancel_task(self, task_id: int) -> bool:
         """取消任务"""
         if task_id in self.running_tasks:
@@ -594,6 +889,16 @@ class TaskService:
             return f"单股分析 / code={params.get('code', '-')}"
         if task_type == "tomorrow_star":
             return f"明日之星生成 / reviewer={params.get('reviewer', 'quant')}"
+        if task_type == "generate_history":
+            return f"历史数据生成 / code={params.get('code', '-')}, days={params.get('days', 30)}"
+        # 阶段6：历史回溯任务
+        if task_type == "history_backfill_initialize":
+            return f"历史回溯初始化 / code={params.get('code', '-')}"
+        if task_type == "history_backfill_incremental":
+            return f"增量历史回溯 / code={params.get('code', '-')}"
+        if task_type == "history_backfill_batch":
+            codes = params.get('codes', [])
+            return f"批量历史回溯 / {len(codes)} 只股票"
         return task_type
 
     @staticmethod

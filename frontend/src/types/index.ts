@@ -489,3 +489,61 @@ export interface UserListItem {
   daily_quota: number
   created_at: string
 }
+
+// =====================
+// 管理员总览摘要类型
+// =====================
+
+export interface AdminSummaryCard {
+  key: string
+  label: string
+  value: string
+  status: 'success' | 'warning' | 'danger' | 'info'
+  meta?: string | null
+  action_label?: string | null
+  action_route?: string | null
+}
+
+export interface AdminSummaryTaskInfo {
+  id?: number | null
+  task_type?: string | null
+  status: string
+  stage_label?: string | null
+  progress: number
+  summary?: string | null
+}
+
+export interface AdminSummaryDataGap {
+  has_gap: boolean
+  gap_days?: number | null
+  latest_local_date?: string | null
+  latest_trade_date?: string | null
+}
+
+export interface AdminSummaryResponse {
+  today_status: AdminSummaryCard[]
+  data_production: Record<string, string | number | boolean | null>
+  data_gap: AdminSummaryDataGap
+  current_task: AdminSummaryTaskInfo | null
+  latest_task: {
+    id?: number | null
+    status?: string | null
+    summary?: string | null
+    completed_at?: string | null
+  } | null
+  gap_days: number
+  task_status: 'idle' | 'running' | 'failed' | 'completed'
+  latest_task_summary?: string | null
+  latest_trade_date?: string | null
+  latest_db_date?: string | null
+  latest_candidate_date?: string | null
+  latest_analysis_date?: string | null
+  system_ready: boolean
+  pending_actions: Array<{
+    type: string
+    title: string
+    message: string
+    action: string
+    route: string
+  }>
+}

@@ -1,11 +1,12 @@
 """
 Configuration Management
 ~~~~~~~~~~~~~~~~~~~~~~~~
-应用配置管理，支持环境变量和 .env 文件
+应用配置管理，使用环境变量和 .env 文件
 """
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录 (backend 目录的父目录)
@@ -41,28 +42,15 @@ class Settings(BaseSettings):
     logs_dir: Path = PROJECT_ROOT / "data" / "logs"
 
     # 数据库配置
-    # 优先使用 DATABASE_URL 环境变量 (PostgreSQL)
-    # 否则使用 SQLite
-    database_url_env: str = ""
+    database_url_env: str = Field(
+        default="postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade",
+        alias="DATABASE_URL",
+    )
 
     @property
     def database_url(self) -> str:
-        """数据库 URL (支持 PostgreSQL 和 SQLite)"""
-        import os
-
-        # 1. 优先使用环境变量 DATABASE_URL (PostgreSQL)
-        env_db_url = os.environ.get("DATABASE_URL") or self.database_url_env
-        if env_db_url:
-            return env_db_url
-
-        # 2. 测试环境：使用环境变量指定的测试数据库
-        test_db = os.environ.get("SQLITE_TEST_DB")
-        if test_db:
-            return test_db
-
-        # 3. 默认使用 SQLite
-        self.db_dir.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{self.db_dir}/stocktrade.db"
+        """数据库 URL。当前仅支持 PostgreSQL。"""
+        return self.database_url_env
 
     # Tushare 配置
     tushare_token: str = ""

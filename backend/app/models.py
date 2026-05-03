@@ -105,8 +105,42 @@ class Watchlist(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class StockAnalysis(Base):
+    """公共分析结果表（共享分析结果，支持多用户复用）"""
+    __tablename__ = "stock_analysis"
+    __table_args__ = (
+        UniqueConstraint("code", "trade_date", "analysis_type", "strategy_version", name="uq_stock_analysis_unique"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    trade_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    analysis_type: Mapped[str] = mapped_column(String(20), nullable=False, default="daily_b1")  # daily_b1/brick etc.
+    strategy_version: Mapped[str] = mapped_column(String(10), nullable=False, default="v1")
+
+    # 公共分析结果字段
+    close_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    verdict: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # PASS/WATCH/FAIL
+    score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    signal_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # trend_start/distribution_risk
+    b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    kdj_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    zx_long_pos: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    weekly_ma_aligned: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    volume_healthy: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    # 详细分析数据（JSON）
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # 元数据
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class WatchlistAnalysis(Base):
-    """观察股票分析历史表"""
+    """观察股票分析历史表（已废弃，保留用于兼容历史数据）
+    新逻辑使用 StockAnalysis 表存储公共结果，通过 watchlist 表的用户配置动态拼装
+    """
     __tablename__ = "watchlist_analysis"
     __table_args__ = (
         UniqueConstraint("watchlist_id", "analysis_date", name="uq_watchlist_analysis_watchlist_date"),
@@ -154,8 +188,6 @@ class Task(Base):
     @classmethod
     def filter_by_code(cls, code: str):
         """构建过滤 params_json 中 code 字段的查询条件。
-
-        兼容 SQLite 和 PostgreSQL 的 JSON 查询。
 
         Args:
             code: 股票代码

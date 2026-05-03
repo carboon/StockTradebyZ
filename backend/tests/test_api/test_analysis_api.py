@@ -344,9 +344,9 @@ def test_get_tomorrow_star_results_with_date(test_client: TestClient) -> None:
 @pytest.mark.api
 def test_get_diagnosis_history_empty(test_client: TestClient) -> None:
     """
-    测试获取单股诊断历史 - 空历史
+    测试获取单股诊断历史 - 空历史（只读模式）
 
-    验证当股票没有历史检查记录时，API返回空列表。
+    验证当股票没有历史检查记录时，API返回空列表，并标记 data_ready=False。
     """
     with patch("app.api.analysis.analysis_service") as mock_service:
         mock_service.get_stock_history_checks.return_value = []
@@ -359,15 +359,17 @@ def test_get_diagnosis_history_empty(test_client: TestClient) -> None:
         assert data["history"] == []
         assert data["total"] == 0
         assert data["code"] == "600000"  # 代码自动补零到6位
+        assert data["data_ready"] is False  # 只读模式：标记数据未就绪
+        assert "message" in data  # 应该有提示消息
         mock_service.get_stock_history_checks.assert_called_once_with("600000", 30)
 
 
 @pytest.mark.api
 def test_get_diagnosis_history(test_client: TestClient) -> None:
     """
-    测试获取单股诊断历史 - 正常返回
+    测试获取单股诊断历史 - 正常返回（只读模式）
 
-    验证API能正确返回股票的历史检查记录。
+    验证API能正确返回股票的历史检查记录，并标记 data_ready=True。
     """
     with patch("app.api.analysis.analysis_service") as mock_service:
         mock_history = [
@@ -417,6 +419,7 @@ def test_get_diagnosis_history(test_client: TestClient) -> None:
         assert data["code"] == "600000"
         assert data["total"] == 2
         assert len(data["history"]) == 2
+        assert data["data_ready"] is True  # 只读模式：标记数据已就绪
         assert data["history"][0]["check_date"] == "2024-01-15"
         assert data["history"][0]["in_active_pool"] is True
         assert data["history"][0]["b1_passed"] is True
@@ -917,3 +920,52 @@ def test_get_analysis_results_missing_all_return_empty(test_client: TestClient, 
 
     # 确保没有生成任何分析结果文件
     assert not list(date_dir.glob("*.json")), "不应生成任何分析结果文件"
+
+
+@pytest.mark.api
+def test_get_tomorrow_star_candidates_read_only_no_recalc(test_client: TestClient, tmp_path: Path) -> None:
+    """
+    测试获取候选股票列表 - 只读模式不触发重计算
+
+    验证当缓存不存在时，GET接口返回未就绪状态，不触发全量重计算。
+    """
+    from app.models import Task
+
+    # Mock 缓存不存在
+    with patch("app.api.analysis.analysis_service.load_candidate_codes", return_value=("2024-01-15", [])):
+        with patch("app.services.market_service.market_service.should_update_data", return_value=(False, "2024-01-15")):
+            with patch("app.services.market_service.market_service.load_prepared_data", return_value=None):
+                response = test_client.get("/api/v1/analysis/tomorrow-star/candidates")
+
+    # 验证响应结构 - 应该返回未就绪状态
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "not_ready"
+    assert data["total"] == 0
+    assert data["candidates"] == []
+    assert "message" in data
+
+
+@pytest.mark.api
+def test_get_diagnosis_history_read_only_no_recalc(test_client: TestClient) -> None:
+    """
+    测试获取单股诊断历史 - 只读模式不触发实时计算
+
+    验证当历史文件不存在时，GET接口返回空列表，不触发实时B1计算。
+    """
+    with patch("app.api.analysis.analysis_service") as mock_service:
+        # 模拟历史文件不存在，返回空列表（不触发计算）
+        mock_service.get_stock_history_checks.return_value = []
+
+        response = test_client.get("/api/v1/analysis/diagnosis/600000/history")
+
+        # 验证响应
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 0
+        assert data["history"] == []
+        assert data["data_ready"] is False
+        assert "message" in data
+
+        # 确保没有调用任何计算方法（只读模式）
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 30)

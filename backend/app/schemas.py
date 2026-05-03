@@ -92,6 +92,15 @@ class CandidatesResponse(BaseModel):
     pick_date: Optional[date_class] = None
     candidates: List[CandidateItem]
     total: int
+    # 只读模式状态字段
+    status: Optional[str] = None  # "ok" | "not_ready"
+    message: Optional[str] = None
+    has_running_task: Optional[bool] = None
+    running_task_id: Optional[int] = None
+
+    class Config:
+        # 忽略额外字段（兼容旧代码）
+        extra = "ignore"
 
 
 # ==================== 分析结果 ====================
@@ -146,6 +155,9 @@ class DiagnosisHistoryResponse(BaseModel):
     name: Optional[str] = None
     history: List[B1CheckItem]
     total: int
+    # 只读模式状态字段
+    data_ready: bool = True  # True=有历史数据, False=暂无历史数据（未生成）
+    message: Optional[str] = None
 
 
 class DiagnosisRequest(BaseModel):
@@ -166,8 +178,34 @@ class DiagnosisResponse(BaseModel):
 
 
 # ==================== 重点观察 ====================
+class WatchlistAnalysisResult(BaseModel):
+    """公共分析结果（拼装到观察列表中）"""
+    trade_date: Optional[str] = None
+    close_price: Optional[float] = None
+    verdict: Optional[str] = None
+    score: Optional[float] = None
+    signal_type: Optional[str] = None
+    b1_passed: Optional[bool] = None
+    kdj_j: Optional[float] = None
+    zx_long_pos: Optional[bool] = None
+    weekly_ma_aligned: Optional[bool] = None
+    volume_healthy: Optional[bool] = None
+
+
+class WatchlistDerivedData(BaseModel):
+    """派生数据（基于公共结果 + 用户配置计算）"""
+    pnl: Optional[float] = None
+    trend_outlook: Optional[str] = None
+    buy_action: Optional[str] = None
+    hold_action: Optional[str] = None
+    risk_level: Optional[str] = None
+    recommendation: Optional[str] = None
+    support_level: Optional[float] = None
+    resistance_level: Optional[float] = None
+
+
 class WatchlistItem(BaseModel):
-    """观察列表项"""
+    """观察列表项（阶段2：支持公共结果拼装）"""
     id: int
     code: str
     name: Optional[str] = None
@@ -177,6 +215,12 @@ class WatchlistItem(BaseModel):
     priority: int
     is_active: bool
     added_at: datetime
+    # 阶段2新增：公共分析结果和派生数据
+    analysis: Optional[WatchlistAnalysisResult] = None
+    derived: Optional[WatchlistDerivedData] = None
+
+    class Config:
+        extra = "allow"  # 允许额外字段以保持兼容性
 
 
 class WatchlistAddRequest(BaseModel):
@@ -476,3 +520,102 @@ class UserListItem(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ==================== 区间增量更新 ====================
+class IncrementalFillStatus(BaseModel):
+    """区间增量补齐状态"""
+    stage: str  # gap_detection | kline_fill | tomorrow_star | top5_diagnosis | history_fill
+    status: str  # pending | in_progress | completed | failed | partial
+    total: int
+    completed: int
+    failed: int
+    progress_pct: int
+    message: str
+    details: dict[str, Any] | None = None
+
+
+class IncrementalGapInfo(BaseModel):
+    """数据缺口信息"""
+    has_gap: bool
+    latest_local_date: str | None
+    latest_trade_date: str | None
+    gap_days: int
+    gap_start: str | None
+    gap_end: str | None
+    missing_dates: list[str]
+
+
+class IncrementalFillSummary(BaseModel):
+    """区间增量更新总览"""
+    gap: IncrementalGapInfo
+    tomorrow_star: dict[str, Any]
+    history: dict[str, Any]
+    can_fill: bool
+    recommended_action: str
+
+
+class IncrementalFillAllResponse(BaseModel):
+    """一键补齐响应"""
+    success: bool
+    results: dict[str, dict[str, Any]]
+    summary: dict[str, int]
+
+
+# ==================== 管理员总览摘要 ====================
+class AdminSummaryCard(BaseModel):
+    """总览卡片项"""
+    key: str
+    label: str
+    value: str
+    status: str = "info"  # success | warning | danger | info
+    meta: str | None = None
+    action_label: str | None = None
+    action_route: str | None = None
+
+
+class AdminSummaryTaskInfo(BaseModel):
+    """任务信息"""
+    id: int | None
+    task_type: str | None
+    status: str
+    stage_label: str | None
+    progress: int
+    summary: str | None
+
+
+class AdminSummaryDataGap(BaseModel):
+    """数据缺口信息"""
+    has_gap: bool
+    gap_days: int | None
+    latest_local_date: str | None
+    latest_trade_date: str | None
+
+
+class AdminSummaryResponse(BaseModel):
+    """管理员总览摘要响应"""
+    # 今日状态
+    today_status: list[AdminSummaryCard]
+    # 数据生产状态
+    data_production: dict[str, str | int | bool | None]
+    # 数据缺口
+    data_gap: AdminSummaryDataGap
+    # 当前任务
+    current_task: AdminSummaryTaskInfo | None
+    # 最近任务结果
+    latest_task: dict[str, any] | None
+    # 缺口天数
+    gap_days: int
+    # 当前任务状态
+    task_status: str  # idle | running | failed | completed
+    # 最近一次任务结果摘要
+    latest_task_summary: str | None
+    # 最新交易日信息
+    latest_trade_date: str | None
+    latest_db_date: str | None
+    latest_candidate_date: str | None
+    latest_analysis_date: str | None
+    # 系统就绪状态
+    system_ready: bool
+    # 待处理事项
+    pending_actions: list[dict[str, str]]

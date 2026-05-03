@@ -344,14 +344,28 @@ async function refreshHeaderProgress() {
     ])
     activeTasks.value = runningResp.tasks || []
     incrementalStatus.value = incrementalResp
-    progressPollIntervalMs = activeTasks.value.length > 0 || incrementalStatus.value?.running ? 5000 : 30000
+    // 在任务中心页面使用高频轮询，其他页面使用低频轮询
+    if (isUpdateRoute.value) {
+      progressPollIntervalMs = activeTasks.value.length > 0 || incrementalStatus.value?.running ? 5000 : 30000
+    } else {
+      // 非任务中心页面：有任务时30秒，无任务时停止轮询
+      progressPollIntervalMs = (activeTasks.value.length > 0 || incrementalStatus.value?.running) ? 30000 : 0
+    }
   } catch {
     progressPollIntervalMs = Math.min(progressPollIntervalMs * 2, 120000)
   }
 }
 
 function shouldPollHeaderProgress() {
-  return authStore.isAuthenticated && (isUpdateRoute.value || activeTasks.value.length > 0 || Boolean(incrementalStatus.value?.running))
+  if (!authStore.isAuthenticated) return false
+  // 任务中心页面始终轮询（用于实时更新）
+  if (isUpdateRoute.value) return true
+  // 非任务中心页面：只在没有显示过进度时轮询一次获取状态
+  // 一旦获取过状态，就停止轮询（除非用户手动刷新页面）
+  if (activeTasks.value.length > 0 || incrementalStatus.value?.running) {
+    return true // 有任务进行中时保持低频轮询
+  }
+  return false // 没有任务时不轮询
 }
 
 function stopPoller() {
@@ -365,6 +379,8 @@ function stopPoller() {
 function startPoller() {
   stopPoller()
   if (!shouldPollHeaderProgress()) return
+  // 如果间隔为0，不启动轮询
+  if (progressPollIntervalMs <= 0) return
   progressPoller = setInterval(() => {
     void refreshHeaderProgress()
   }, progressPollIntervalMs)

@@ -680,7 +680,9 @@ def test_get_watchlist_analysis_empty(test_client_with_db) -> None:
         position_ratio=0.25,
     )
 
-    response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        mock_service.get_stock_history_checks.return_value = []
+        response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
 
     assert response.status_code == 200
     data = response.json()
@@ -705,49 +707,40 @@ def test_get_watchlist_analysis(test_client_with_db) -> None:
         code="600000"
     )
 
-    # 创建分析历史记录
-    analyses = [
-        WatchlistAnalysis(
-            watchlist_id=item.id,
-            analysis_date=date(2024, 1, 15),
-            close_price=10.5,
-            verdict="PASS",
-            score=4.5,
-            trend_outlook="bullish",
-            buy_action="buy",
-            hold_action="add_on_pullback",
-            risk_level="low",
-            buy_recommendation="可试仓，不追高。",
-            hold_recommendation="可继续持有，强势突破再小幅加仓。",
-            risk_recommendation="关注回踩支撑是否有效。",
-            support_level=10.0,
-            resistance_level=11.0,
-            recommendation="建议买入",
-            notes="技术面强势"
-        ),
-        WatchlistAnalysis(
-            watchlist_id=item.id,
-            analysis_date=date(2024, 1, 10),
-            close_price=10.2,
-            verdict="WATCH",
-            score=3.5,
-            trend_outlook="neutral",
-            recommendation="观察等待"
-        ),
-        WatchlistAnalysis(
-            watchlist_id=item.id,
-            analysis_date=date(2024, 1, 5),
-            close_price=9.8,
-            verdict="FAIL",
-            score=2.0,
-            trend_outlook="bearish"
-        ),
+    mock_history = [
+        {
+            "check_date": "2024-01-15",
+            "close_price": 10.5,
+            "verdict": "PASS",
+            "score": 4.5,
+            "signal_type": "trend_start",
+        },
+        {
+            "check_date": "2024-01-10",
+            "close_price": 10.2,
+            "verdict": "WATCH",
+            "score": 3.5,
+            "signal_type": None,
+        },
+        {
+            "check_date": "2024-01-05",
+            "close_price": 9.8,
+            "verdict": "FAIL",
+            "score": 2.0,
+            "signal_type": "distribution_risk",
+        },
     ]
-    for analysis in analyses:
-        test_client_with_db.db.add(analysis)
-    test_client_with_db.db.commit()
+    mock_df = pd.DataFrame([
+        {"date": "2024-01-04", "low": 9.5, "high": 10.1, "close": 9.8},
+        {"date": "2024-01-05", "low": 9.6, "high": 10.2, "close": 9.8},
+        {"date": "2024-01-10", "low": 9.9, "high": 10.7, "close": 10.2},
+        {"date": "2024-01-15", "low": 10.0, "high": 11.0, "close": 10.5},
+    ])
 
-    response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        mock_service.get_stock_history_checks.return_value = mock_history
+        mock_service.load_stock_data.return_value = mock_df
+        response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
 
     assert response.status_code == 200
     data = response.json()
@@ -772,11 +765,11 @@ def test_get_watchlist_analysis(test_client_with_db) -> None:
     assert first_analysis["hold_action"] == "add_on_pullback"
     assert first_analysis["risk_level"] == "low"
     assert first_analysis["buy_recommendation"] == "可试仓，不追高。"
-    assert first_analysis["hold_recommendation"] == "可继续持有，强势突破再小幅加仓。"
+    assert first_analysis["hold_recommendation"] == "量化评分较高，可适当加仓，注意仓位。"
     assert first_analysis["risk_recommendation"] == "关注回踩支撑是否有效。"
-    assert first_analysis["support_level"] == 10.0
+    assert first_analysis["support_level"] == 9.5
     assert first_analysis["resistance_level"] == 11.0
-    assert first_analysis["recommendation"] == "建议买入"
+    assert first_analysis["recommendation"] == "可试仓，不追高；回踩企稳再加。"
 
 
 @pytest.mark.api
@@ -794,18 +787,21 @@ def test_get_watchlist_analysis_limit(test_client_with_db) -> None:
         position_ratio=0.25,
     )
 
-    # 创建35条分析记录（超过30条限制）
-    for i in range(35):
-        analysis = WatchlistAnalysis(
-            watchlist_id=item.id,
-            analysis_date=date(2024, 1, 1) + pd.Timedelta(days=i),
-            close_price=10.0 + i * 0.1,
-            verdict="PASS"
-        )
-        test_client_with_db.db.add(analysis)
-    test_client_with_db.db.commit()
+    mock_history = [
+        {
+            "check_date": f"2024-01-{i:02d}",
+            "close_price": 10.0 + i * 0.1,
+            "verdict": "PASS",
+            "score": 4.1,
+            "signal_type": "trend_start",
+        }
+        for i in range(35, 0, -1)
+    ]
 
-    response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        mock_service.get_stock_history_checks.return_value = mock_history[:30]
+        mock_service.load_stock_data.return_value = pd.DataFrame([])
+        response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
 
     assert response.status_code == 200
     data = response.json()
@@ -850,25 +846,13 @@ def test_get_watchlist_analysis_other_watchlist_items(test_client_with_db) -> No
         code="000001"
     )
 
-    # 为第一个观察项添加分析记录
-    analysis1 = WatchlistAnalysis(
-        watchlist_id=item1.id,
-        analysis_date=date(2024, 1, 15),
-        verdict="PASS"
-    )
-    test_client_with_db.db.add(analysis1)
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        mock_service.get_stock_history_checks.side_effect = [
+            [{"check_date": "2024-01-15", "verdict": "PASS", "score": 4.0, "signal_type": "trend_start"}],
+        ]
+        mock_service.load_stock_data.return_value = pd.DataFrame([])
 
-    # 为第二个观察项添加分析记录
-    analysis2 = WatchlistAnalysis(
-        watchlist_id=item2.id,
-        analysis_date=date(2024, 1, 15),
-        verdict="WATCH"
-    )
-    test_client_with_db.db.add(analysis2)
-    test_client_with_db.db.commit()
-
-    # 获取第一个观察项的分析
-    response = test_client_with_db.get(f"/api/v1/watchlist/{item1.id}/analysis")
+        response = test_client_with_db.get(f"/api/v1/watchlist/{item1.id}/analysis")
 
     assert response.status_code == 200
     data = response.json()
@@ -931,7 +915,7 @@ def test_analyze_watchlist_item_success(test_client_with_db) -> None:
 @pytest.mark.api
 def test_analyze_watchlist_item_updates_same_trade_day_record(test_client_with_db) -> None:
     """
-    测试同一交易日立即分析会更新已有记录，不重复新增
+    测试同一交易日立即分析保持只读，不修改已有记录
     """
     item = create_watchlist_item(
         test_client_with_db.db,
@@ -984,20 +968,14 @@ def test_analyze_watchlist_item_updates_same_trade_day_record(test_client_with_d
         WatchlistAnalysis.watchlist_id == item.id,
         WatchlistAnalysis.analysis_date == trade_date,
     ).first()
-    assert refreshed.verdict == "FAIL"
-    assert refreshed.trend_outlook == "bearish"
-    assert refreshed.buy_action == "avoid"
-    assert refreshed.hold_action == "trim"
-    assert refreshed.risk_level == "high"
-    assert refreshed.buy_recommendation == "暂不买入。"
-    assert refreshed.hold_recommendation == "谨慎持有，优先减仓观察。"
-    assert refreshed.risk_recommendation == "跌破支撑执行止损。"
+    assert refreshed.verdict == "WATCH"
+    assert refreshed.score == 3.5
 
 
 @pytest.mark.api
 def test_analyze_watchlist_item_prefers_check_date(test_client_with_db) -> None:
     """
-    测试立即分析优先使用分析结果中的交易日
+    测试立即分析优先使用分析结果中的交易日，但不写入新的历史记录
     """
     item = create_watchlist_item(
         test_client_with_db.db,
@@ -1038,13 +1016,13 @@ def test_analyze_watchlist_item_prefers_check_date(test_client_with_db) -> None:
         WatchlistAnalysis.watchlist_id == item.id,
         WatchlistAnalysis.analysis_date == date(2024, 1, 9),
     ).first()
-    assert saved is not None
+    assert saved is None
 
 
 @pytest.mark.api
 def test_analyze_watchlist_item_cold_cache_creates_task(test_client_with_db) -> None:
     """
-    测试冷缓存场景下会创建后台任务并返回 pending
+    测试冷缓存场景下返回 not_ready，不再创建后台任务
     """
     item = create_watchlist_item(
         test_client_with_db.db,
@@ -1060,30 +1038,19 @@ def test_analyze_watchlist_item_cold_cache_creates_task(test_client_with_db) -> 
     # Mock 冷缓存场景：缓存未命中，没有正在进行的分析
     with patch("app.api.watchlist.analysis_service") as mock_service:
         with patch("app.api.watchlist.analysis_cache") as mock_cache:
-            with patch("app.api.watchlist.TaskService") as mock_task_service_class:
-                mock_service.load_stock_data.return_value = mock_df
-                mock_cache.get_cached_analysis.return_value = None  # 冷缓存
-                mock_cache.is_analysis_in_progress.return_value = False  # 无进行中的分析
-                mock_cache.make_cache_key.return_value = "600000_2024-01-10_v1"
-                mock_cache.STRATEGY_VERSION = "v1"
+            mock_service.load_stock_data.return_value = mock_df
+            mock_cache.get_cached_analysis.return_value = None  # 冷缓存
+            mock_cache.is_analysis_in_progress.return_value = False  # 无进行中的分析
+            mock_cache.make_cache_key.return_value = "600000_2024-01-10_v1"
+            mock_cache.STRATEGY_VERSION = "v1"
 
-                # Mock TaskService 实例和 create_task 方法
-                mock_task_service = MagicMock()
-                mock_task_service.create_task = AsyncMock(return_value={
-                    "task_id": 123,
-                    "ws_url": "/ws/tasks/123",
-                    "existing": False,
-                })
-                mock_task_service_class.return_value = mock_task_service
-
-                response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
+            response = test_client_with_db.post(f"/api/v1/watchlist/{item.id}/analyze")
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "pending"
+    assert data["status"] == "not_ready"
     assert data["code"] == "600000"
-    assert data["task_id"] == 123
-    assert data["ws_url"] == "/ws/tasks/123"
+    assert data["message"] == "暂无分析结果，请等待数据更新或联系管理员"
 
 
 @pytest.mark.api

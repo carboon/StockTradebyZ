@@ -30,6 +30,9 @@ RATE_LIMITS = {
     "authenticated": (300, 60),   # 300 requests per 60 seconds
     "admin": (1000, 60),          # 1000 requests per 60 seconds
     "status_api": (10, 60),       # 状态 API: 10 requests per 60 seconds
+    # 阶段5新增：轻计算限流
+    "single_analysis": (10, 60),  # 单股分析：10次/分钟（防止滥用）
+    "history_generation": (2, 3600),  # 历史生成：2次/小时
 }
 
 
@@ -106,9 +109,32 @@ def status_api_rate_limit(request: Request) -> None:
     _check_rate_limit(key, 10, 60)
 
 
+# 阶段5新增：轻计算专用限流依赖
+def single_analysis_rate_limit(request: Request) -> None:
+    """单股分析 API 的专用限流（10/min），防止频繁分析同一股票。"""
+    if skip_rate_limit():
+        return
+
+    user_id = getattr(request.state, "user_id", None)
+    key = f"analysis:{user_id or request.client.host}"
+    _check_rate_limit(key, 10, 60)
+
+
+def history_generation_rate_limit(request: Request) -> None:
+    """历史数据生成 API 的专用限流（2/hour），限制频繁生成历史数据。"""
+    if skip_rate_limit():
+        return
+
+    user_id = getattr(request.state, "user_id", None)
+    key = f"history_gen:{user_id or request.client.host}"
+    _check_rate_limit(key, 2, 3600)
+
+
 # 导出常用的依赖函数
 __all__ = [
     "rate_limit_dep",
     "status_api_rate_limit",
+    "single_analysis_rate_limit",
+    "history_generation_rate_limit",
     "skip_rate_limit",
 ]

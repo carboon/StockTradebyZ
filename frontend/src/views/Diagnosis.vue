@@ -224,7 +224,7 @@
                 :loading="refreshingHistory"
                 @click="refreshHistory"
               >
-                {{ refreshingHistory ? '刷新中...' : '重新刷新历史数据' }}
+                {{ refreshingHistory ? '读取中...' : '读取/刷新历史展示' }}
               </el-button>
             </div>
           </div>
@@ -746,9 +746,31 @@ async function triggerHistoryRefresh(silent: boolean = false) {
 
   refreshingHistory.value = true
 
-  const signal = beginRequest('historyRefresh')
+  const statusSignal = beginRequest('historyStatus')
   try {
-    await apiAnalysis.refreshHistory(stockCode.value, 30, { signal })
+    const status = await apiAnalysis.getHistoryStatus(stockCode.value, { signal: statusSignal })
+
+    if (status.generating) {
+      startPollingHistory(silent)
+      if (!silent) {
+        ElMessage.info('历史数据正在生成中，请稍候...')
+      }
+      return
+    }
+
+    if (status.exists && (status.count || 0) > 0) {
+      await loadHistoryData()
+      if (!silent) {
+        ElMessage.success(`已读取现有历史数据，共 ${status.count} 条`)
+      }
+      refreshingHistory.value = false
+      return
+    }
+
+    finishRequest('historyStatus', statusSignal)
+
+    const refreshSignal = beginRequest('historyRefresh')
+    await apiAnalysis.refreshHistory(stockCode.value, 30, { signal: refreshSignal })
     lastAutoHistoryRefreshAt.value[stockCode.value] = Date.now()
     persistDiagnosisState()
     startPollingHistory(silent)
@@ -763,7 +785,7 @@ async function triggerHistoryRefresh(silent: boolean = false) {
     }
     refreshingHistory.value = false
   } finally {
-    finishRequest('historyRefresh', signal)
+    finishRequest('historyStatus', statusSignal)
   }
 }
 

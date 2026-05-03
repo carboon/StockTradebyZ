@@ -2,6 +2,8 @@
 Analysis API
 ~~~~~~~~~~~~
 分析相关 API (明日之星、单股诊断)
+
+阶段5改造：长任务统一通过TaskService管理，不再使用BackgroundTasks。
 """
 import json
 import os
@@ -9,10 +11,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
+from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, Stock, Task
 from app.services.analysis_service import analysis_service
@@ -360,6 +363,8 @@ async def get_candidates(
                 pick_date=pick_date.date(),
                 candidates=items,
                 total=len(candidates),
+                status="ok",
+                message=None,
             )
         if requested_date:
             return CandidatesResponse(
@@ -368,7 +373,7 @@ async def get_candidates(
                 total=0,
             )
 
-        # 2. 尝试从缓存加载
+        # 2. 尝试从缓存加载（只读模式）
         cached_data = market_service.load_prepared_data(pick_date_str)
 
         if cached_data is not None:
@@ -379,54 +384,30 @@ async def get_candidates(
 
             print(f"使用缓存数据: {len(prepared)} 只股票, {len(pool_codes)} 只流动性池, {len(candidates)} 只候选")
         else:
-            # 缓存不存在，需要重新计算
-            print("缓存不存在，开始计算...")
+            # 只读模式：缓存不存在时返回未就绪状态，不触发重计算
+            # 重计算应由后台任务（如 full_update 或 incremental_update）负责
+            print(f"缓存不存在，日期: {pick_date_str}")
 
-            # 加载原始数据
-            raw_dir = ROOT / settings.raw_data_dir
-            if not raw_dir.exists():
-                return CandidatesResponse(
-                    pick_date=pick_date.date(),
-                    candidates=[],
-                    total=0,
+            # 检查是否有正在进行的任务
+            running_task = (
+                db.query(Task)
+                .filter(
+                    Task.task_type.in_(["tomorrow_star", "full_update"]),
+                    Task.status.in_(["pending", "running"]),
                 )
-
-            # 加载并预处理数据
-            from pipeline.pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
-            from pipeline.select_stock import load_raw_data
-            raw_data = load_raw_data(str(raw_dir))
-
-            # 预处理数据（计算 turnover_n 和 B1 指标）
-            preparer = MarketDataPreparer(
-                warmup_bars=global_cfg.get("min_bars_buffer", 10),
-                n_turnover_days=global_cfg.get("n_turnover_days", 43),
-                selector=B1Selector(
-                    j_threshold=float(b1_cfg.get("j_threshold", 15.0)),
-                    j_q_threshold=float(b1_cfg.get("j_q_threshold", 0.10)),
-                ),
-                n_jobs=4,  # 使用多进程加速
+                .order_by(Task.created_at.desc())
+                .first()
             )
-            prepared = preparer.prepare(raw_data)
 
-            # 构建流动性池
-            top_m = global_cfg.get("top_m", 2000)
-            pool_builder = TopTurnoverPoolBuilder(top_m=top_m)
-            pool_by_date = pool_builder.build(prepared)
-            pool_codes = pool_by_date.get(pick_date, [])
-
-            if not pool_codes:
-                # 如果 pick_date 没有数据，尝试使用最近一天的数据
-                if pool_by_date:
-                    nearest_date = max(d for d in pool_by_date.keys() if d <= pick_date)
-                    pool_codes = pool_by_date.get(nearest_date, [])
-                    pick_date = nearest_date
-
-            # 运行 B1 策略筛选
-            candidates = build_b1_candidates(prepared, pool_codes, pick_date, selector)
-
-            # GET 接口不保存缓存（只读模式）
-            # 缓存保存应由后台任务（如 full_update 或 incremental_update）负责
-            # 注意：由于不保存缓存，下次请求仍需重新计算，这是只读行为的代价
+            return CandidatesResponse(
+                pick_date=pick_date.date(),
+                candidates=[],
+                total=0,
+                status="not_ready",
+                message=f"候选数据尚未生成，请稍后再试",
+                has_running_task=running_task is not None,
+                running_task_id=running_task.id if running_task else None,
+            )
 
         filtered_candidates = [c for c in candidates if c.get("b1_passed", True)]
         stock_name_map = resolve_stock_name_map([c["code"] for c in filtered_candidates[:limit]])
@@ -458,6 +439,8 @@ async def get_candidates(
             pick_date=pick_date.date(),
             candidates=items,
             total=len(filtered_candidates),
+            status="ok",
+            message=None,
         )
     except Exception as e:
         import traceback
@@ -503,7 +486,11 @@ async def get_diagnosis_history(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> DiagnosisHistoryResponse:
-    """获取单股诊断历史"""
+    """获取单股诊断历史（只读模式）
+
+    只返回已生成的历史数据，不触发后台生成任务。
+    如果历史数据不存在，返回 data_ready=False 状态。
+    """
     code = code.zfill(6)
     history = analysis_service.get_stock_history_checks(code, days)
     stock = db.query(Stock).filter(Stock.code == code).first()
@@ -518,29 +505,51 @@ async def get_diagnosis_history(
         name=stock.name if stock else None,
         history=[B1CheckItem.model_validate(h) for h in history],
         total=len(history),
+        data_ready=len(history) > 0,
+        message="暂无历史数据，请先执行历史数据生成任务" if len(history) == 0 else None,
     )
 
 
 @router.post("/diagnosis/{code}/generate-history")
 async def generate_diagnosis_history(
     code: str,
-    background_tasks: BackgroundTasks,
     days: int = Query(default=30, description="生成最近N个交易日的历史数据"),
     clean: bool = Query(default=True, description="是否先清理旧数据"),
+    _rate_limit: None = Depends(history_generation_rate_limit),
+    db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
-    """重新刷新单股诊断历史数据（后台任务）"""
+    """重新刷新单股诊断历史数据（后台任务模式）
+
+    阶段5改造：
+    - 通过任务系统统一管理长任务，不再使用 BackgroundTasks
+    - 添加限流约束（2次/小时）
+    - 返回任务信息，前端可通过任务ID追踪进度
+    """
+    from app.main import manager
+
     ensure_tushare_ready()
     code = code.zfill(6)
 
-    # 启动后台任务生成历史数据
-    background_tasks.add_task(analysis_service.generate_stock_history_checks, code, days, clean)
+    # 创建历史生成任务（阶段5：统一通过任务系统）
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        "generate_history",
+        {
+            "code": code,
+            "days": days,
+            "clean": clean,
+            "reviewer": "quant",
+            "trigger_source": "manual"
+        }
+    )
 
     return {
-        "status": "pending",
-        "message": f"已启动刷新 {code} 最近{days}个交易日的诊断历史数据任务",
+        "task_id": result["task_id"],
         "code": code,
-        "days": days,
+        "status": "pending" if not result.get("existing") else "existing",
+        "ws_url": result["ws_url"],
+        "message": f"历史数据生成任务已创建" if not result.get("existing") else "复用现有生成任务",
     }
 
 
@@ -574,10 +583,18 @@ async def get_history_status(code: str, user=Depends(require_user)) -> dict:
 
 
 @router.post("/diagnosis/analyze")
-async def analyze_stock(request: DiagnosisRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+async def analyze_stock(
+    request: DiagnosisRequest,
+    _rate_limit: None = Depends(single_analysis_rate_limit),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
     """启动单股分析（后台任务模式）
 
-    返回任务信息，前端可通过任务ID轮询或通过WebSocket获取分析结果。
+    阶段5改造：
+    - 通过任务系统统一管理
+    - 添加限流约束（10次/分钟）
+    - 返回任务信息，前端可通过任务ID轮询或通过WebSocket获取分析结果
     """
     from app.main import manager
 
@@ -659,18 +676,8 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
         }
 
     # 任务已完成，返回结果
+    # 只读模式：不触发实时计算补全缺失字段
     result_json = task.result_json or {}
-    b1_fields = ("b1_passed", "kdj_j", "zx_long_pos", "weekly_ma_aligned", "volume_healthy", "close_price")
-    if any(result_json.get(field) is None for field in b1_fields):
-        try:
-            b1_result = analysis_service.check_b1_strategy(code)
-            for field in b1_fields:
-                if result_json.get(field) is None and field in b1_result:
-                    result_json[field] = b1_result.get(field)
-            task.result_json = result_json
-            db.commit()
-        except Exception:
-            db.rollback()
 
     return {
         "code": code,
@@ -700,7 +707,6 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
 
 @router.post("/tomorrow-star/generate")
 async def generate_tomorrow_star(
-    background_tasks: BackgroundTasks,
     reviewer: str = Query(default="quant", description="评审者类型"),
     db: Session = Depends(get_db),
     user=Depends(require_user),

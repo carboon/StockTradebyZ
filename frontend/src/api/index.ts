@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type { AxiosInstance, AxiosError } from 'axios'
 import type {
+  AdminSummaryResponse,
   AnalysisResultsResponse,
   ApiKeyCreateResponse,
   ApiKeyInfo,
@@ -241,6 +242,9 @@ export const apiWatchlist = {
 export const apiTasks = {
   // 获取任务总览
   getOverview: () => api.get<never, TaskOverviewResponse>('/v1/tasks/overview', { timeout: TIMEOUTS.short }),
+
+  // 获取管理员总览摘要（仅管理员）
+  getAdminSummary: () => api.get<never, AdminSummaryResponse>('/v1/tasks/admin/summary', { timeout: TIMEOUTS.short }),
 
   // 获取运行中任务
   getRunning: () => api.get<never, TaskRunningResponse>('/v1/tasks/running', { timeout: TIMEOUTS.short }),

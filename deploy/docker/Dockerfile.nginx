@@ -1,5 +1,16 @@
-# 构建阶段
-FROM node:20-bookworm-slim AS builder
+# Nginx 生产镜像 Dockerfile
+# 职责：
+# - 在构建阶段生成前端 dist
+# - 复制 nginx 配置
+# - 启动 nginx
+#
+# 此镜像同时承载：
+# - 前端静态资源
+# - /api 反向代理
+# - SPA history 路由回退
+
+# 构建阶段 - 使用前端构建 Dockerfile
+FROM node:20-bookworm-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -15,11 +26,14 @@ COPY frontend/ /app/
 # 构建项目
 RUN npm run build
 
-# 生产阶段
+# 生产阶段 - Nginx
 FROM nginx:1.27-alpine
 
-# 复制构建产物
-COPY --from=builder /app/dist /usr/share/nginx/html
+# 从构建阶段复制前端产物
+COPY --from=frontend-builder /app/dist /usr/share/nginx/html
+
+# 复制 nginx 配置
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
 
 EXPOSE 80
 

@@ -176,6 +176,46 @@ def _load_env_var(name: str) -> str:
     return ""
 
 
+def _sync_candidates_to_db() -> None:
+    """将候选数据同步到数据库（阶段7：结果数据库化）"""
+    import json
+    candidates_file = ROOT / "data" / "candidates" / "candidates_latest.json"
+    if not candidates_file.exists():
+        print("[INFO] 候选文件不存在，跳过数据库同步")
+        return
+
+    try:
+        with open(candidates_file, encoding="utf-8") as f:
+            data = json.load(f)
+
+        pick_date = data.get("pick_date")
+        candidates = data.get("candidates", [])
+
+        if not pick_date or not candidates:
+            print("[INFO] 候选数据为空，跳过数据库同步")
+            return
+
+        # 调用候选服务保存到数据库
+        import sys
+        sys.path.insert(0, str(ROOT / "backend"))
+        from app.services.candidate_service import get_candidate_service
+
+        candidate_service = get_candidate_service()
+        count = candidate_service.save_candidates(
+            pick_date=pick_date,
+            candidates=candidates,
+            strategy="b1",
+            clean_existing=True,
+        )
+
+        print(f"[INFO] 候选数据已同步到数据库: pick_date={pick_date}, count={count}")
+
+    except Exception as e:
+        print(f"[WARNING] 候选数据同步到数据库失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def _get_local_latest_date(raw_dir: Path) -> str | None:
     """扫描 data/raw/ 中 CSV 的最新日期。"""
     latest_date: str | None = None
@@ -391,6 +431,10 @@ def main() -> None:
             [PYTHON, "-m", "pipeline.cli", "preselect"],
             stage="build_pool",
         )
+
+        # ── 步骤 2.5：候选数据入库（数据库模式）──────────────────────
+        if args.db:
+            _sync_candidates_to_db()
 
     # ── 步骤 3：导出 K 线图（仅 LLM 模式） ──────────────────────────
     if start <= 3 and args.reviewer != "quant":

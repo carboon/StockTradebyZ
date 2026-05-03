@@ -1,6 +1,185 @@
 <template>
   <div class="ops-page">
     <el-tabs v-model="activeTab" class="ops-tabs">
+      <!-- 管理员总览（阶段4新增） -->
+      <el-tab-pane label="总览" name="dashboard">
+        <div class="tab-content">
+          <el-card v-if="summaryLoading" class="loading-card">
+            <el-skeleton :rows="5" animated />
+          </el-card>
+
+          <template v-else>
+            <!-- 今日状态总览 -->
+            <el-card class="dashboard-cards">
+              <div class="dashboard-cards__grid">
+                <div
+                  v-for="card in adminSummary?.today_status"
+                  :key="card.key"
+                  class="dashboard-card"
+                  :class="`dashboard-card--${card.status}`"
+                  @click="handleCardClick(card)"
+                >
+                  <div class="dashboard-card__label">{{ card.label }}</div>
+                  <div class="dashboard-card__value">{{ card.value }}</div>
+                  <div class="dashboard-card__meta">{{ card.meta || '-' }}</div>
+                  <div v-if="card.action_label" class="dashboard-card__action">
+                    <el-button size="small" link type="primary">{{ card.action_label }}</el-button>
+                  </div>
+                </div>
+              </div>
+            </el-card>
+
+            <!-- 待处理事项 -->
+            <el-card v-if="adminSummary?.pending_actions?.length" class="pending-actions-card">
+              <template #header>
+                <span>待处理事项</span>
+              </template>
+              <div class="pending-actions-list">
+                <div
+                  v-for="(action, idx) in adminSummary.pending_actions"
+                  :key="idx"
+                  class="pending-action-item"
+                  :class="`pending-action-item--${action.type}`"
+                >
+                  <div class="pending-action-item__content">
+                    <strong>{{ action.title }}</strong>
+                    <span>{{ action.message }}</span>
+                  </div>
+                  <el-button size="small" :type="action.type === 'error' ? 'danger' : action.type === 'warning' ? 'warning' : 'primary'" @click="handlePendingAction(action)">
+                    {{ action.action }}
+                  </el-button>
+                </div>
+              </div>
+            </el-card>
+
+            <!-- 当前任务 -->
+            <el-card v-if="adminSummary?.current_task" class="current-task-card">
+              <template #header>
+                <div class="card-header">
+                  <span>当前任务</span>
+                  <el-tag :type="getTaskStatusType(adminSummary.current_task.status)" size="small">
+                    {{ adminSummary.current_task.status }}
+                  </el-tag>
+                </div>
+              </template>
+              <div class="current-task-content">
+                <div class="current-task-info">
+                  <div class="current-task-row">
+                    <span class="label">任务类型:</span>
+                    <span>{{ getTaskTypeLabel(adminSummary.current_task.task_type) }}</span>
+                  </div>
+                  <div class="current-task-row">
+                    <span class="label">当前阶段:</span>
+                    <span>{{ adminSummary.current_task.stage_label || '-' }}</span>
+                  </div>
+                  <div class="current-task-row">
+                    <span class="label">进度:</span>
+                    <span>{{ adminSummary.current_task.progress }}%</span>
+                  </div>
+                </div>
+                <el-progress
+                  :percentage="adminSummary.current_task.progress"
+                  :stroke-width="12"
+                  :status="getProgressStatus(adminSummary.current_task.status)"
+                />
+                <div class="current-task-summary">
+                  {{ adminSummary.current_task.summary || '-' }}
+                </div>
+                <div class="current-task-actions">
+                  <el-button size="small" @click="activeTab = 'tasks'">查看详情</el-button>
+                  <el-button size="small" @click="activeTab = 'logs'">查看日志</el-button>
+                </div>
+              </div>
+            </el-card>
+
+            <!-- 最近任务结果 -->
+            <el-card v-if="adminSummary?.latest_task" class="latest-task-card">
+              <template #header>
+                <span>最近任务结果</span>
+              </template>
+              <div class="latest-task-content">
+                <div class="latest-task-summary">
+                  {{ adminSummary.latest_task_summary || '-' }}
+                </div>
+                <div v-if="adminSummary.latest_task.completed_at" class="latest-task-time">
+                  完成时间: {{ formatDateTime(adminSummary.latest_task.completed_at) }}
+                </div>
+              </div>
+            </el-card>
+
+            <!-- 系统状态 -->
+            <el-card class="system-status-card">
+              <template #header>
+                <div class="card-header">
+                  <span>系统状态</span>
+                  <el-tag :type="adminSummary?.system_ready ? 'success' : 'warning'" size="small">
+                    {{ adminSummary?.system_ready ? '就绪' : '未就绪' }}
+                  </el-tag>
+                </div>
+              </template>
+              <div class="system-status-grid">
+                <div class="system-status-item">
+                  <span class="system-status-item__label">最新交易日</span>
+                  <span class="system-status-item__value">{{ adminSummary?.latest_trade_date || '-' }}</span>
+                </div>
+                <div class="system-status-item">
+                  <span class="system-status-item__label">数据库最新</span>
+                  <span class="system-status-item__value">{{ adminSummary?.latest_db_date || '-' }}</span>
+                </div>
+                <div class="system-status-item">
+                  <span class="system-status-item__label">候选最新</span>
+                  <span class="system-status-item__value">{{ adminSummary?.latest_candidate_date || '-' }}</span>
+                </div>
+                <div class="system-status-item">
+                  <span class="system-status-item__label">分析最新</span>
+                  <span class="system-status-item__value">{{ adminSummary?.latest_analysis_date || '-' }}</span>
+                </div>
+                <div class="system-status-item" :class="{ 'has-gap': adminSummary?.data_gap?.has_gap }">
+                  <span class="system-status-item__label">数据缺口</span>
+                  <span class="system-status-item__value">
+                    {{ adminSummary?.data_gap?.has_gap ? `${adminSummary.gap_days} 天` : '无缺口' }}
+                  </span>
+                </div>
+              </div>
+            </el-card>
+
+            <!-- 快速操作 -->
+            <el-card class="quick-actions-card">
+              <template #header>
+                <span>快速操作</span>
+              </template>
+              <div class="quick-actions-grid">
+                <el-button
+                  type="primary"
+                  :disabled="hasActiveBackgroundWork"
+                  :loading="startingUpdate"
+                  @click="startDataUpdate"
+                >
+                  更新最新交易日数据
+                </el-button>
+                <el-button
+                  :disabled="hasActiveBackgroundWork"
+                  :loading="startingFullUpdate"
+                  @click="startFullUpdate"
+                >
+                  重新执行全量初始化
+                </el-button>
+                <el-button
+                  :icon="Refresh"
+                  @click="loadAdminSummary"
+                >
+                  刷新状态
+                </el-button>
+              </div>
+              <div v-if="hasActiveBackgroundWork" class="running-hint">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                {{ activeWorkHint }}
+              </div>
+            </el-card>
+          </template>
+        </div>
+      </el-tab-pane>
+
       <!-- 任务管理 -->
       <el-tab-pane label="任务管理" name="tasks">
         <div class="tab-content">
@@ -450,7 +629,7 @@ import {
 import { apiTasks } from '@/api'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
-import type { IncrementalUpdateStatus, Task, TaskDiagnosticCheck, TaskDiagnosticsResponse, TaskLogItem, TaskProgressMeta } from '@/types'
+import type { AdminSummaryResponse, IncrementalUpdateStatus, Task, TaskDiagnosticCheck, TaskDiagnosticsResponse, TaskLogItem, TaskProgressMeta } from '@/types'
 import { loadInitTaskViewState, saveInitTaskViewState, clearInitTaskViewState } from '@/utils/initTaskViewState'
 import { formatDuration } from '@/utils'
 
@@ -459,7 +638,7 @@ const noticeStore = useNoticeStore()
 const router = useRouter()
 
 // Tab状态
-const activeTab = ref<'tasks' | 'logs' | 'status'>('tasks')
+const activeTab = ref<'dashboard' | 'tasks' | 'logs' | 'status'>('dashboard')
 const logFilter = ref<'all' | 'task'>('task')
 const autoScroll = ref(true)
 const diagnosticsPanels = ref<string[]>([])
@@ -523,6 +702,10 @@ const startingFullUpdate = ref(false)
 const checkingData = ref(false)
 const diagnosticsLoading = ref(false)
 const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
+
+// 管理员总览（阶段4新增）
+const adminSummary = ref<AdminSummaryResponse | null>(null)
+const summaryLoading = ref(false)
 
 // WebSocket
 let ws: WebSocket | null = null
@@ -763,8 +946,12 @@ watch(selectedTask, (newTask) => {
   persistViewState()
 })
 
-watch(activeTab, () => {
+watch(activeTab, (newTab) => {
   persistViewState()
+  // 切换到总览标签时刷新管理员摘要
+  if (newTab === 'dashboard') {
+    void loadAdminSummary()
+  }
 })
 
 // 生命周期
@@ -779,6 +966,8 @@ onMounted(async () => {
     console.error('Failed to check tushare status:', error)
   }
   await reloadAll()
+  // 加载管理员总览
+  await loadAdminSummary()
   connectOpsSocket()
   startPoller()
 })
@@ -849,6 +1038,59 @@ async function reloadAll() {
     console.error('Failed to reload:', error)
     dataLoaded.value = true
   }
+}
+
+// 管理员总览相关函数（阶段4新增）
+async function loadAdminSummary() {
+  summaryLoading.value = true
+  try {
+    const summary = await apiTasks.getAdminSummary()
+    adminSummary.value = summary
+  } catch (error) {
+    console.error('Failed to load admin summary:', error)
+    adminSummary.value = null
+  } finally {
+    summaryLoading.value = false
+  }
+}
+
+function handleCardClick(card: any) {
+  if (card.action_route) {
+    router.push(card.action_route)
+  }
+}
+
+function handlePendingAction(action: any) {
+  if (action.route) {
+    // 解析路由和可能的查询参数
+    const [path, query] = action.route.split('?')
+    if (query) {
+      const params = new URLSearchParams(query)
+      const queryParams: Record<string, string> = {}
+      params.forEach((value, key) => { queryParams[key] = value })
+      router.push({ path, query: queryParams })
+    } else {
+      router.push(path)
+    }
+  }
+}
+
+function getTaskStatusType(status: string): 'success' | 'warning' | 'danger' | 'info' {
+  const types: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
+    completed: 'success',
+    running: 'warning',
+    pending: 'info',
+    failed: 'danger',
+    cancelled: 'info',
+  }
+  return types[status] || 'info'
+}
+
+function getProgressStatus(status: string): 'success' | 'warning' | 'exception' | undefined {
+  if (status === 'completed') return 'success'
+  if (status === 'failed') return 'exception'
+  if (status === 'running') return 'warning'
+  return undefined
 }
 
 async function startBootstrap() {
@@ -1296,7 +1538,8 @@ async function recoverInitializationTask() {
 }
 
 // 格式化方法
-function getTaskTypeLabel(taskType: string): string {
+function getTaskTypeLabel(taskType: string | null | undefined): string {
+  if (!taskType) return '-'
   const labels: Record<string, string> = {
     full_update: '全量更新',
     single_analysis: '单股分析',
@@ -2103,6 +2346,271 @@ function buildWebSocketUrl(path: string) {
       color: var(--color-text-primary);
     }
   }
+}
+
+// 阶段4：管理员总览样式
+.dashboard-cards {
+  .dashboard-cards__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+}
+
+.dashboard-card {
+  padding: 20px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    border-color: var(--color-primary);
+    box-shadow: 0 4px 12px rgba(0, 180, 216, 0.15);
+  }
+
+  &--success {
+    background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+    border-color: #86efac;
+
+    .dashboard-card__label {
+      color: #166534;
+    }
+
+    .dashboard-card__value {
+      color: #15803d;
+    }
+  }
+
+  &--warning {
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    border-color: #fcd34d;
+
+    .dashboard-card__label {
+      color: #92400e;
+    }
+
+    .dashboard-card__value {
+      color: #b45309;
+    }
+  }
+
+  &--danger {
+    background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+    border-color: #fca5a5;
+
+    .dashboard-card__label {
+      color: #991b1b;
+    }
+
+    .dashboard-card__value {
+      color: #dc2626;
+    }
+  }
+
+  &--info {
+    background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+    border-color: #93c5fd;
+
+    .dashboard-card__label {
+      color: #1e40af;
+    }
+
+    .dashboard-card__value {
+      color: #2563eb;
+    }
+  }
+
+  .dashboard-card__label {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .dashboard-card__value {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .dashboard-card__meta {
+    font-size: 12px;
+    opacity: 0.8;
+  }
+
+  .dashboard-card__action {
+    margin-top: 12px;
+  }
+}
+
+.pending-actions-card {
+  .pending-actions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .pending-action-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-radius: 10px;
+    border: 1px solid #e5e7eb;
+    background: #f8fafc;
+
+    &--error {
+      background: #fef2f2;
+      border-color: #fecaca;
+    }
+
+    &--warning {
+      background: #fffbeb;
+      border-color: #fde68a;
+    }
+
+    &--info {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+    }
+
+    .pending-action-item__content {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+
+      strong {
+        font-weight: 600;
+        color: var(--color-text-primary);
+      }
+
+      span {
+        font-size: 13px;
+        color: var(--color-text-secondary);
+      }
+    }
+  }
+}
+
+.current-task-card {
+  .current-task-content {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .current-task-info {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+
+    .current-task-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+
+      .label {
+        font-size: 12px;
+        color: var(--color-text-secondary);
+      }
+
+      span:not(.label) {
+        font-weight: 600;
+        color: var(--color-text-primary);
+      }
+    }
+  }
+
+  .current-task-summary {
+    padding: 12px;
+    background: #f8fafc;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--color-text-secondary);
+  }
+
+  .current-task-actions {
+    display: flex;
+    gap: 8px;
+  }
+}
+
+.latest-task-card {
+  .latest-task-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .latest-task-summary {
+    padding: 12px;
+    background: #f0fdf4;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #166534;
+  }
+
+  .latest-task-time {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+  }
+}
+
+.system-status-card {
+  .system-status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+  }
+
+  .system-status-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 12px;
+    background: #f8fafc;
+    border-radius: 8px;
+
+    &.has-gap {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+    }
+
+    .system-status-item__label {
+      font-size: 13px;
+      color: var(--color-text-secondary);
+    }
+
+    .system-status-item__value {
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+  }
+}
+
+.quick-actions-card {
+  .quick-actions-grid {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .running-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    color: var(--color-warning);
+    font-size: 14px;
+  }
+}
+
+.loading-card {
+  padding: 40px;
 }
 
 @media (max-width: 768px) {
