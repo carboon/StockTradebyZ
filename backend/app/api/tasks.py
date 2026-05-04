@@ -19,6 +19,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import Config, Task, TaskLog
 from app.services.task_service import TaskService
+from app.services.tomorrow_star_window_service import get_tomorrow_star_window_service
 from app.services.tushare_service import TushareService
 from app.schemas import (
     AdminSummaryCard,
@@ -307,6 +308,19 @@ async def start_incremental_update(
             )
 
             if result.get("success"):
+                latest_trade_date = TushareService().get_latest_trade_date()
+                if latest_trade_date and TushareService().is_trade_date_data_ready(latest_trade_date):
+                    try:
+                        window_service = get_tomorrow_star_window_service()
+                        window_service.build_for_trade_date(
+                            latest_trade_date,
+                            reviewer="quant",
+                            source="incremental_update",
+                            window_size=180,
+                        )
+                        window_service.prune_window(180)
+                    except Exception as exc:
+                        print(f"增量更新后维护明日之星 180 日窗口失败: {exc}")
                 MarketService.finish_update(
                     f"增量更新完成: {result.get('updated')} 更新, {result.get('skipped')} 跳过, {result.get('failed')} 失败"
                 )

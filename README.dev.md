@@ -53,3 +53,10 @@ python run_all.py
 python -m pipeline.cli preselect
 pytest
 ```
+
+日更链路回放测试：
+
+```bash
+python backend/daily_update_test.py --help
+python backend/daily_update_test.py --target-date 2026-04-30
+```

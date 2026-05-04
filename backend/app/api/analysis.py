@@ -7,6 +7,7 @@ Analysis API
 """
 import json
 import os
+import math
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional
@@ -20,6 +21,7 @@ from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, Stock, Task
 from app.services.analysis_service import analysis_service
 from app.services.task_service import TaskService
+from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
 from app.schemas import (
@@ -27,6 +29,9 @@ from app.schemas import (
     CandidateItem,
     AnalysisResultResponse,
     AnalysisItem,
+    TomorrowStarDatesResponse,
+    TomorrowStarHistoryItem,
+    TomorrowStarWindowStatusResponse,
     DiagnosisHistoryResponse,
     B1CheckItem,
     DiagnosisRequest,
@@ -38,6 +43,16 @@ router = APIRouter()
 ROOT = Path(__file__).parent.parent.parent.parent
 
 
+def _safe_json_float(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def ensure_tushare_ready() -> None:
     service = TushareService()
     valid, message = service.verify_token()
@@ -45,14 +60,81 @@ def ensure_tushare_ready() -> None:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
 
 
-@router.get("/tomorrow-star/dates")
-async def get_tomorrow_star_dates(user=Depends(require_user)) -> dict:
+@router.get("/tomorrow-star/dates", response_model=TomorrowStarDatesResponse)
+async def get_tomorrow_star_dates(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> TomorrowStarDatesResponse:
     """获取明日之星历史日期列表"""
-    history = analysis_service.get_candidates_history(limit=100)
-    return {
-        "dates": [h["date"] for h in history],
-        "history": history,
-    }
+    summary = TomorrowStarWindowService(db).get_window_status(window_size=180)
+    history_items = [
+        TomorrowStarHistoryItem(
+            pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
+            date=item["date"],
+            count=int(item.get("count", 0) or 0),
+            pass_count=int(item.get("pass_count", 0) or 0),
+            candidate_count=int(item.get("candidate_count", 0) or 0),
+            analysis_count=int(item.get("analysis_count", 0) or 0),
+            trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            status=item.get("status") or "missing",
+            error_message=item.get("error_message"),
+            is_latest=bool(item.get("is_latest")),
+        )
+        for item in summary.items
+    ]
+    return TomorrowStarDatesResponse(
+        dates=[item.date for item in history_items],
+        history=history_items,
+        window_status=TomorrowStarWindowStatusResponse(
+            window_size=summary.window_size,
+            latest_date=datetime.strptime(summary.latest_date, "%Y-%m-%d").date() if summary.latest_date else None,
+            ready_count=summary.ready_count,
+            missing_count=summary.missing_count,
+            running_count=summary.running_count,
+            failed_count=summary.failed_count,
+            pending_count=summary.pending_count,
+            has_running_task=False,
+            running_task_id=None,
+            items=history_items,
+            history=history_items,
+        ),
+    )
+
+
+@router.get("/tomorrow-star/window-status", response_model=TomorrowStarWindowStatusResponse)
+async def get_tomorrow_star_window_status(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> TomorrowStarWindowStatusResponse:
+    summary = TomorrowStarWindowService(db).get_window_status(window_size=180)
+    history_items = [
+        TomorrowStarHistoryItem(
+            pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
+            date=item["date"],
+            count=int(item.get("count", 0) or 0),
+            pass_count=int(item.get("pass_count", 0) or 0),
+            candidate_count=int(item.get("candidate_count", 0) or 0),
+            analysis_count=int(item.get("analysis_count", 0) or 0),
+            trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            status=item.get("status") or "missing",
+            error_message=item.get("error_message"),
+            is_latest=bool(item.get("is_latest")),
+        )
+        for item in summary.items
+    ]
+    return TomorrowStarWindowStatusResponse(
+        window_size=summary.window_size,
+        latest_date=datetime.strptime(summary.latest_date, "%Y-%m-%d").date() if summary.latest_date else None,
+        ready_count=summary.ready_count,
+        missing_count=summary.missing_count,
+        running_count=summary.running_count,
+        failed_count=summary.failed_count,
+        pending_count=summary.pending_count,
+        has_running_task=False,
+        running_task_id=None,
+        items=history_items,
+        history=history_items,
+    )
 
 
 @router.get("/tomorrow-star/freshness")
@@ -147,300 +229,63 @@ async def get_candidates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CandidatesResponse:
-    """获取候选股票列表（带缓存，实时筛选最新交易日数据）"""
-    from app.config import settings
-    from app.services.market_service import market_service
-    from datetime import date as date_class
+    """获取候选股票列表（只读数据库持久化结果）"""
+    from app.services.candidate_service import CandidateService
     import pandas as pd
-    import yaml
-    import sys
-
-    # 添加 pipeline 目录到 Python 路径
-    pipeline_dir = ROOT / "pipeline"
-    if str(pipeline_dir) not in sys.path:
-        sys.path.insert(0, str(pipeline_dir))
-
-    # 添加 agent 目录到 Python 路径
-    agent_dir = ROOT / "agent"
-    if str(agent_dir) not in sys.path:
-        sys.path.insert(0, str(agent_dir))
-
-    from Selector import B1Selector
 
     requested_date = analysis_service._normalize_pick_date(date)
-    latest_candidate_date = analysis_service.get_latest_candidate_date()
-
-    # 1. 优先使用已有候选快照日期；缺失时再退回到交易日判断
-    if market_service.token:
-        should_update, latest_trade_date = market_service.should_update_data()
-    else:
-        should_update = False
-        latest_trade_date = None
-    pick_date_str = requested_date or latest_candidate_date or latest_trade_date or date_class.today().strftime("%Y-%m-%d")
-
-    # 解析日期
-    try:
-        pick_date = pd.Timestamp(pick_date_str)
-    except:
-        pick_date = pd.Timestamp.now()
 
     try:
-        def resolve_stock_name_map(codes: list[str]) -> dict[str, str | None]:
-            normalized_codes = [str(code).zfill(6) for code in codes if str(code or "").strip()]
-            if not normalized_codes:
-                return {}
-
-            name_map = {
-                str(stock.code): stock.name
-                for stock in db.query(Stock).filter(Stock.code.in_(normalized_codes)).all()
-            }
-            missing_name_codes = [code for code in normalized_codes if not name_map.get(code)]
-            if missing_name_codes and os.environ.get("TUSHARE_TOKEN"):
-                try:
-                    TushareService().sync_stock_names_to_db(db, missing_name_codes)
-                    name_map = {
-                        str(stock.code): stock.name
-                        for stock in db.query(Stock).filter(Stock.code.in_(normalized_codes)).all()
-                    }
-                except Exception as exc:
-                    print(f"同步候选股票名称失败: {exc}")
-
-            return name_map
-
-        def build_b1_candidates(
-            prepared: dict,
-            pool_codes: list,
-            target_pick_date,
-            selector,
-        ) -> list[dict]:
-            computed_candidates = []
-
-            for code in pool_codes:
-                df = prepared.get(code)
-                if df is None:
-                    continue
-                try:
-                    if target_pick_date in df.index:
-                        check_date = target_pick_date
-                    else:
-                        valid_dates = df.index[df.index <= target_pick_date]
-                        if valid_dates.empty:
-                            continue
-                        check_date = valid_dates[-1]
-
-                    # 使用当前代码重新计算，避免信任旧缓存中的 _vec_pick/candidates。
-                    current_df = selector.prepare_df(df)
-                    if check_date not in current_df.index:
-                        continue
-
-                    b1_passed = bool(current_df.loc[check_date, "_vec_pick"])
-                    if not b1_passed:
-                        continue
-
-                    row = current_df.loc[check_date]
-                    open_val = float(row["open"]) if pd.notna(row.get("open")) else None
-                    close_val = float(row["close"])
-                    change_pct = (close_val - open_val) / open_val * 100 if open_val and open_val > 0 else None
-                    computed_candidates.append({
-                        "code": code,
-                        "date": check_date.strftime("%Y-%m-%d"),
-                        "strategy": "b1",
-                        "open": open_val,
-                        "close": close_val,
-                        "change_pct": change_pct,
-                        "turnover_n": float(row.get("turnover_n", 0)),
-                        "b1_passed": True,
-                        "kdj_j": float(row.get("J", 0)) if pd.notna(row.get("J")) else None,
-                    })
-                except Exception as exc:
-                    print(f"Error processing {code}: {exc}")
-                    continue
-
-            return computed_candidates
-
-        def build_snapshot_candidates(
-            snapshot_codes: list[str],
-            target_pick_date,
-            selector,
-        ) -> list[dict]:
-            raw_dir = ROOT / settings.raw_data_dir
-            computed_candidates = []
-
-            for code in snapshot_codes:
-                csv_path = raw_dir / f"{code}.csv"
-                if not csv_path.exists():
-                    continue
-                try:
-                    df = pd.read_csv(csv_path)
-                    df.columns = [c.lower() for c in df.columns]
-                    if "date" not in df.columns:
-                        continue
-                    df["date"] = pd.to_datetime(df["date"])
-                    df = df.sort_values("date").reset_index(drop=True)
-                    current_df = selector.prepare_df(df.set_index("date", drop=False))
-
-                    if target_pick_date in current_df.index:
-                        check_date = target_pick_date
-                    else:
-                        valid_dates = current_df.index[current_df.index <= target_pick_date]
-                        if valid_dates.empty:
-                            continue
-                        check_date = valid_dates[-1]
-
-                    row = current_df.loc[check_date]
-                    open_val = float(row["open"]) if pd.notna(row.get("open")) else None
-                    close_val = float(row["close"])
-                    change_pct = (close_val - open_val) / open_val * 100 if open_val and open_val > 0 else None
-                    computed_candidates.append({
-                        "code": code,
-                        "date": check_date.strftime("%Y-%m-%d"),
-                        "strategy": "b1",
-                        "open": open_val,
-                        "close": close_val,
-                        "change_pct": change_pct,
-                        "turnover_n": float(row.get("turnover_n", 0)),
-                        "b1_passed": True,
-                        "kdj_j": float(row.get("J", 0)) if pd.notna(row.get("J")) else None,
-                    })
-                except Exception as exc:
-                    print(f"Error processing snapshot candidate {code}: {exc}")
-                    continue
-
-            return computed_candidates
-
-        # 加载配置
-        config_file = ROOT / "config" / "rules_preselect.yaml"
-        with open(config_file, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-
-        global_cfg = cfg.get("global", {})
-        b1_cfg = cfg.get("b1", {})
-
-        if not b1_cfg.get("enabled", True):
-            return CandidatesResponse(
-                pick_date=pick_date.date(),
-                candidates=[],
-                total=0,
-            )
-
-        zx_m1 = b1_cfg.get("zx_m1", 14)
-        zx_m2 = b1_cfg.get("zx_m2", 28)
-        zx_m3 = b1_cfg.get("zx_m3", 57)
-        zx_m4 = b1_cfg.get("zx_m4", 114)
-
-        selector = B1Selector(
-            j_threshold=float(b1_cfg.get("j_threshold", 15.0)),
-            j_q_threshold=float(b1_cfg.get("j_q_threshold", 0.10)),
-            zx_m1=zx_m1, zx_m2=zx_m2, zx_m3=zx_m3, zx_m4=zx_m4,
-        )
-
-        snapshot_pick_date, snapshot_codes = analysis_service.load_candidate_codes(requested_date)
-        if snapshot_codes:
-            if snapshot_pick_date:
-                pick_date = pd.Timestamp(snapshot_pick_date)
-            candidates = build_snapshot_candidates(snapshot_codes, pick_date, selector)
-            stock_name_map = resolve_stock_name_map([c["code"] for c in candidates[:limit]])
+        persisted_pick_date, persisted_candidates = CandidateService(db).load_candidates(requested_date, limit=limit)
+        if persisted_candidates:
+            try:
+                response_pick_date = pd.Timestamp(persisted_pick_date).date() if persisted_pick_date else None
+            except Exception:
+                response_pick_date = None
 
             items = []
-            for i, c in enumerate(candidates[:limit]):
+            for i, c in enumerate(persisted_candidates[:limit]):
                 items.append(
                     CandidateItem(
                         id=i,
-                        pick_date=pick_date.date(),
+                        pick_date=response_pick_date,
                         code=c["code"],
-                        name=stock_name_map.get(c["code"]),
-                        strategy="b1",
+                        name=c.get("name"),
+                        strategy=c.get("strategy") or "b1",
                         open_price=c.get("open"),
-                        close_price=c["close"],
+                        close_price=c.get("close"),
                         change_pct=c.get("change_pct"),
-                        turnover=float(c["turnover_n"]),
-                        b1_passed=True,
-                        kdj_j=c["kdj_j"],
+                        turnover=float(c["turnover_n"]) if c.get("turnover_n") is not None else None,
+                        b1_passed=c.get("b1_passed"),
+                        kdj_j=c.get("kdj_j"),
                     )
                 )
 
             return CandidatesResponse(
-                pick_date=pick_date.date(),
+                pick_date=response_pick_date,
                 candidates=items,
-                total=len(candidates),
+                total=len(persisted_candidates),
                 status="ok",
                 message=None,
             )
-        if requested_date:
-            return CandidatesResponse(
-                pick_date=pick_date.date(),
-                candidates=[],
-                total=0,
+
+        running_task = (
+            db.query(Task)
+            .filter(
+                Task.task_type.in_(["tomorrow_star", "full_update"]),
+                Task.status.in_(["pending", "running"]),
             )
-
-        # 2. 尝试从缓存加载（只读模式）
-        cached_data = market_service.load_prepared_data(pick_date_str)
-
-        if cached_data is not None:
-            # 使用缓存数据
-            prepared = cached_data.get("prepared", {})
-            pool_codes = cached_data.get("pool_codes", [])
-            candidates = build_b1_candidates(prepared, pool_codes, pick_date, selector)
-
-            print(f"使用缓存数据: {len(prepared)} 只股票, {len(pool_codes)} 只流动性池, {len(candidates)} 只候选")
-        else:
-            # 只读模式：缓存不存在时返回未就绪状态，不触发重计算
-            # 重计算应由后台任务（如 full_update 或 incremental_update）负责
-            print(f"缓存不存在，日期: {pick_date_str}")
-
-            # 检查是否有正在进行的任务
-            running_task = (
-                db.query(Task)
-                .filter(
-                    Task.task_type.in_(["tomorrow_star", "full_update"]),
-                    Task.status.in_(["pending", "running"]),
-                )
-                .order_by(Task.created_at.desc())
-                .first()
-            )
-
-            return CandidatesResponse(
-                pick_date=pick_date.date(),
-                candidates=[],
-                total=0,
-                status="not_ready",
-                message=f"候选数据尚未生成，请稍后再试",
-                has_running_task=running_task is not None,
-                running_task_id=running_task.id if running_task else None,
-            )
-
-        filtered_candidates = [c for c in candidates if c.get("b1_passed", True)]
-        stock_name_map = resolve_stock_name_map([c["code"] for c in filtered_candidates[:limit]])
-
-        # 转换为响应格式
-        items = []
-
-        for i, c in enumerate(filtered_candidates[:limit]):
-            items.append(
-                CandidateItem(
-                    id=i,
-                    pick_date=pick_date.date(),
-                    code=c["code"],
-                    name=stock_name_map.get(c["code"]),
-                    strategy="b1",
-                    open_price=c.get("open"),
-                    close_price=c["close"],
-                    change_pct=c.get("change_pct"),
-                    turnover=float(c["turnover_n"]),
-                    b1_passed=c["b1_passed"],
-                    kdj_j=c["kdj_j"],
-                )
-            )
-
-        # GET 接口不更新交易日缓存（只读模式）
-        # 缓存更新应由后台任务负责
-
+            .order_by(Task.created_at.desc())
+            .first()
+        )
         return CandidatesResponse(
-            pick_date=pick_date.date(),
-            candidates=items,
-            total=len(filtered_candidates),
-            status="ok",
-            message=None,
+            pick_date=pd.Timestamp(requested_date).date() if requested_date else None,
+            candidates=[],
+            total=0,
+            status="not_ready",
+            message="候选数据尚未生成，请稍后再试",
+            has_running_task=running_task is not None,
+            running_task_id=running_task.id if running_task else None,
         )
     except Exception as e:
         import traceback
@@ -451,31 +296,64 @@ async def get_candidates(
 @router.get("/tomorrow-star/results", response_model=AnalysisResultResponse)
 async def get_analysis_results(
     date: Optional[str] = None,
+    db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> AnalysisResultResponse:
     """获取指定日期的分析结果"""
-    result = analysis_service.get_analysis_results(date)
+    normalized_date = analysis_service._normalize_pick_date(date)
+    target_date = None
+    if normalized_date:
+        try:
+            target_date = datetime.strptime(normalized_date, "%Y-%m-%d").date()
+        except ValueError:
+            target_date = None
 
-    items = []
-    for r in result.get("results", []):
-        items.append(
-            AnalysisItem(
-                id=0,
-                pick_date=datetime.strptime(result["pick_date"], "%Y-%m-%d").date() if result.get("pick_date") else None,
-                code=r.get("code", ""),
-                reviewer="quant",
-                verdict=r.get("verdict"),
-                total_score=r.get("total_score"),
-                signal_type=r.get("signal_type"),
-                comment=r.get("comment"),
-            )
+    if target_date is None:
+        latest_pick_date = (
+            db.query(AnalysisResult.pick_date)
+            .order_by(AnalysisResult.pick_date.desc())
+            .limit(1)
+            .scalar()
+        )
+        target_date = latest_pick_date
+
+    if target_date is None:
+        return AnalysisResultResponse(
+            pick_date=None,
+            results=[],
+            total=0,
+            min_score_threshold=4.0,
         )
 
+    rows = (
+        db.query(AnalysisResult)
+        .filter(AnalysisResult.pick_date == target_date)
+        .order_by(
+            AnalysisResult.total_score.desc().nullslast(),
+            AnalysisResult.id.asc(),
+        )
+        .all()
+    )
+
+    items = [
+        AnalysisItem(
+            id=row.id,
+            pick_date=target_date,
+            code=row.code,
+            reviewer=row.reviewer,
+            verdict=row.verdict,
+            total_score=_safe_json_float(row.total_score),
+            signal_type=row.signal_type,
+            comment=row.comment,
+        )
+        for row in rows
+    ]
+
     return AnalysisResultResponse(
-        pick_date=datetime.strptime(result["pick_date"], "%Y-%m-%d").date() if result.get("pick_date") else None,
+        pick_date=target_date,
         results=items,
         total=len(items),
-        min_score_threshold=result.get("min_score_threshold", 4.0),
+        min_score_threshold=4.0,
     )
 
 

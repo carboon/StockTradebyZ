@@ -23,18 +23,34 @@ warnings.filterwarnings("ignore")
 
 # --------------------------- 数据库写入（可选） --------------------------- #
 _DB_MODE = False  # 由 main() 中 --db 参数控制
+_DB_SESSION_FACTORIES: dict[str, Any] = {}
+
+
+def _get_db_session_factory(db_url: str):
+    factory = _DB_SESSION_FACTORIES.get(db_url)
+    if factory is not None:
+        return factory
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine_kwargs: dict[str, Any] = {}
+    if db_url.startswith("sqlite"):
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+    engine = create_engine(db_url, **engine_kwargs)
+    factory = sessionmaker(bind=engine)
+    _DB_SESSION_FACTORIES[db_url] = factory
+    return factory
 
 
 def _save_to_db(code: str, df, db_url: str) -> None:
-    """将 K 线数据写入 SQLite 数据库。每个线程使用独立 session。"""
+    """将 K 线数据写入数据库。每个线程使用独立 session。"""
     if df is None or df.empty:
         return
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
     from backend.app.services.kline_service import save_daily_data
 
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=engine)
+    Session = _get_db_session_factory(db_url)
     db = Session()
     try:
         save_daily_data(db, code, df)
@@ -710,9 +726,9 @@ def fetch_one_incremental(
                 result["new_count"] = len(new_df)
 
             combined_df.to_csv(csv_path, index=False)
-            # 写入数据库（如果启用）
+            # 增量模式只需要把新增交易日写入数据库，不要整份历史重复 upsert。
             if db_url:
-                _save_to_db(code, combined_df, db_url)
+                _save_to_db(code, new_df, db_url)
             result["success"] = True
             result["updated"] = True
             break
@@ -872,9 +888,9 @@ def main():
     # ---------- 数据库写入（--db 模式） ---------- #
     db_url: Optional[str] = None
     if args.db:
-        db_dir = _PROJECT_ROOT / "data" / "db"
-        db_dir.mkdir(parents=True, exist_ok=True)
-        db_url = f"sqlite:///{db_dir}/stocktrade.db"
+        db_url = _load_env_var("DATABASE_URL")
+        if not db_url:
+            raise ValueError("未找到 DATABASE_URL，--db 模式需要 PostgreSQL 连接串")
         logger.info("已启用数据库写入模式，目标：%s", db_url)
 
     # ---------- 日期解析 ---------- #

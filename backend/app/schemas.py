@@ -124,6 +124,42 @@ class AnalysisResultResponse(BaseModel):
     min_score_threshold: float
 
 
+class TomorrowStarHistoryItem(BaseModel):
+    """明日之星历史窗口项"""
+    pick_date: date_class
+    date: str
+    count: int = 0
+    pass_count: int = 0
+    candidate_count: int = 0
+    analysis_count: int = 0
+    trend_start_count: int = 0
+    status: str = "missing"
+    error_message: Optional[str] = None
+    is_latest: bool = False
+
+
+class TomorrowStarDatesResponse(BaseModel):
+    """明日之星历史日期列表响应"""
+    dates: List[str]
+    history: List[TomorrowStarHistoryItem]
+    window_status: Optional["TomorrowStarWindowStatusResponse"] = None
+
+
+class TomorrowStarWindowStatusResponse(BaseModel):
+    """明日之星滚动窗口状态响应"""
+    window_size: int
+    latest_date: Optional[date_class] = None
+    ready_count: int = 0
+    missing_count: int = 0
+    running_count: int = 0
+    failed_count: int = 0
+    pending_count: int = 0
+    has_running_task: bool = False
+    running_task_id: Optional[int] = None
+    items: List[TomorrowStarHistoryItem]
+    history: List[TomorrowStarHistoryItem]
+
+
 # ==================== 单股诊断 ====================
 class B1CheckItem(BaseModel):
     """B1检查项

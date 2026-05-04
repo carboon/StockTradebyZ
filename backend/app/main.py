@@ -6,6 +6,7 @@ StockTrader 2.0 后端服务主入口
 from __future__ import annotations
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -19,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 # 项目根目录
 ROOT = Path(__file__).parent.parent.parent
 BACKEND = Path(__file__).parent.parent
+DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE = ROOT / "data" / ".disable_tomorrow_star_bootstrap"
 
 # 确保 PYTHONPATH 包含项目根目录，使用平台相关分隔符兼容 Windows。
 pythonpath_entries = [
@@ -35,6 +37,7 @@ from sqlalchemy import text
 
 from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
+from app.services.tomorrow_star_window_service import get_tomorrow_star_window_service
 
 # 测试环境检测：当 pytest 正在运行时，跳过数据库初始化
 # pytest 会自动设置 PYTEST_CURRENT_TEST 环境变量
@@ -116,6 +119,19 @@ async def lifespan(app: FastAPI):
     """Manage FastAPI startup/shutdown lifecycle without deprecated hooks."""
     print(f"🚀 StockTrader API v{app.version} 启动成功")
     print(f"📍 API 文档: http://{settings.host}:{settings.port}/docs")
+
+    async def bootstrap_tomorrow_star_window() -> None:
+        try:
+            await asyncio.to_thread(
+                get_tomorrow_star_window_service().ensure_window,
+                180,
+            )
+        except Exception as exc:
+            print(f"⚠️ 明日之星 180 日窗口补齐启动失败: {exc}")
+
+    if not _TEST_MODE and not DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE.exists():
+        asyncio.create_task(bootstrap_tomorrow_star_window())
+
     yield
     print("👋 StockTrader API 已关闭")
 

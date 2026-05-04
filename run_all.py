@@ -369,6 +369,7 @@ def main() -> None:
         help="将 K 线数据写入数据库（传递给 fetch_kline 步骤）",
     )
     args = parser.parse_args()
+    target_date = os.environ.get("TARGET_DATE", "").strip() or None
 
     start = args.start_from
 
@@ -426,9 +427,12 @@ def main() -> None:
 
     # ── 步骤 2：量化初选 ─────────────────────────────────────────────
     if start <= 2:
+        preselect_cmd = [PYTHON, "-m", "pipeline.cli", "preselect"]
+        if target_date:
+            preselect_cmd.extend(["--date", target_date, "--end-date", target_date])
         _run(
             "2  量化初选（cli preselect）",
-            [PYTHON, "-m", "pipeline.cli", "preselect"],
+            preselect_cmd,
             stage="build_pool",
         )
 

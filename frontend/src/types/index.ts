@@ -199,11 +199,47 @@ export interface TomorrowStarHistoryItem {
   date: string
   count?: number
   pass?: number
+  candidate_count?: number
+  analysis_count?: number
+  trend_start_count?: number
+  status?: 'pending' | 'running' | 'success' | 'failed' | 'missing' | string
+  source?: string
+  error_message?: string | null
+  is_latest?: boolean
+}
+
+export interface TomorrowStarWindowStatusItem {
+  pick_date?: string
+  date?: string
+  status?: 'pending' | 'running' | 'success' | 'failed' | 'missing' | string
+  candidate_count?: number
+  analysis_count?: number
+  trend_start_count?: number
+  reviewer?: string | null
+  source?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  error_message?: string | null
+  is_latest?: boolean
+}
+
+export interface TomorrowStarWindowStatusResponse {
+  window_size?: number
+  completed_count?: number
+  missing_count?: number
+  failed_count?: number
+  running_count?: number
+  latest_date?: string | null
+  current_pick_date?: string | null
+  items?: TomorrowStarWindowStatusItem[]
+  history?: TomorrowStarWindowStatusItem[]
+  runs?: TomorrowStarWindowStatusItem[]
 }
 
 export interface TomorrowStarDatesResponse {
   dates: string[]
   history: TomorrowStarHistoryItem[]
+  window_status?: TomorrowStarWindowStatusResponse | null
 }
 
 export interface FreshnessResponse {

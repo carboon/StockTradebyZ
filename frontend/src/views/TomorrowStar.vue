@@ -73,6 +73,7 @@
             height="400"
             highlight-current-row
             :current-row-key="selectedDate"
+            row-key="rawDate"
           >
             <el-table-column prop="date" label="时间" width="120" />
             <el-table-column prop="count" label="候选数" width="100" align="center">
@@ -90,7 +91,23 @@
             </el-table-column>
             <el-table-column label="状态" width="80" align="center">
               <template #default="{ row }">
-                <el-tag v-if="row.date === latestDate" type="success" size="small">最新</el-tag>
+                <div class="history-status-cell">
+                  <el-tag
+                    v-if="row.rawDate === latestDate"
+                    type="success"
+                    size="small"
+                    class="status-tag"
+                  >
+                    最新
+                  </el-tag>
+                  <el-tag
+                    :type="getHistoryStatusTagType(row.status)"
+                    size="small"
+                    class="status-tag"
+                  >
+                    {{ getHistoryStatusLabel(row.status) }}
+                  </el-tag>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -153,24 +170,24 @@
             <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
             <el-table-column prop="open_price" label="开盘价" min-width="100" align="right">
               <template #default="{ row }">
-                {{ row.open_price ? row.open_price.toFixed(2) : '-' }}
+                {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
               </template>
             </el-table-column>
             <el-table-column prop="close_price" label="收盘价" min-width="100" align="right">
               <template #default="{ row }">
-                {{ row.close_price ? row.close_price.toFixed(2) : '-' }}
+                {{ typeof row.close_price === 'number' ? row.close_price.toFixed(2) : '-' }}
               </template>
             </el-table-column>
             <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
               <template #default="{ row }">
-                <span :class="row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : ''">
-                  {{ row.change_pct !== undefined ? row.change_pct.toFixed(2) + '%' : '-' }}
+                <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
+                  {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
                 </span>
               </template>
             </el-table-column>
             <el-table-column prop="kdj_j" label="KDJ-J" min-width="100" align="right">
               <template #default="{ row }">
-                {{ row.kdj_j ? row.kdj_j.toFixed(1) : '-' }}
+                {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
               </template>
             </el-table-column>
             <el-table-column label="操作" width="80" align="center" fixed="right">
@@ -210,7 +227,7 @@
               <el-table-column prop="total_score" label="评分" width="80" align="right">
                 <template #default="{ row }">
                   <el-tag :type="getScoreType(row.total_score)" size="small">
-                    {{ row.total_score ? row.total_score.toFixed(1) : '-' }}
+                    {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -243,7 +260,14 @@ import { useRouter } from 'vue-router'
 import { Refresh, Loading } from '@element-plus/icons-vue'
 import { apiAnalysis, apiTasks, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
-import type { Candidate, AnalysisResult, FreshnessResponse, IncrementalUpdateStatus } from '@/types'
+import type {
+  Candidate,
+  AnalysisResult,
+  FreshnessResponse,
+  IncrementalUpdateStatus,
+  TomorrowStarHistoryItem,
+  TomorrowStarWindowStatusResponse,
+} from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const router = useRouter()
@@ -265,7 +289,29 @@ const loading = ref(false)
 const loadingLatest = ref(false)
 const checkingFreshness = ref(false)
 
-type HistoryRow = { date: string; count: number | '-'; pass: number | '-' }
+type HistoryRow = {
+  date: string
+  rawDate: string
+  count: number | '-'
+  pass: number | '-'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'missing'
+  analysisCount: number | '-'
+  errorMessage?: string | null
+  isLatest?: boolean
+}
+
+type HistoryLikeItem = {
+  date?: string
+  pick_date?: string
+  count?: number
+  pass?: number
+  candidate_count?: number
+  analysis_count?: number
+  trend_start_count?: number
+  status?: string
+  error_message?: string | null
+  is_latest?: boolean
+}
 
 const historyData = ref<HistoryRow[]>([])
 const selectedDate = ref<string | null>(null)
@@ -342,9 +388,9 @@ const displayLatestCandidates = computed(() => {
 // 当前查看的日期显示
 const viewingDateDisplay = computed(() => {
   if (viewingDate.value) {
-    return viewingDate.value
+    return formatDateString(viewingDate.value)
   }
-  return latestDate.value ? latestDate.value : ''
+  return latestDate.value ? formatDateString(latestDate.value) : ''
 })
 
 function getVerdictPriority(verdict?: string): number {
@@ -385,6 +431,131 @@ function cancelAllPageRequests() {
   requestControllers.clear()
 }
 
+function normalizeHistoryStatus(status?: string | null): HistoryRow['status'] {
+  const value = String(status || '').toLowerCase()
+  if (value === 'success' || value === 'completed' || value === 'done') return 'success'
+  if (value === 'running' || value === 'processing' || value === 'in_progress') return 'running'
+  if (value === 'failed' || value === 'error') return 'failed'
+  if (value === 'pending' || value === 'queued') return 'pending'
+  return 'missing'
+}
+
+function getHistoryStatusLabel(status: HistoryRow['status']): string {
+  const labels: Record<HistoryRow['status'], string> = {
+    success: '完成',
+    running: '生成中',
+    failed: '失败',
+    pending: '待生成',
+    missing: '缺失',
+  }
+  return labels[status]
+}
+
+function getHistoryStatusTagType(status: HistoryRow['status']): string {
+  const tags: Record<HistoryRow['status'], string> = {
+    success: 'success',
+    running: 'warning',
+    failed: 'danger',
+    pending: 'info',
+    missing: 'info',
+  }
+  return tags[status]
+}
+
+function getHistoryCount(item: HistoryLikeItem): number | '-' {
+  if (typeof item.count === 'number') return item.count
+  if (typeof item.candidate_count === 'number') return item.candidate_count
+  return '-'
+}
+
+function getHistoryPassCount(item: HistoryLikeItem): number | '-' {
+  if (typeof item.pass === 'number') return item.pass
+  if (typeof item.trend_start_count === 'number') return item.trend_start_count
+  return '-'
+}
+
+function normalizeHistoryRow(
+  item: HistoryLikeItem,
+  fallbackLatestDate: string,
+): HistoryRow | null {
+  const rawDate = formatDateString(item.date || item.pick_date || '')
+  if (!rawDate) return null
+
+  const count = getHistoryCount(item)
+  const pass = getHistoryPassCount(item)
+  const analysisCount = typeof item.analysis_count === 'number' ? item.analysis_count : '-'
+  const inferredStatus =
+    item.status
+    || (
+      count !== '-'
+      || pass !== '-'
+      || analysisCount !== '-'
+        ? 'success'
+        : 'missing'
+    )
+
+  return {
+    date: rawDate,
+    rawDate,
+    count,
+    pass,
+    status: normalizeHistoryStatus(inferredStatus),
+    analysisCount,
+    errorMessage: item.error_message || null,
+    isLatest: Boolean(item.is_latest || (fallbackLatestDate && rawDate === fallbackLatestDate)),
+  }
+}
+
+function normalizeHistoryRows(
+  dates: string[],
+  history: TomorrowStarHistoryItem[],
+  windowStatus?: TomorrowStarWindowStatusResponse | null,
+): HistoryRow[] {
+  const latest = formatDateString(windowStatus?.latest_date || dates[0] || '')
+  const normalizedMap = new Map<string, HistoryRow>()
+
+  const statusItems = [
+    ...(windowStatus?.items || []),
+    ...(windowStatus?.history || []),
+    ...(windowStatus?.runs || []),
+  ]
+
+  statusItems.forEach((item) => {
+    const row = normalizeHistoryRow(item, latest)
+    if (row) normalizedMap.set(row.rawDate, row)
+  })
+
+  history.forEach((item) => {
+    const row = normalizeHistoryRow(item, latest)
+    if (!row) return
+    const existing = normalizedMap.get(row.rawDate)
+    normalizedMap.set(row.rawDate, {
+      ...(existing || row),
+      ...row,
+      status: existing?.status || row.status,
+      errorMessage: existing?.errorMessage || row.errorMessage,
+      isLatest: Boolean(existing?.isLatest || row.isLatest),
+    })
+  })
+
+  dates.forEach((date) => {
+    const rawDate = formatDateString(date)
+    if (!rawDate || normalizedMap.has(rawDate)) return
+    normalizedMap.set(rawDate, {
+      date: rawDate,
+      rawDate,
+      count: '-',
+      pass: '-',
+      status: 'missing',
+      analysisCount: '-',
+      errorMessage: null,
+      isLatest: rawDate === latest,
+    })
+  })
+
+  return [...normalizedMap.values()].sort((a, b) => b.rawDate.localeCompare(a.rawDate))
+}
+
 async function loadData(skipLatestLoad: boolean = false) {
   if (loading.value) return
 
@@ -399,16 +570,16 @@ async function loadData(skipLatestLoad: boolean = false) {
 
     const dates = datesData.dates || []
     const history = datesData.history || []
+    const windowStatus = datesData.window_status || null
 
-    if (history.length > 0) {
-      historyData.value = history.map((item) => ({
-        date: formatDateString(item.date),
-        count: typeof item.count === 'number' ? item.count : '-',
-        pass: typeof item.pass === 'number' ? item.pass : '-',
-      }))
-      if (dates.length > 0) {
-        latestDate.value = formatDateString(dates[0])
-      }
+    if (dates.length > 0) {
+      latestDate.value = formatDateString(windowStatus?.latest_date || dates[0])
+    } else {
+      latestDate.value = formatDateString(windowStatus?.latest_date || '')
+    }
+
+    if (history.length > 0 || windowStatus) {
+      historyData.value = normalizeHistoryRows(dates, history, windowStatus)
     } else {
       const historyPromises = dates.map(async (date: string) => {
         try {
@@ -418,27 +589,34 @@ async function loadData(skipLatestLoad: boolean = false) {
           ])
           const candidates = candidatesData.candidates || []
           const results = resultsData.results || []
-          const passCount = results.filter((r) => r.verdict === 'PASS').length
+          const passCount = results.filter((r) => r.signal_type === 'trend_start').length
 
           return {
             date: formatDateString(date),
+            rawDate: formatDateString(date),
             count: candidates.length,
             pass: passCount,
+            status: 'success',
+            analysisCount: results.length,
+            errorMessage: null,
+            isLatest: formatDateString(date) === latestDate.value,
           } satisfies HistoryRow
         } catch {
           return {
             date: formatDateString(date),
+            rawDate: formatDateString(date),
             count: '-',
             pass: '-',
+            status: 'missing',
+            analysisCount: '-',
+            errorMessage: null,
+            isLatest: formatDateString(date) === latestDate.value,
           } satisfies HistoryRow
         }
       })
 
       historyData.value = await Promise.all(historyPromises)
       if (requestId !== loadDataRequestId) return
-      if (dates.length > 0) {
-        latestDate.value = formatDateString(dates[0])
-      }
     }
 
     lastHistorySignature.value = buildHistorySignature(dates, historyData.value)
@@ -454,10 +632,10 @@ async function loadData(skipLatestLoad: boolean = false) {
       return
     }
 
-    const hasPreviousSelectedDate = !!previousSelectedDate && historyData.value.some((item) => item.date === previousSelectedDate)
+    const hasPreviousSelectedDate = !!previousSelectedDate && historyData.value.some((item) => item.rawDate === previousSelectedDate)
     selectedDate.value = hasPreviousSelectedDate ? previousSelectedDate : latestDate.value
 
-    const hasPreviousViewingDate = !!previousViewingDate && historyData.value.some((item) => item.date === previousViewingDate)
+    const hasPreviousViewingDate = !!previousViewingDate && historyData.value.some((item) => item.rawDate === previousViewingDate)
     viewingDate.value = hasPreviousViewingDate ? previousViewingDate : latestDate.value
 
     // 加载最新数据（右侧显示）- 根据 skipLatestLoad 参数决定是否跳过
@@ -550,19 +728,36 @@ async function loadLatestCandidates() {
 }
 
 async function selectDate(row: HistoryRow) {
-  selectedDate.value = row.date
-  viewingDate.value = row.date
+  selectedDate.value = row.rawDate
+  viewingDate.value = row.rawDate
+  latestCandidatePage.value = 1
   persistTomorrowStarCache()
 
+  if (row.status !== 'success') {
+    latestCandidates.value = []
+    latestAnalysisResults.value = []
+    latestDataDate.value = row.rawDate
+    if (row.status === 'running') {
+      ElMessage.info(`${row.rawDate} 正在生成中，稍后再查看`)
+    } else if (row.status === 'failed') {
+      ElMessage.warning(row.errorMessage || `${row.rawDate} 生成失败`)
+    } else {
+      ElMessage.info(`${row.rawDate} 暂无可展示结果`)
+    }
+    persistTomorrowStarCache()
+    return
+  }
+
   // 先检查缓存
-  const cached = candidatesCache.value.get(row.date)
+  const cached = candidatesCache.value.get(row.rawDate)
   const now = Date.now()
   if (cached && (now - cached.timestamp) < CACHE_TTL_MS) {
     // 使用缓存数据，立即显示
     latestCandidates.value = cached.candidates
     latestAnalysisResults.value = cached.results
-    latestDataDate.value = row.date
-    console.log(`使用缓存数据: ${row.date}`)
+    latestDataDate.value = row.rawDate
+    console.log(`使用缓存数据: ${row.rawDate}`)
+    persistTomorrowStarCache()
     return
   }
 
@@ -572,8 +767,8 @@ async function selectDate(row: HistoryRow) {
   loadingLatest.value = true
   try {
     const [candidatesData, resultsData] = await Promise.all([
-      apiAnalysis.getCandidates(row.date, { signal }),
-      apiAnalysis.getResults(row.date, { signal })
+      apiAnalysis.getCandidates(row.rawDate, { signal }),
+      apiAnalysis.getResults(row.rawDate, { signal })
     ])
     if (requestId !== candidatesRequestId) return
 
@@ -582,14 +777,16 @@ async function selectDate(row: HistoryRow) {
 
     latestCandidates.value = candidates
     latestAnalysisResults.value = results
-    latestDataDate.value = row.date
+    latestDataDate.value = row.rawDate
+    latestCandidatePage.value = 1
 
     // 存入缓存
-    candidatesCache.value.set(row.date, {
+    candidatesCache.value.set(row.rawDate, {
       candidates,
       results,
       timestamp: now
     })
+    persistTomorrowStarCache()
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load selected date data:', error)
@@ -631,6 +828,7 @@ async function refreshCurrentCandidates() {
       latestCandidates.value = candidates
       latestAnalysisResults.value = results
       latestDataDate.value = dateToRefresh
+      latestCandidatePage.value = 1
 
       // 更新缓存
       candidatesCache.value.set(dateToRefresh, {
@@ -755,8 +953,15 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   if (checkingFreshness.value || incrementalUpdate.value.running || loading.value) return
 
   const hasLoadedData = historyData.value.length > 0
+  const missingVisibleRightPanelData = Boolean(
+    historyData.value.length > 0
+    && viewingDate.value
+    && latestCandidates.value.length === 0
+    && latestAnalysisResults.value.length === 0
+  )
   const shouldSkipServerCheck = !forceReload
     && hasLoadedData
+    && !missingVisibleRightPanelData
     && (Date.now() - lastRefreshCheckAt.value < REFRESH_CHECK_INTERVAL_MS)
 
   if (shouldSkipServerCheck) return
@@ -785,6 +990,7 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
     if (
       !forceReload
       && hydratedFromCache.value
+      && !missingVisibleRightPanelData
       && freshnessVersion.value
       && nextFreshnessVersion
       && freshnessVersion.value === nextFreshnessVersion
@@ -862,9 +1068,10 @@ function buildHistorySignature(dates: string[], history: Array<{ date: string; c
   if (history.length > 0) {
     return JSON.stringify(
       history.map((item) => ({
-        date: formatDateString(item.date || ''),
+        date: formatDateString(('rawDate' in item ? item.rawDate : item.date) || ''),
         count: typeof item.count === 'number' ? item.count : '-',
         pass: typeof item.pass === 'number' ? item.pass : '-',
+        status: 'status' in item ? item.status : undefined,
       }))
     )
   }
@@ -933,7 +1140,15 @@ function hydrateTomorrowStarCache() {
 
   try {
     const payload = JSON.parse(raw)
-    historyData.value = payload.historyData || []
+    historyData.value = (payload.historyData || []).map((item: any) => ({
+      ...item,
+      rawDate: formatDateString(item.rawDate || item.date || ''),
+      date: formatDateString(item.rawDate || item.date || ''),
+      status: normalizeHistoryStatus(item.status),
+      analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
+      errorMessage: item.errorMessage || null,
+      isLatest: Boolean(item.isLatest),
+    }))
     latestCandidates.value = payload.latestCandidates || []
     latestAnalysisResults.value = payload.latestAnalysisResults || []
     selectedDate.value = payload.selectedDate || null
@@ -944,6 +1159,18 @@ function hydrateTomorrowStarCache() {
     latestCandidatePage.value = Math.max(1, Number(payload.latestCandidatePage) || 1)
     lastHistorySignature.value = payload.lastHistorySignature || ''
     freshnessVersion.value = payload.freshnessVersion || ''
+
+    // 防止旧缓存把某一天的右侧结果挂到另一日期上。
+    if (
+      viewingDate.value
+      && latestDataDate.value
+      && viewingDate.value !== latestDataDate.value
+    ) {
+      latestCandidates.value = []
+      latestAnalysisResults.value = []
+      latestCandidatePage.value = 1
+    }
+
     hydratedFromCache.value = historyData.value.length > 0 || latestCandidates.value.length > 0
   } catch {
     sessionStorage.removeItem(TOMORROW_STAR_CACHE_KEY)
@@ -1131,6 +1358,17 @@ $space-lg: 32px;
 
       :deep(.el-table__cell) {
         padding: $space-xs 0;
+      }
+    }
+
+    .history-status-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+
+      .status-tag {
+        min-width: 52px;
       }
     }
   }

@@ -328,9 +328,13 @@ def run_backtest(
                 "pick_date": dt.strftime("%Y-%m-%d"),
                 "code": code,
                 "strategy": strategy,
+                "close": round(float(base_df.at[dt, "close"]), 6) if dt in base_df.index else None,
+                "turnover_n": round(float(base_df.at[dt, "turnover_n"]), 6) if dt in base_df.index else None,
+                "kdj_j": round(float(b1_frame.at[dt, "J"]), 6) if dt in b1_frame.index and pd.notna(b1_frame.at[dt, "J"]) else None,
                 "signal_type": result["signal_type"],
                 "verdict": result["verdict"],
                 "total_score": result["total_score"],
+                "comment": result.get("comment"),
                 "trend_structure": result["scores"]["trend_structure"],
                 "price_position": result["scores"]["price_position"],
                 "volume_behavior": result["scores"]["volume_behavior"],
@@ -349,6 +353,7 @@ def run_backtest(
                 "industry_relative_strength": pf_details.get("industry_relative_strength"),
                 "industry_filter_pass": pf_details.get("industry_filter_pass"),
                 "market_regime_pass": market_regime.get("passed"),
+                "details_json": result,
             }
 
             next_entry_date = entry_date.at[dt]

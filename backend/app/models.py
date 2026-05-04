@@ -6,7 +6,19 @@ SQLAlchemy Database Models
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, JSON, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -39,6 +51,11 @@ class Stock(Base):
 class Candidate(Base):
     """候选股票表 (明日之星)"""
     __tablename__ = "candidates"
+    __table_args__ = (
+        UniqueConstraint("pick_date", "code", name="uq_candidates_pick_date_code"),
+        Index("ix_candidates_pick_date_code", "pick_date", "code"),
+        Index("ix_candidates_pick_date_id", "pick_date", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pick_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
@@ -54,6 +71,12 @@ class Candidate(Base):
 class AnalysisResult(Base):
     """分析结果表"""
     __tablename__ = "analysis_results"
+    __table_args__ = (
+        UniqueConstraint("pick_date", "code", "reviewer", name="uq_analysis_results_pick_date_code_reviewer"),
+        Index("ix_analysis_results_pick_date_code", "pick_date", "code"),
+        Index("ix_analysis_results_pick_date_signal_type", "pick_date", "signal_type"),
+        Index("ix_analysis_results_pick_date_reviewer", "pick_date", "reviewer"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pick_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
@@ -65,6 +88,32 @@ class AnalysisResult(Base):
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TomorrowStarRun(Base):
+    """明日之星按交易日的构建状态表"""
+    __tablename__ = "tomorrow_star_runs"
+    __table_args__ = (
+        UniqueConstraint("pick_date", name="uq_tomorrow_star_runs_pick_date"),
+        Index("ix_tomorrow_star_runs_status_pick_date", "status", "pick_date"),
+        Index("ix_tomorrow_star_runs_finished_at", "finished_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pick_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    analysis_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trend_start_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reviewer: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    strategy_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    window_size: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class DailyB1Check(Base):

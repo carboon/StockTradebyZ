@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Candidate, Stock
+from app.models import Candidate, Stock, StockDaily
 from app.services.tushare_service import TushareService
 
 ROOT = Path(__file__).parent.parent.parent.parent
@@ -150,8 +150,18 @@ class CandidateService:
                 Candidate.b1_passed,
                 Candidate.kdj_j,
                 Stock.name,
+                StockDaily.open.label("open_price"),
+                StockDaily.close.label("daily_close_price"),
             )
             .join(Stock, Candidate.code == Stock.code, isouter=True)
+            .join(
+                StockDaily,
+                and_(
+                    Candidate.code == StockDaily.code,
+                    Candidate.pick_date == StockDaily.trade_date,
+                ),
+                isouter=True,
+            )
             .filter(Candidate.pick_date == target_date)
             .order_by(Candidate.id)
             .limit(limit)
@@ -159,11 +169,21 @@ class CandidateService:
 
         candidates = []
         for row in query.all():
+            close_price = float(row.close_price) if row.close_price is not None else (
+                float(row.daily_close_price) if row.daily_close_price is not None else None
+            )
+            open_price = float(row.open_price) if row.open_price is not None else None
+            change_pct = None
+            if open_price is not None and close_price is not None and open_price > 0:
+                change_pct = (close_price - open_price) / open_price * 100
+
             candidates.append({
                 "code": row.code,
                 "name": row.name,
                 "strategy": row.strategy,
-                "close": float(row.close_price) if row.close_price is not None else None,
+                "open": open_price,
+                "close": close_price,
+                "change_pct": change_pct,
                 "turnover_n": float(row.turnover) if row.turnover is not None else None,
                 "b1_passed": row.b1_passed,
                 "kdj_j": float(row.kdj_j) if row.kdj_j is not None else None,
@@ -206,14 +226,17 @@ class CandidateService:
             .subquery()
         )
 
-        # 查询每天通过的数量
+        # 查询每天“趋势启动”数量。
+        # 这里的 pass 字段用于 TomorrowStar 左侧“趋势启动数”，
+        # 不能再复用 Candidate.b1_passed，否则会退化成“候选数”。
+        from app.models import AnalysisResult
         pass_query = (
             self.db.query(
-                Candidate.pick_date,
-                func.count(Candidate.id).label("pass_count"),
+                AnalysisResult.pick_date.label("pick_date"),
+                func.count(AnalysisResult.id).label("pass_count"),
             )
-            .filter(Candidate.b1_passed == True)
-            .group_by(Candidate.pick_date)
+            .filter(AnalysisResult.signal_type == "trend_start")
+            .group_by(AnalysisResult.pick_date)
             .subquery()
         )
 
