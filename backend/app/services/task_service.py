@@ -171,6 +171,7 @@ class TaskService:
     FULL_TASK_TYPES = ("full_update", "tomorrow_star")
     SINGLE_ANALYSIS_TASK_TYPE = "single_analysis"
     GENERATE_HISTORY_TASK_TYPE = "generate_history"
+    GENERATE_HISTORY_DETAIL_TASK_TYPE = "generate_history_detail"
     # 阶段6：历史回溯任务类型
     HISTORY_BACKFILL_INIT_TASK_TYPE = "history_backfill_initialize"
     HISTORY_BACKFILL_INCR_TASK_TYPE = "history_backfill_incremental"
@@ -190,6 +191,7 @@ class TaskService:
         "finalize": {"label": "输出推荐结果", "index": 6, "total": 6, "percent": 96},
         "analysis": {"label": "单股分析", "index": 1, "total": 1, "percent": 50},
         "generating_history": {"label": "生成历史数据", "index": 1, "total": 2, "percent": 50},
+        "generating_history_detail": {"label": "生成诊断详情", "index": 1, "total": 2, "percent": 50},
         # 阶段6：历史回溯阶段
         "backfill_initializing": {"label": "初始化历史回溯", "index": 1, "total": 2, "percent": 10},
         "backfill_processing": {"label": "回溯处理中", "index": 2, "total": 2, "percent": 50},
@@ -240,6 +242,17 @@ class TaskService:
                 code = params.get("code")
                 if code:
                     existing_task = self._get_active_generate_history_task(code)
+                    if existing_task:
+                        return {
+                            "task_id": existing_task.id,
+                            "ws_url": f"/ws/tasks/{existing_task.id}",
+                            "existing": True,
+                        }
+            if task_type == self.GENERATE_HISTORY_DETAIL_TASK_TYPE:
+                code = params.get("code")
+                check_date = params.get("check_date")
+                if code and check_date:
+                    existing_task = self._get_active_generate_history_detail_task(code, check_date)
                     if existing_task:
                         return {
                             "task_id": existing_task.id,
@@ -359,6 +372,21 @@ class TaskService:
         )
         return running_task
 
+    def _get_active_generate_history_detail_task(self, code: str, check_date: str) -> Optional[Any]:
+        from app.models import Task
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type == self.GENERATE_HISTORY_DETAIL_TASK_TYPE,
+                Task.filter_by_code(code),
+                Task.params_json["check_date"].as_string() == check_date,
+                Task.status.in_(self.ACTIVE_STATUSES),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+
     async def _run_task(self, task_id: int):
         """运行任务"""
         from app.models import Task
@@ -398,6 +426,8 @@ class TaskService:
                 await self._run_tomorrow_star(task, db)
             elif task_type == "generate_history":
                 await self._run_generate_history(task, db, params_json)
+            elif task_type == self.GENERATE_HISTORY_DETAIL_TASK_TYPE:
+                await self._run_generate_history_detail(task, db, params_json)
             # 阶段6：历史回溯任务
             elif task_type == self.HISTORY_BACKFILL_INIT_TASK_TYPE:
                 await self._run_history_backfill_initialize(task, db, params_json)
@@ -630,6 +660,43 @@ class TaskService:
             "completed",
             progress=100,
             message=f"历史数据生成完成: {code}, 共{result.get('generated_count', 0)}条记录"
+        )
+
+    async def _run_generate_history_detail(self, task: Any, db: Session, params_json: dict = None):
+        params = params_json or task.params_json or {}
+        code = params.get("code")
+        check_date = params.get("check_date")
+        force = bool(params.get("force", False))
+        if not code or not check_date:
+            raise Exception("缺少股票代码或交易日")
+
+        from app.services.analysis_service import analysis_service
+
+        task.task_stage = "generating_history_detail"
+        task.progress = 10
+        task.progress_meta_json = self._build_stage_meta(
+            "generating_history_detail",
+            progress=10,
+            message=f"开始生成 {code} {check_date} 的诊断详情",
+        )
+        db.commit()
+
+        result = await asyncio.to_thread(
+            analysis_service.generate_history_detail,
+            code,
+            check_date,
+            force,
+        )
+        if not result.get("success"):
+            raise Exception(result.get("error", "诊断详情生成失败"))
+
+        task.result_json = result
+        task.task_stage = "completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "completed",
+            progress=100,
+            message=f"诊断详情生成完成: {code} {check_date}",
         )
 
     async def _run_history_backfill_initialize(
@@ -891,6 +958,8 @@ class TaskService:
             return f"明日之星生成 / reviewer={params.get('reviewer', 'quant')}"
         if task_type == "generate_history":
             return f"历史数据生成 / code={params.get('code', '-')}, days={params.get('days', 30)}"
+        if task_type == "generate_history_detail":
+            return f"诊断详情生成 / code={params.get('code', '-')}, check_date={params.get('check_date', '-')}"
         # 阶段6：历史回溯任务
         if task_type == "history_backfill_initialize":
             return f"历史回溯初始化 / code={params.get('code', '-')}"

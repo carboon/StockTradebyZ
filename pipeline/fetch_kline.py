@@ -34,11 +34,7 @@ def _get_db_session_factory(db_url: str):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    engine_kwargs: dict[str, Any] = {}
-    if db_url.startswith("sqlite"):
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
-
-    engine = create_engine(db_url, **engine_kwargs)
+    engine = create_engine(db_url)
     factory = sessionmaker(bind=engine)
     _DB_SESSION_FACTORIES[db_url] = factory
     return factory

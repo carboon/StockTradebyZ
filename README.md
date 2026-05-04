@@ -1,32 +1,27 @@
 # StockTrader 2.0
 
-当前仓库只保留 PostgreSQL + Docker 的运行方案。
+当前仓库的运行方案已经收敛为 `PostgreSQL + Docker`。生产路径不再支持 SQLite，也不再提供本机直启服务脚本。
 
 ## 快速开始
 
-开发环境：
+本地开发：
 
 ```bash
+cp .env.example deploy/.env
 ./start.sh
 ```
 
-停止：
+停止服务：
 
 ```bash
 ./stop.sh
 ```
 
-生产环境：
+生产启动：
 
 ```bash
+cp .env.example deploy/.env
 ./deploy/scripts/start.sh prod --build
-```
-
-底层等价命令：
-
-```bash
-docker compose -f deploy/docker-compose.yml --profile postgres --profile dev up -d --build
-docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up -d --build
 ```
 
 访问地址：
@@ -36,18 +31,36 @@ docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up
 - 后端 API：`http://127.0.0.1:8000`
 - API 文档：`http://127.0.0.1:8000/docs`
 
+## 必填配置
+
+启动前至少确认 `deploy/.env` 中以下变量：
+
+- `TUSHARE_TOKEN`
+- `DATABASE_URL`
+- `SECRET_KEY`
+- `ADMIN_DEFAULT_USERNAME`
+- `ADMIN_DEFAULT_PASSWORD`
+
+生产环境还应同时检查：
+
+- `ENVIRONMENT=production`
+- `BACKEND_CORS_ORIGINS` 改为实际域名
+- `POSTGRES_PASSWORD` 不使用示例默认值
+- 如启用 AI 分析，再配置 `ZHIPUAI_API_KEY` / `DASHSCOPE_API_KEY` / `GEMINI_API_KEY`
+
+## 安全说明
+
+- `.env`、`deploy/.env`、`data/`、本地数据库文件、日志文件都不应提交到 Git
+- `.env.example` 里的口令仅用于示例，占位值必须在生产环境替换
+- 不要把真实 API Key、JWT 密钥、管理员口令直接写入文档、脚本或已跟踪配置文件
+
 ## 仓库结构
 
-- `frontend/`
-  Vue 页面层
-- `backend/`
-  FastAPI、任务编排、数据接口
-- `pipeline/` / `agent/`
-  离线量化流程与复核逻辑
-- `deploy/`
-  Docker Compose、Dockerfile、运行脚本
-- `data/`
-  快照、缓存、导出和运行期文件
+- `frontend/`：Vue 页面层
+- `backend/`：FastAPI、任务编排、数据接口
+- `pipeline/` / `agent/`：离线量化流程与复核逻辑
+- `deploy/`：Docker Compose、Dockerfile、运行脚本
+- `data/`：快照、缓存、导出和运行期文件
 
 ## 文档
 
@@ -56,8 +69,17 @@ docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up
 - [README.dev.md](README.dev.md)
 - [docs/README.md](docs/README.md)
 
-## 当前原则
+## 测试说明
 
-- 只支持 PostgreSQL
-- 只保留 Docker 运行入口
-- 不再保留 SQLite 运行、迁移和兼容逻辑
+宿主机直接运行 Python 或 pytest 时，请使用仓库根目录 `.venv`：
+
+```bash
+.venv/bin/python -m pytest
+```
+
+补充说明：
+
+- `postgres` 是 Docker Compose 服务名，只在 Compose 网络内有效
+- 容器内运行后端或测试时，`DATABASE_URL=...@postgres:5432/...` 是正确的
+- 宿主机直接运行测试且未通过 Docker 网络访问数据库时，应改用 `127.0.0.1` 或 `localhost`
+- 当前测试基座仍使用内存 SQLite 做隔离，这不属于生产部署能力

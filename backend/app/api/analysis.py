@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
 from app.database import get_db
-from app.models import Candidate, AnalysisResult, DailyB1Check, Stock, Task
+from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
 from app.services.analysis_service import analysis_service
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
@@ -33,6 +33,7 @@ from app.schemas import (
     TomorrowStarHistoryItem,
     TomorrowStarWindowStatusResponse,
     DiagnosisHistoryResponse,
+    DiagnosisHistoryDetailResponse,
     B1CheckItem,
     DiagnosisRequest,
     DiagnosisResponse,
@@ -360,7 +361,7 @@ async def get_analysis_results(
 @router.get("/diagnosis/{code}/history", response_model=DiagnosisHistoryResponse)
 async def get_diagnosis_history(
     code: str,
-    days: int = 30,
+    days: int = 180,
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> DiagnosisHistoryResponse:
@@ -391,7 +392,7 @@ async def get_diagnosis_history(
 @router.post("/diagnosis/{code}/generate-history")
 async def generate_diagnosis_history(
     code: str,
-    days: int = Query(default=30, description="生成最近N个交易日的历史数据"),
+    days: int = Query(default=180, description="生成最近N个交易日的历史数据"),
     clean: bool = Query(default=True, description="是否先清理旧数据"),
     _rate_limit: None = Depends(history_generation_rate_limit),
     db: Session = Depends(get_db),
@@ -432,32 +433,89 @@ async def generate_diagnosis_history(
 
 
 @router.get("/diagnosis/{code}/history-status")
-async def get_history_status(code: str, user=Depends(require_user)) -> dict:
+async def get_history_status(
+    code: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
     """获取历史数据生成状态"""
-    import json
-    from pathlib import Path
-
     code = code.zfill(6)
-    from app.config import settings
-    history_dir = ROOT / settings.review_dir / "history"
-    stock_history_file = history_dir / f"{code}.json"
+    running_task = (
+        db.query(Task)
+        .filter(
+            Task.task_type == "generate_history",
+            Task.filter_by_code(code),
+            Task.status.in_(["pending", "running"]),
+        )
+        .order_by(Task.created_at.desc(), Task.id.desc())
+        .first()
+    )
+    count = db.query(DailyB1Check).filter(DailyB1Check.code == code).count()
+    latest_detail = (
+        db.query(DailyB1CheckDetail)
+        .filter(DailyB1CheckDetail.code == code)
+        .order_by(DailyB1CheckDetail.updated_at.desc(), DailyB1CheckDetail.id.desc())
+        .first()
+    )
+    return {
+        "exists": count > 0,
+        "generating": running_task is not None,
+        "count": count,
+        "total": min(180, count) if count else 0,
+        "generated_at": latest_detail.updated_at.isoformat() if latest_detail and latest_detail.updated_at else None,
+    }
 
-    if not stock_history_file.exists():
-        return {"exists": False, "generating": False, "count": 0}
 
-    try:
-        with open(stock_history_file, "r") as f:
-            data = json.load(f)
-        history = data.get("history", [])
+@router.get("/diagnosis/{code}/history/{check_date}", response_model=DiagnosisHistoryDetailResponse)
+async def get_diagnosis_history_detail(
+    code: str,
+    check_date: str,
+    user=Depends(require_user),
+) -> DiagnosisHistoryDetailResponse:
+    detail = analysis_service.get_history_detail(code, check_date)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="未找到该交易日的诊断详情")
+    return DiagnosisHistoryDetailResponse.model_validate(detail)
+
+
+@router.post("/diagnosis/{code}/history/{check_date}/detail")
+async def generate_diagnosis_history_detail(
+    code: str,
+    check_date: str,
+    force: bool = Query(default=False, description="是否强制重新生成"),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
+    from app.main import manager
+
+    existing = analysis_service.get_history_detail(code, check_date)
+    if existing and existing.get("detail_ready") and not force:
         return {
-            "exists": True,
-            "generating": data.get("generating", False),
-            "count": len(history),
-            "total": data.get("total", 0),
-            "generated_at": data.get("generated_at"),
+            "status": "ready",
+            "code": code.zfill(6),
+            "check_date": check_date,
+            "message": "已存在详情，直接读取",
         }
-    except:
-        return {"exists": False, "generating": False, "count": 0}
+
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        "generate_history_detail",
+        {
+            "code": code.zfill(6),
+            "check_date": check_date,
+            "force": force,
+            "reviewer": "quant",
+            "trigger_source": "manual",
+        },
+    )
+    return {
+        "task_id": result["task_id"],
+        "code": code.zfill(6),
+        "check_date": check_date,
+        "status": "pending" if not result.get("existing") else "existing",
+        "ws_url": result["ws_url"],
+        "message": "诊断详情生成任务已创建" if not result.get("existing") else "复用现有详情任务",
+    }
 
 
 @router.post("/diagnosis/analyze")

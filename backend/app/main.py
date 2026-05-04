@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -39,9 +40,14 @@ from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
 from app.services.tomorrow_star_window_service import get_tomorrow_star_window_service
 
-# 测试环境检测：当 pytest 正在运行时，跳过数据库初始化
-# pytest 会自动设置 PYTEST_CURRENT_TEST 环境变量
-_TEST_MODE = "PYTEST_CURRENT_TEST" in os.environ
+# 测试环境检测：pytest 收集阶段尚未设置 PYTEST_CURRENT_TEST，
+# 因此同时兼容 pytest 入口、已加载模块和显式测试标记环境变量。
+_TEST_MODE = (
+    "PYTEST_CURRENT_TEST" in os.environ
+    or any("pytest" in arg for arg in sys.argv)
+    or "pytest" in sys.modules
+    or os.environ.get("PYTEST_RUNNING") == "1"
+)
 
 # 创建数据库表（仅在非测试环境）
 if not _TEST_MODE:

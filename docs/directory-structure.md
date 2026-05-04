@@ -44,4 +44,9 @@ StockTradebyZ/
 - `deploy/scripts/release.sh`
 - `deploy/scripts/backup.sh`
 
-当前仓库不再保留 SQLite、迁移脚本和本机直启控制器。
+当前仓库不再保留 SQLite 运行能力和本机直启控制器。
+
+补充说明：
+
+- `backend/migrations/` 目录仍保留 PostgreSQL 初始化 SQL
+- 测试代码中仍可使用内存 SQLite 作为隔离数据库，这不属于部署分支

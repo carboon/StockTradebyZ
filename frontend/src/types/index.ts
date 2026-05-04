@@ -63,6 +63,37 @@ export interface B1Check {
   signal_type?: string
   tomorrow_star_pass?: boolean | null
   notes?: string
+  comment?: string
+  signal_reasoning?: string
+  trend_reasoning?: string
+  position_reasoning?: string
+  volume_reasoning?: string
+  abnormal_move_reasoning?: string
+  prefilter_reasoning?: string
+  fail_reason?: string
+  scores?: Record<string, number> | null
+  details?: Record<string, any> | null
+  detail_ready?: boolean
+  detail_version?: string | null
+  detail_updated_at?: string | null
+}
+
+export interface DiagnosisHistoryDetailPayload {
+  score_details?: Record<string, any> | null
+  rules?: Record<string, any> | null
+  details?: Record<string, any> | null
+}
+
+export interface DiagnosisHistoryDetailResponse {
+  code: string
+  check_date: string
+  status: string
+  detail_ready: boolean
+  detail_version?: string | null
+  strategy_version?: string | null
+  rule_version?: string | null
+  detail_updated_at?: string | null
+  payload: DiagnosisHistoryDetailPayload
 }
 
 export interface WatchlistItem {
@@ -135,7 +166,8 @@ export interface TaskProgressMeta {
 export interface DataStatus {
   raw_data: {
     exists: boolean
-    count: number
+    stock_count?: number
+    raw_record_count?: number
     latest_date?: number | string
     latest_trade_date?: string | null
     is_latest?: boolean
@@ -273,6 +305,8 @@ export interface DiagnosisHistoryResponse {
   name?: string
   history: B1Check[]
   total: number
+  data_ready?: boolean
+  message?: string | null
 }
 
 export interface DiagnosisHistoryStatusResponse {

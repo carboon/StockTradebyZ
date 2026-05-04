@@ -11,6 +11,7 @@ import type {
   DataStatus,
   DiagnosisAnalyzeTaskResponse,
   DiagnosisHistoryResponse,
+  DiagnosisHistoryDetailResponse,
   DiagnosisHistoryStatusResponse,
   DiagnosisResultResponse,
   FreshnessResponse,
@@ -191,7 +192,7 @@ export const apiAnalysis = {
     api.post<null, { task_id: number }>('/v1/analysis/tomorrow-star/generate', null, { params: { reviewer } }),
 
   // 获取单股诊断历史
-  getDiagnosisHistory: (code: string, days: number = 30, options?: RequestOptions) =>
+  getDiagnosisHistory: (code: string, days: number = 180, options?: RequestOptions) =>
     api.get<never, DiagnosisHistoryResponse>(`/v1/analysis/diagnosis/${code}/history`, { ...withRequestOptions(options, TIMEOUTS.long), params: { days } }),
 
   // 获取历史数据生成状态
@@ -199,11 +200,24 @@ export const apiAnalysis = {
     api.get<never, DiagnosisHistoryStatusResponse>(`/v1/analysis/diagnosis/${code}/history-status`, withRequestOptions(options, TIMEOUTS.short)),
 
   // 重新刷新单股诊断历史数据
-  refreshHistory: (code: string, days: number = 30, options?: RequestOptions) =>
-    api.post<null, { status: string; message: string; code: string; days: number }>(
+  refreshHistory: (code: string, days: number = 180, options?: RequestOptions) =>
+    api.post<null, { task_id?: number; status: string; message: string; code: string; days: number; ws_url?: string }>(
       `/v1/analysis/diagnosis/${code}/generate-history`,
       null,
       { ...withRequestOptions(options, TIMEOUTS.long), params: { days, clean: true } },
+    ),
+
+  getHistoryDetail: (code: string, checkDate: string, options?: RequestOptions) =>
+    api.get<never, DiagnosisHistoryDetailResponse>(
+      `/v1/analysis/diagnosis/${code}/history/${checkDate}`,
+      withRequestOptions(options, TIMEOUTS.standard),
+    ),
+
+  ensureHistoryDetail: (code: string, checkDate: string, force: boolean = false, options?: RequestOptions) =>
+    api.post<null, { task_id?: number; status: string; message: string; code: string; check_date: string; ws_url?: string }>(
+      `/v1/analysis/diagnosis/${code}/history/${checkDate}/detail`,
+      null,
+      { ...withRequestOptions(options, TIMEOUTS.standard), params: { force } },
     ),
 
   // 启动单股分析（后台任务模式）

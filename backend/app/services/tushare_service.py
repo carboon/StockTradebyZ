@@ -314,7 +314,8 @@ class TushareService:
         status = {
             "raw_data": {
                 "exists": False,
-                "count": 0,
+                "stock_count": 0,
+                "raw_record_count": 0,
                 "latest_date": None,
                 "latest_trade_date": latest_trade_date,
                 "is_latest": False,
@@ -329,7 +330,7 @@ class TushareService:
             kline_count = db.execute(select(func.count()).select_from(StockDaily)).scalar()
             if kline_count and kline_count > 0:
                 status["raw_data"]["exists"] = True
-                status["raw_data"]["count"] = kline_count
+                status["raw_data"]["raw_record_count"] = kline_count
 
                 # 获取最新日期
                 latest = db.execute(
@@ -349,6 +350,7 @@ class TushareService:
                     select(func.count(distinct(StockDaily.code)))
                 ).scalar()
                 if stocks_with_data:
+                    status["raw_data"]["stock_count"] = stocks_with_data
                     status["kline"]["exists"] = True
                     status["kline"]["count"] = stocks_with_data
 

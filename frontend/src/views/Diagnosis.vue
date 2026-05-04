@@ -212,10 +212,10 @@
       <el-card class="history-card">
         <template #header>
           <div class="history-header">
-            <span>每日检查历史 (近30个交易日收盘后回放)</span>
+            <span>每日检查历史 (近180个交易日收盘后回放)</span>
             <div class="history-actions">
               <span v-if="refreshingHistory" class="refreshing-text">
-                正在刷新... ({{ historyData.length }}/30)
+                正在刷新... ({{ historyData.length }}/180)
               </span>
               <el-button
                 type="primary"
@@ -234,9 +234,9 @@
             :data="historyData"
             stripe
             size="small"
-            max-height="300"
+            max-height="420"
             table-layout="auto"
-            min-width="940"
+            min-width="1060"
           >
           <el-table-column prop="check_date" label="交易日" width="110">
             <template #default="{ row }">
@@ -348,9 +348,36 @@
               </el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="详情" width="120" align="center" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" @click="openHistoryDetail(row)">
+                {{ row.detail_ready ? '查看详情' : '生成详情' }}
+              </el-button>
+            </template>
+          </el-table-column>
           </el-table>
         </div>
       </el-card>
+
+      <el-dialog v-model="historyDetailVisible" title="每日检查详情" width="760px">
+        <div v-loading="historyDetailLoading">
+          <template v-if="historyDetailData">
+            <div class="history-detail-section">
+              <div class="history-detail-title">规则结果</div>
+              <pre class="history-detail-pre">{{ formatDetailJson(historyDetailData.payload.rules) }}</pre>
+            </div>
+            <div class="history-detail-section">
+              <div class="history-detail-title">量化评分</div>
+              <pre class="history-detail-pre">{{ formatDetailJson(historyDetailData.payload.score_details) }}</pre>
+            </div>
+            <div class="history-detail-section">
+              <div class="history-detail-title">指标快照</div>
+              <pre class="history-detail-pre">{{ formatDetailJson(historyDetailData.payload.details) }}</pre>
+            </div>
+          </template>
+          <el-empty v-else description="暂无详情数据" :image-size="72" />
+        </div>
+      </el-dialog>
     </template>
 
     <!-- 初始状态 -->
@@ -366,13 +393,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { B1Check, KLineData, StockSearchItem, WatchlistItem } from '@/types'
+import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, StockSearchItem, WatchlistItem } from '@/types'
 import { useConfigStore } from '@/store/config'
 
 const route = useRoute()
@@ -416,8 +443,12 @@ type DiagnosisSearchSuggestion = StockSearchItem & {
 }
 
 const historyData = ref<B1Check[]>([])
+const historyDetailVisible = ref(false)
+const historyDetailLoading = ref(false)
+const historyDetailData = ref<DiagnosisHistoryDetailResponse | null>(null)
 const analysisResult = ref<DiagnosisViewResult | null>(null)
 const stockName = ref('')
+const currentDiagnosisChartData = ref<KLineData | null>(null)
 const lastAutoHistoryRefreshAt = ref<Record<string, number>>({})
 
 // 轮询定时器
@@ -430,7 +461,7 @@ const scoreConfig = {
   volume_behavior: { label: '量价行为', weight: 0.3 },
   previous_abnormal_move: { label: '历史异动', weight: 0.3 },
 }
-const chartDayOptions = [30, 60, 120] as const
+const chartDayOptions = [30, 60, 120, 180] as const
 
 // 计算评分项
 const scoreItems = computed(() => {
@@ -770,7 +801,7 @@ async function triggerHistoryRefresh(silent: boolean = false) {
     finishRequest('historyStatus', statusSignal)
 
     const refreshSignal = beginRequest('historyRefresh')
-    await apiAnalysis.refreshHistory(stockCode.value, 30, { signal: refreshSignal })
+    await apiAnalysis.refreshHistory(stockCode.value, 180, { signal: refreshSignal })
     lastAutoHistoryRefreshAt.value[stockCode.value] = Date.now()
     persistDiagnosisState()
     startPollingHistory(silent)
@@ -856,6 +887,15 @@ function selectChartDays(days: number) {
   void loadKlineData()
 }
 
+watch(
+  historyData,
+  () => {
+    if (!currentDiagnosisChartData.value || !stockCode.value) return
+    void renderChart(getDiagnosisDisplayChartData(currentDiagnosisChartData.value, chartDays.value))
+  },
+  { deep: true },
+)
+
 async function loadKlineData() {
   if (!stockCode.value) return
 
@@ -883,6 +923,7 @@ async function loadKlineData() {
     }
 
     const displayData = getDiagnosisDisplayChartData(data, requestedDays)
+    currentDiagnosisChartData.value = data
     await nextTick()
     await renderChart(displayData)
     // 确保图表在容器渲染完成后有正确的尺寸
@@ -911,7 +952,13 @@ async function renderChart(data: KLineData) {
 
   const dates = data.daily.map((d) => d.date)
   const values = data.daily.map((d) => [d.open, d.close, d.low, d.high])
-  const volumes = data.daily.map((d) => d.volume)
+  const volumeBars = data.daily.map((d) => {
+    const isTrendStart = historyData.value.some((item) => item.check_date === d.date && item.signal_type === 'trend_start')
+    return {
+      value: d.volume,
+      itemStyle: { color: isTrendStart ? '#1d4ed8' : '#778899' },
+    }
+  })
   const ma5 = data.daily.map((d) => d.ma5)
   const ma10 = data.daily.map((d) => d.ma10)
   const ma20 = data.daily.map((d) => d.ma20)
@@ -959,7 +1006,7 @@ async function renderChart(data: KLineData) {
       }
     },
     legend: {
-      data: ['K线', 'MA5', 'MA10', 'MA20'],
+      data: ['K线', 'MA5', 'MA10', 'MA20', '趋势启动'],
       top: 10,
     },
     grid: [
@@ -991,10 +1038,6 @@ async function renderChart(data: KLineData) {
         gridIndex: 1,
         splitLine: { show: false },
       },
-    ],
-    dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1], start: 50, end: 100, height: 20 },
     ],
     series: [
       {
@@ -1038,8 +1081,7 @@ async function renderChart(data: KLineData) {
         type: 'bar',
         xAxisIndex: 1,
         yAxisIndex: 1,
-        data: volumes,
-        itemStyle: { color: '#778899' },
+        data: volumeBars,
       },
     ],
   }
@@ -1061,6 +1103,7 @@ async function refreshDiagnosisFullChartInBackground(code: string, requestedDays
     const fullData = await apiStock.getKline(code, requestedDays, false, { signal, timeoutMs: 20000 })
     if (stockCode.value !== code || chartDays.value !== requestedDays) return
     setDiagnosisChartCache(code, fullData, requestedDays)
+    currentDiagnosisChartData.value = fullData
     await renderChart(getDiagnosisDisplayChartData(fullData, requestedDays))
     persistDiagnosisState()
   } catch (error) {
@@ -1088,7 +1131,6 @@ async function loadDiagnosisChartRuntime() {
         components.TooltipComponent,
         components.LegendComponent,
         components.GridComponent,
-        components.DataZoomComponent,
         renderers.CanvasRenderer,
       ])
 
@@ -1104,8 +1146,8 @@ async function loadHistoryData() {
 
   const signal = beginRequest('historyLoad')
   try {
-    const data = await apiAnalysis.getDiagnosisHistory(stockCode.value, 30, { signal })
-    historyData.value = (data.history || []).slice(0, 30) // 限制30天
+    const data = await apiAnalysis.getDiagnosisHistory(stockCode.value, 180, { signal })
+    historyData.value = data.history || []
     persistDiagnosisState()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
@@ -1365,6 +1407,28 @@ function persistDiagnosisState() {
   }
 
   sessionStorage.setItem(DIAGNOSIS_STATE_KEY, JSON.stringify(state))
+}
+
+function formatDetailJson(value: Record<string, any> | null | undefined): string {
+  return JSON.stringify(value ?? {}, null, 2)
+}
+
+async function openHistoryDetail(row: B1Check) {
+  if (!stockCode.value || !row?.check_date) return
+  historyDetailVisible.value = true
+  historyDetailLoading.value = true
+  historyDetailData.value = null
+  try {
+    const ensure = await apiAnalysis.ensureHistoryDetail(stockCode.value, row.check_date, false)
+    if (ensure.status !== 'ready' && ensure.task_id) {
+      await apiAnalysis.getHistoryDetail(stockCode.value, row.check_date)
+    }
+    historyDetailData.value = await apiAnalysis.getHistoryDetail(stockCode.value, row.check_date)
+  } catch (error: any) {
+    ElMessage.error('加载历史详情失败: ' + error.message)
+  } finally {
+    historyDetailLoading.value = false
+  }
 }
 
 function getDiagnosisDisplayChartData(data: KLineData, requestedDays: number): KLineData {

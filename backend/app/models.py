@@ -119,6 +119,11 @@ class TomorrowStarRun(Base):
 class DailyB1Check(Base):
     """每日B1检查表 (单股诊断历史)"""
     __tablename__ = "daily_b1_checks"
+    __table_args__ = (
+        UniqueConstraint("code", "check_date", name="uq_daily_b1_checks_code_check_date"),
+        Index("ix_daily_b1_checks_code_check_date", "code", "check_date"),
+        Index("ix_daily_b1_checks_check_date_code", "check_date", "code"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
@@ -134,6 +139,29 @@ class DailyB1Check(Base):
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class DailyB1CheckDetail(Base):
+    """每日B1检查详情表（持久化规则与评分明细）"""
+    __tablename__ = "daily_b1_check_details"
+    __table_args__ = (
+        UniqueConstraint("code", "check_date", name="uq_daily_b1_check_details_code_check_date"),
+        Index("ix_daily_b1_check_details_code_check_date", "code", "check_date"),
+        Index("ix_daily_b1_check_details_status_check_date", "status", "check_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    check_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready", index=True)
+    detail_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    strategy_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    rule_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    score_details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    rules_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class Watchlist(Base):

@@ -1093,7 +1093,8 @@ async def get_admin_summary(
     ])
 
     # 8. 构建今日状态卡片
-    raw_count = data_status.get("raw_data", {}).get("count", 0)
+    raw_stock_count = data_status.get("raw_data", {}).get("stock_count", 0)
+    raw_record_count = data_status.get("raw_data", {}).get("raw_record_count", 0)
     candidate_count = data_status.get("candidates", {}).get("count", 0)
     analysis_count = data_status.get("analysis", {}).get("count", 0)
 
@@ -1101,9 +1102,9 @@ async def get_admin_summary(
         AdminSummaryCard(
             key="raw_data",
             label="K线数据",
-            value=f"{raw_count:,}" if raw_count else "待生成",
+            value=f"{raw_stock_count:,} 只" if raw_stock_count else "待生成",
             status="success" if data_status.get("raw_data", {}).get("exists") else "warning",
-            meta=f"最新: {latest_db_date or '-'}",
+            meta=f"记录数: {raw_record_count:,} | 最新: {latest_db_date or '-'}",
         ),
         AdminSummaryCard(
             key="candidates",

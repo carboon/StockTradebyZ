@@ -10,14 +10,16 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录 (backend 目录的父目录)
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT_ENV_FILE = PROJECT_ROOT / ".env"
+BACKEND_ENV_FILE = PROJECT_ROOT / "backend" / ".env"
 
 
 class Settings(BaseSettings):
     """应用配置"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(ROOT_ENV_FILE), str(BACKEND_ENV_FILE)),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

@@ -543,7 +543,11 @@
             <div class="detail-grid">
               <div class="detail-item">
                 <span class="detail-label">股票数量</span>
-                <span class="detail-value">{{ dataStatus.rawData.count || 0 }} <small>只</small></span>
+                <span class="detail-value">{{ dataStatus.rawData.stockCount || 0 }} <small>只</small></span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">K线记录</span>
+                <span class="detail-value">{{ dataStatus.rawData.rawRecordCount || 0 }} <small>条</small></span>
               </div>
               <div class="detail-item">
                 <span class="detail-label">最新日期</span>
@@ -646,7 +650,7 @@ const diagnosticsPanels = ref<string[]>([])
 // 数据状态
 function createEmptyDataStatus() {
   return {
-    rawData: { exists: false, count: 0, latestDate: '' },
+    rawData: { exists: false, stockCount: 0, rawRecordCount: 0, latestDate: '' },
     candidates: { exists: false, count: 0, latestDate: '' },
     analysis: { exists: false, count: 0, latestDate: '' },
     kline: { exists: false, count: 0, latestDate: '' },
@@ -860,15 +864,15 @@ const bootstrapSteps = computed(() => [
     meta: configStore.tushareReady ? 'Tushare 已验证' : '待配置',
     done: configStore.tushareReady,
   },
-  {
-    key: 'raw',
-    index: 2,
-    title: '抓取原始数据',
-    meta: dataStatus.value.rawData.exists
-      ? `${dataStatus.value.rawData.count}只股票`
+    {
+      key: 'raw',
+      index: 2,
+      title: '抓取原始数据',
+      meta: dataStatus.value.rawData.exists
+    ? `${dataStatus.value.rawData.stockCount}只股票`
       : '待抓取',
-    done: dataStatus.value.rawData.exists,
-  },
+      done: dataStatus.value.rawData.exists,
+    },
   {
     key: 'candidates',
     index: 3,
@@ -1005,7 +1009,8 @@ async function reloadAll() {
       ...createEmptyDataStatus(),
       rawData: {
         exists: statusResp.raw_data.exists,
-        count: statusResp.raw_data.count,
+        stockCount: statusResp.raw_data.stock_count || 0,
+        rawRecordCount: statusResp.raw_data.raw_record_count || 0,
         latestDate: formatLatestDate(statusResp.raw_data.latest_date),
       },
       candidates: {

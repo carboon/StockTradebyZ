@@ -67,7 +67,7 @@ def test_get_data_update_status(test_client: TestClient) -> None:
     包括原始数据、候选数据、分析数据和K线数据的状态。
     """
     mock_status = {
-        "raw_data": {"exists": True, "count": 5000, "latest_date": 1705305600.0},  # timestamp
+        "raw_data": {"exists": True, "stock_count": 2000, "raw_record_count": 5000, "latest_date": 1705305600.0},  # timestamp
         "candidates": {"exists": True, "count": 50, "latest_date": "2024-01-15"},
         "analysis": {"exists": True, "count": 100, "latest_date": "2024-01-15"},
         "kline": {"exists": True, "count": 500, "latest_date": None},
@@ -91,7 +91,8 @@ def test_get_data_update_status(test_client: TestClient) -> None:
 
         # 验证原始数据状态（包含格式化后的日期）
         assert data["raw_data"]["exists"] is True
-        assert data["raw_data"]["count"] == 5000
+        assert data["raw_data"]["stock_count"] == 2000
+        assert data["raw_data"]["raw_record_count"] == 5000
         assert "latest_date" in data["raw_data"]
 
         # 验证候选数据状态
@@ -117,7 +118,7 @@ def test_get_data_update_status_no_logs(test_client: TestClient) -> None:
     验证API能正确处理并返回所有字段为False的响应。
     """
     mock_empty_status = {
-        "raw_data": {"exists": False, "count": 0, "latest_date": None},
+        "raw_data": {"exists": False, "stock_count": 0, "raw_record_count": 0, "latest_date": None},
         "candidates": {"exists": False, "count": 0, "latest_date": None},
         "analysis": {"exists": False, "count": 0, "latest_date": None},
         "kline": {"exists": False, "count": 0, "latest_date": None},
@@ -135,7 +136,8 @@ def test_get_data_update_status_no_logs(test_client: TestClient) -> None:
 
         # 验证所有数据类型都不存在
         assert data["raw_data"]["exists"] is False
-        assert data["raw_data"]["count"] == 0
+        assert data["raw_data"]["stock_count"] == 0
+        assert data["raw_data"]["raw_record_count"] == 0
         assert data["candidates"]["exists"] is False
         assert data["analysis"]["exists"] is False
         assert data["kline"]["exists"] is False

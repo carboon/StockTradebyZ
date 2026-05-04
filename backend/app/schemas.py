@@ -183,6 +183,29 @@ class B1CheckItem(BaseModel):
     signal_type: Optional[str] = None
     tomorrow_star_pass: Optional[bool] = None
     notes: Optional[str] = None
+    detail_ready: bool = False
+    detail_version: Optional[str] = None
+    detail_updated_at: Optional[datetime] = None
+
+
+class DailyB1CheckDetailPayload(BaseModel):
+    """单日诊断详情内容"""
+    score_details: Optional[Dict[str, Any]] = None
+    rules: Optional[Dict[str, Any]] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class DiagnosisHistoryDetailResponse(BaseModel):
+    """单股诊断某日详情响应"""
+    code: str
+    check_date: date_class
+    status: str
+    detail_ready: bool = False
+    detail_version: Optional[str] = None
+    strategy_version: Optional[str] = None
+    rule_version: Optional[str] = None
+    detail_updated_at: Optional[datetime] = None
+    payload: DailyB1CheckDetailPayload = Field(default_factory=DailyB1CheckDetailPayload)
 
 
 class DiagnosisHistoryResponse(BaseModel):
@@ -412,7 +435,7 @@ class TaskDiagnosticsResponse(BaseModel):
 # ==================== 数据更新状态 ====================
 class DataStatusResponse(BaseModel):
     """数据状态响应"""
-    raw_data: Dict[str, Any]  # {exists: bool, count: int, latest_date: str}
+    raw_data: Dict[str, Any]  # {exists: bool, stock_count: int, raw_record_count: int, latest_date: str}
     candidates: Dict[str, Any]  # {exists: bool, count: int, latest_date: str}
     analysis: Dict[str, Any]  # {exists: bool, count: int, latest_date: str}
     kline: Dict[str, Any]  # {exists: bool, count: int, latest_date: str}
