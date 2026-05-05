@@ -13,9 +13,30 @@ import pandas as pd
 from sqlalchemy import distinct
 from sqlalchemy.orm import Session
 
-from app.models import StockDaily
+from app.models import Stock, StockDaily
+from app.utils.stock_metadata import normalize_stock_code, resolve_market
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_stock_row(db: Session, code: str) -> Stock:
+    """确保 stocks 表存在对应 code，避免 stock_daily 外键写入失败。"""
+    normalized_code = normalize_stock_code(code)
+    if not normalized_code:
+        raise ValueError(f"无效股票代码: {code!r}")
+
+    stock = db.query(Stock).filter(Stock.code == normalized_code).first()
+    if stock is not None:
+        return stock
+
+    stock = Stock(
+        code=normalized_code,
+        market=resolve_market(normalized_code),
+    )
+    db.add(stock)
+    # 显式 flush，让后续对 stock_daily 的查询/插入在同一事务中能安全引用父记录。
+    db.flush()
+    return stock
 
 
 def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
@@ -32,6 +53,12 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
     if df.empty:
         return 0
 
+    normalized_code = normalize_stock_code(code)
+    if not normalized_code:
+        raise ValueError(f"无效股票代码: {code!r}")
+
+    ensure_stock_row(db, normalized_code)
+
     count = 0
     for _, row in df.iterrows():
         trade_date = row.get("date")
@@ -41,7 +68,7 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
             trade_date = trade_date.date() if hasattr(trade_date, 'date') else trade_date
 
         existing = db.query(StockDaily).filter(
-            StockDaily.code == code,
+            StockDaily.code == normalized_code,
             StockDaily.trade_date == trade_date,
         ).first()
 
@@ -53,7 +80,7 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
             existing.volume = float(row["volume"])
         else:
             db.add(StockDaily(
-                code=code,
+                code=normalized_code,
                 trade_date=trade_date,
                 open=float(row["open"]),
                 close=float(row["close"]),
@@ -199,6 +226,7 @@ def check_data_completeness(db: Session, code: str, expected_days: int = 250) ->
 
 
 __all__ = [
+    "ensure_stock_row",
     "save_daily_data",
     "bulk_save_daily_data",
     "get_daily_data",

@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Stock, StockDaily
-from app.utils.stock_metadata import resolve_ts_code
+from app.services.kline_service import ensure_stock_row
+from app.utils.stock_metadata import normalize_stock_code, resolve_ts_code
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
 ROOT = Path(__file__).parent.parent.parent.parent
@@ -143,15 +144,24 @@ class DailyDataService:
 
         with SessionLocal() as db:
             saved_count = 0
+            ensured_codes: set[str] = set()
             for _, row in df.iterrows():
+                normalized_code = normalize_stock_code(row["code"])
+                if not normalized_code:
+                    raise ValueError(f"无效股票代码: {row['code']!r}")
+
+                if normalized_code not in ensured_codes:
+                    ensure_stock_row(db, normalized_code)
+                    ensured_codes.add(normalized_code)
+
                 # 检查是否已存在
                 existing = db.execute(
                     select(StockDaily)
                     .where(
-                        StockDaily.code == row["code"],
+                        StockDaily.code == normalized_code,
                         StockDaily.trade_date == row["trade_date"]
                     )
-                ).first()
+                ).scalar_one_or_none()
 
                 if existing:
                     # 更新
@@ -163,7 +173,7 @@ class DailyDataService:
                 else:
                     # 插入
                     record = StockDaily(
-                        code=row["code"],
+                        code=normalized_code,
                         trade_date=row["trade_date"],
                         open=float(row["open"]),
                         high=float(row["high"]),

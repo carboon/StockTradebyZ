@@ -7,6 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY_DIR="$PROJECT_ROOT/deploy"
+DOCKER_CONFIG_DIR="$PROJECT_ROOT/.docker"
 cd "$DEPLOY_DIR"
 
 # 颜色输出
@@ -64,6 +65,9 @@ EOF
 
 # 检查 Docker
 check_docker() {
+    mkdir -p "$DOCKER_CONFIG_DIR"
+    export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+
     if ! command -v docker >/dev/null 2>&1; then
         log_error "未找到 Docker，请先安装 Docker"
         exit 1

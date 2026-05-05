@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
+from app.api.tasks import _cleanup_stale_active_tasks
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
 from app.services.analysis_service import analysis_service
@@ -145,6 +146,8 @@ async def get_tomorrow_star_freshness(
 ) -> dict:
     """获取明日之星数据新鲜度状态。"""
     from app.services.market_service import market_service, MarketService
+
+    _cleanup_stale_active_tasks(db)
 
     latest_trade_date = market_service.get_latest_trade_date() if market_service.token else None
     latest_trade_data_ready = (

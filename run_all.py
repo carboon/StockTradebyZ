@@ -216,6 +216,71 @@ def _sync_candidates_to_db() -> None:
         traceback.print_exc()
 
 
+def _sync_raw_csv_to_db_if_needed(raw_dir: Path, *, latest_trade_date: str | None = None) -> None:
+    """在 --db 模式下，必要时把现有 raw CSV 回灌到数据库。
+
+    背景：
+    - 当 data/raw 已完整且是最新交易日时，步骤 1 会被自动跳过。
+    - 但如果数据库还没有 K 线数据，仅跳过抓取会导致“raw 有数据、数据库为空”。
+    """
+    if not raw_dir.exists():
+        print("[INFO] raw 目录不存在，跳过数据库回灌。")
+        return
+
+    csv_files = sorted(raw_dir.glob("*.csv"))
+    if not csv_files:
+        print("[INFO] raw 目录中没有 CSV 文件，跳过数据库回灌。")
+        return
+
+    try:
+        if str(ROOT / "backend") not in sys.path:
+            sys.path.insert(0, str(ROOT / "backend"))
+
+        from app.services.daily_data_service import get_daily_data_service
+        from app.services.tushare_service import TushareService
+
+        tushare_service = TushareService()
+        data_status = tushare_service.check_data_status()
+        raw_status = data_status.get("raw_data", {}) if isinstance(data_status, dict) else {}
+        db_latest_date = str(raw_status.get("latest_date") or "").strip() or None
+        db_stock_count = int(raw_status.get("stock_count") or 0)
+        csv_count = len(csv_files)
+
+        needs_import = (
+            not raw_status.get("exists")
+            or db_stock_count < csv_count
+            or (latest_trade_date and db_latest_date != latest_trade_date)
+        )
+        if not needs_import:
+            print(
+                f"[INFO] 数据库 K 线已就绪，跳过 CSV 回灌。"
+                f" db_stock_count={db_stock_count} latest={db_latest_date}"
+            )
+            return
+
+        print("\n" + "=" * 60)
+        print("[步骤] 1.5  raw CSV 回灌数据库（--db 模式）")
+        print(
+            f"[INFO] 触发原因: db_exists={raw_status.get('exists')} | "
+            f"db_stock_count={db_stock_count}/{csv_count} | "
+            f"db_latest={db_latest_date} | trade_latest={latest_trade_date}"
+        )
+        print("=" * 60)
+
+        result = get_daily_data_service().batch_import_from_csv(raw_dir)
+        if result.get("success"):
+            print(
+                f"[INFO] CSV 回灌完成: imported={result.get('imported')} "
+                f"failed={result.get('failed')}"
+            )
+        else:
+            print(f"[WARN] CSV 回灌未完成: {result.get('message')}")
+    except Exception as e:
+        print(f"[WARNING] raw CSV 回灌数据库失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def _get_local_latest_date(raw_dir: Path) -> str | None:
     """扫描 data/raw/ 中 CSV 的最新日期。"""
     latest_date: str | None = None
@@ -383,7 +448,6 @@ def main() -> None:
     is_free = reviewer_info.get("free", False)
 
     # 检查 API Key
-    import os
     if env_var is None:
         print(f"[INFO] 使用 {reviewer_name}（本地量化计算，无需 API Key）")
     elif not os.environ.get(env_var):
@@ -407,10 +471,14 @@ def main() -> None:
             print(f"\n{'='*60}")
             print(f"[步骤] 1  拉取 K 线数据 — 已跳过（数据完整且已是最新交易日 {latest_trade_date}）")
             print(f"{'='*60}")
+            if args.db:
+                _sync_raw_csv_to_db_if_needed(raw_dir, latest_trade_date=latest_trade_date)
         elif args.skip_fetch:
             print(f"\n{'='*60}")
             print("[步骤] 1  拉取 K 线数据 — 已跳过（--skip-fetch）")
             print(f"{'='*60}")
+            if args.db:
+                _sync_raw_csv_to_db_if_needed(raw_dir, latest_trade_date=local_latest_date)
         else:
             if has_complete_data:
                 if latest_trade_date and local_latest_date and local_latest_date < latest_trade_date:

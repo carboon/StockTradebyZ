@@ -20,7 +20,7 @@ from app.schemas import (
     TushareVerifyRequest,
     TushareVerifyResponse,
 )
-from app.config import settings, get_settings
+from app.config import PROJECT_ROOT, settings, get_settings
 from app.services.tushare_service import TushareService
 
 router = APIRouter()
@@ -112,8 +112,7 @@ async def verify_tushare(request: TushareVerifyRequest, admin=Depends(get_admin_
 @router.post("/save-env")
 async def save_env(config: dict, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """保存环境变量到 .env 文件"""
-    root = Path(__file__).parent.parent.parent
-    env_file = root / ".env"
+    env_file = PROJECT_ROOT / ".env"
 
     # 读取现有内容
     existing_lines = []

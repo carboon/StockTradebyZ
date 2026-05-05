@@ -97,10 +97,19 @@ api.interceptors.response.use(
     if (error.code === 'ECONNABORTED') {
       return Promise.reject(new Error('请求超时。若你刚启动了初始化或分析任务，它可能仍在后台运行，请前往任务中心继续查看。'))
     }
+    const requestUrl = error.config?.url || ''
+    const isLoginRequest = requestUrl.includes('/v1/auth/login')
+
+    // 登录接口的 401 应保留后端原始文案，避免误报为“登录已过期”
+    if (error.response?.status === 401 && isLoginRequest) {
+      const message = error.response.data?.detail || error.response.data?.message || '用户名或密码错误'
+      return Promise.reject(new Error(message))
+    }
+
     // 401 未授权：清除 token 并跳转登录页
     if (error.response?.status === 401) {
       console.error('[401 Error]', {
-        url: error.config?.url,
+        url: requestUrl,
         method: error.config?.method,
         hasToken: !!localStorage.getItem('stocktrade_token'),
         currentPath: window.location.pathname

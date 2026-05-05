@@ -3,11 +3,14 @@
 
 FROM node:20-bookworm-slim
 
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
+
 WORKDIR /app
 
 # 安装依赖
 COPY frontend/package*.json /app/
-RUN npm ci
+RUN npm config set registry "${NPM_CONFIG_REGISTRY}" && npm ci
 
 # 复制源代码
 COPY frontend/ /app/

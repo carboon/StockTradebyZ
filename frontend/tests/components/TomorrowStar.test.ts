@@ -391,6 +391,53 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.latestCandidates[0].code).toBe('600000')
   })
 
+  it('reloads server data when hydrated cache has history but the right panel is empty', async () => {
+    const statusPayload = {
+      configured: true,
+      available: true,
+      message: 'Token有效',
+      data_status: {
+        raw_data: { exists: true, count: 3200, latest_date: '2025-04-25' },
+        candidates: { exists: true, count: 30, latest_date: '2025-04-25' },
+        analysis: { exists: true, count: 20, latest_date: '2025-04-25' },
+        kline: { exists: true, count: 100, latest_date: '2025-04-25' },
+      },
+    }
+    let resolveStatus: ((value: any) => void) | null = null
+    vi.mocked(apiConfig.getTushareStatus).mockImplementation(
+      () => new Promise((resolve) => { resolveStatus = resolve })
+    )
+
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache', JSON.stringify({
+      historyData: [{ date: '2024-01-10', rawDate: '2024-01-10', count: 1, pass: 0, status: 'success' }],
+      latestCandidates: [],
+      latestAnalysisResults: [],
+      selectedDate: '2024-01-10',
+      viewingDate: '2024-01-10',
+      latestDate: '2024-01-10',
+      latestDataDate: '2024-01-10',
+      historyPage: 1,
+      latestCandidatePage: 1,
+      lastHistorySignature: 'cached',
+      freshnessVersion: 'cached-v',
+      cachedAt: Date.now(),
+    }))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.hydratedFromCache).toBe(true)
+    expect(wrapper.vm.latestCandidates).toHaveLength(0)
+
+    resolveStatus?.(statusPayload)
+    await flushPromises()
+
+    expect(wrapper.vm.latestDate).toBe('2024-01-15')
+    expect(wrapper.vm.viewingDate).toBe('2024-01-15')
+    expect(wrapper.vm.latestCandidates[0].code).toBe('600000')
+    expect(wrapper.vm.latestAnalysisResults).toHaveLength(4)
+  })
+
   it('refreshes the current date and shows success feedback', async () => {
     const wrapper = mountComponent()
     await flushPromises()

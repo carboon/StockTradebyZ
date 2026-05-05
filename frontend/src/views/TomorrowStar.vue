@@ -1007,7 +1007,13 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
       return
     }
 
-    if (forceReload || !hydratedFromCache.value || freshnessChanged || historyData.value.length === 0) {
+    if (
+      forceReload
+      || !hydratedFromCache.value
+      || freshnessChanged
+      || historyData.value.length === 0
+      || missingVisibleRightPanelData
+    ) {
       await checkForRefresh(true)
     }
   } catch (error: any) {

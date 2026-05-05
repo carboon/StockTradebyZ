@@ -28,11 +28,14 @@ class Settings(BaseSettings):
     # 应用配置
     app_name: str = "StockTrader"
     debug: bool = True
-    host: str = "0.0.0.0"
-    port: int = 8000
+    host: str = Field(default="0.0.0.0", alias="BACKEND_HOST")
+    port: int = Field(default=8000, alias="BACKEND_PORT")
 
     # CORS 配置
-    cors_origins: str = "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173"
+    cors_origins: str = Field(
+        default="http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",
+        alias="BACKEND_CORS_ORIGINS",
+    )
 
     # 数据目录 (绝对路径)
     data_dir: Path = PROJECT_ROOT / "data"

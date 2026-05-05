@@ -687,11 +687,43 @@ class TomorrowStarWindowService:
         return {"deleted_dates": deleted_dates, "keep_dates": keep_dates}
 
 
-_tomorrow_star_window_service: Optional[TomorrowStarWindowService] = None
-
-
 def get_tomorrow_star_window_service() -> TomorrowStarWindowService:
-    global _tomorrow_star_window_service
-    if _tomorrow_star_window_service is None:
-        _tomorrow_star_window_service = TomorrowStarWindowService()
-    return _tomorrow_star_window_service
+    """返回一个新的 service 实例。
+
+    不复用全局 Session，避免在 asyncio.to_thread / 后台线程中跨线程使用同一个
+    SQLAlchemy Session，导致窗口补齐任务无法稳定执行。
+    """
+    return TomorrowStarWindowService()
+
+
+def ensure_tomorrow_star_window(
+    window_size: int = TomorrowStarWindowService.DEFAULT_WINDOW_SIZE,
+    *,
+    reviewer: str = TomorrowStarWindowService.DEFAULT_REVIEWER,
+    source: str = TomorrowStarWindowService.DEFAULT_SOURCE,
+) -> dict[str, Any]:
+    """在线程内创建独立 service，执行 180 日窗口补齐。"""
+    with TomorrowStarWindowService() as service:
+        return service.ensure_window(window_size=window_size, reviewer=reviewer, source=source)
+
+
+def maintain_tomorrow_star_for_trade_date(
+    trade_date: str,
+    *,
+    reviewer: str = TomorrowStarWindowService.DEFAULT_REVIEWER,
+    source: str = TomorrowStarWindowService.DEFAULT_SOURCE,
+    window_size: int = TomorrowStarWindowService.DEFAULT_WINDOW_SIZE,
+) -> dict[str, Any]:
+    """在线程内为指定交易日构建并裁剪明日之星窗口。"""
+    with TomorrowStarWindowService() as service:
+        build_result = service.build_for_trade_date(
+            trade_date,
+            reviewer=reviewer,
+            source=source,
+            window_size=window_size,
+        )
+        prune_result = service.prune_window(window_size)
+        return {
+            "build": build_result,
+            "prune": prune_result,
+        }

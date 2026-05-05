@@ -662,7 +662,7 @@ class AdminSummaryResponse(BaseModel):
     # 当前任务
     current_task: AdminSummaryTaskInfo | None
     # 最近任务结果
-    latest_task: dict[str, any] | None
+    latest_task: Dict[str, Any] | None
     # 缺口天数
     gap_days: int
     # 当前任务状态

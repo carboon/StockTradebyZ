@@ -7,6 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY_DIR="$PROJECT_ROOT/deploy"
+DOCKER_CONFIG_DIR="$PROJECT_ROOT/.docker"
 cd "$DEPLOY_DIR"
 
 # 颜色输出
@@ -82,6 +83,9 @@ EOF
 
 # 检查 Docker
 check_docker() {
+    mkdir -p "$DOCKER_CONFIG_DIR"
+    export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+
     if ! command -v docker >/dev/null 2>&1; then
         log_error "未找到 Docker，请先安装 Docker"
         exit 1
@@ -107,6 +111,49 @@ check_env() {
         else
             log_warning "未找到 .env 文件，请确保环境变量已正确配置"
         fi
+    fi
+}
+
+read_env_value() {
+    local key="$1"
+    if [ ! -f "$DEPLOY_DIR/.env" ]; then
+        return 0
+    fi
+    grep -E "^${key}=" "$DEPLOY_DIR/.env" | tail -n 1 | cut -d= -f2-
+}
+
+validate_prod_env() {
+    local environment_value
+    environment_value="$(read_env_value "ENVIRONMENT" | tr -d '[:space:]')"
+    if [ "$environment_value" != "production" ]; then
+        log_error "生产启动要求 deploy/.env 中设置 ENVIRONMENT=production，当前为: ${environment_value:-未设置}"
+        exit 1
+    fi
+
+    local database_url secret_key admin_password postgres_password
+    database_url="$(read_env_value "DATABASE_URL" | tr -d '[:space:]')"
+    secret_key="$(read_env_value "SECRET_KEY")"
+    admin_password="$(read_env_value "ADMIN_DEFAULT_PASSWORD")"
+    postgres_password="$(read_env_value "POSTGRES_PASSWORD")"
+
+    if [ -z "$database_url" ] || [ "$database_url" = "postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade" ]; then
+        log_error "生产启动要求 deploy/.env 中设置非示例 DATABASE_URL"
+        exit 1
+    fi
+
+    if [ -z "$secret_key" ] || [ "$secret_key" = "change-me-in-production" ] || [ "$secret_key" = "change-me-in-production-use-a-random-string" ]; then
+        log_error "生产启动要求 deploy/.env 中设置强随机 SECRET_KEY"
+        exit 1
+    fi
+
+    if [ -z "$admin_password" ] || [ "$admin_password" = "admin123" ]; then
+        log_error "生产启动要求 deploy/.env 中替换默认管理员密码"
+        exit 1
+    fi
+
+    if [ -z "$postgres_password" ] || [ "$postgres_password" = "stocktrade123" ]; then
+        log_error "生产启动要求 deploy/.env 中替换默认 PostgreSQL 密码"
+        exit 1
     fi
 }
 
@@ -317,6 +364,7 @@ case "$COMMAND" in
         ;;
     prod)
         check_env
+        validate_prod_env
         cmd_prod
         ;;
     down)

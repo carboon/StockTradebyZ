@@ -38,7 +38,7 @@ from sqlalchemy import text
 
 from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
-from app.services.tomorrow_star_window_service import get_tomorrow_star_window_service
+from app.services.tomorrow_star_window_service import ensure_tomorrow_star_window
 
 # 测试环境检测：pytest 收集阶段尚未设置 PYTEST_CURRENT_TEST，
 # 因此同时兼容 pytest 入口、已加载模块和显式测试标记环境变量。
@@ -129,7 +129,7 @@ async def lifespan(app: FastAPI):
     async def bootstrap_tomorrow_star_window() -> None:
         try:
             await asyncio.to_thread(
-                get_tomorrow_star_window_service().ensure_window,
+                ensure_tomorrow_star_window,
                 180,
             )
         except Exception as exc:

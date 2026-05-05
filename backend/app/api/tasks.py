@@ -19,7 +19,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import Config, Task, TaskLog
 from app.services.task_service import TaskService
-from app.services.tomorrow_star_window_service import get_tomorrow_star_window_service
+from app.services.tomorrow_star_window_service import maintain_tomorrow_star_for_trade_date
 from app.services.tushare_service import TushareService
 from app.schemas import (
     AdminSummaryCard,
@@ -50,6 +50,45 @@ STATUS_CACHE_TTL = 30      # 状态缓存 30 秒
 RUNNING_CACHE_TTL = 10     # 运行中任务缓存 10 秒
 OVERVIEW_CACHE_TTL_SECONDS = 20
 _overview_cache: dict = {"data": None, "expires_at": 0.0}
+
+
+def _cleanup_stale_active_tasks(db: Session) -> set[int]:
+    """将数据库中无对应活跃进程的 pending/running 任务标记为 cancelled。"""
+    task_service = TaskService(db)
+    active_tasks = (
+        db.query(Task)
+        .filter(Task.status.in_(["pending", "running"]))
+        .all()
+    )
+
+    stale_ids: set[int] = set()
+    for task in active_tasks:
+        if task_service.is_task_process_alive(task.id):
+            continue
+        task.status = "cancelled"
+        task.task_stage = "cancelled"
+        task.progress_meta_json = TaskService._build_stage_meta(
+            "cancelled",
+            progress=task.progress,
+            message="任务进程已结束，自动清理残留运行状态",
+        )
+        stale_ids.add(task.id)
+
+    if stale_ids:
+        db.add_all([
+            TaskLog(
+                task_id=task_id,
+                level="warning",
+                stage="cancelled",
+                message="检测到残留运行状态，系统已自动清理",
+            )
+            for task_id in stale_ids
+        ])
+        db.commit()
+        cache.delete("running_tasks")
+        _overview_cache["expires_at"] = 0.0
+
+    return stale_ids
 
 
 def _is_test_mode() -> bool:
@@ -311,14 +350,13 @@ async def start_incremental_update(
                 latest_trade_date = TushareService().get_latest_trade_date()
                 if latest_trade_date and TushareService().is_trade_date_data_ready(latest_trade_date):
                     try:
-                        window_service = get_tomorrow_star_window_service()
-                        window_service.build_for_trade_date(
+                        await asyncio.to_thread(
+                            maintain_tomorrow_star_for_trade_date,
                             latest_trade_date,
                             reviewer="quant",
                             source="incremental_update",
                             window_size=180,
                         )
-                        window_service.prune_window(180)
                     except Exception as exc:
                         print(f"增量更新后维护明日之星 180 日窗口失败: {exc}")
                 MarketService.finish_update(
@@ -511,6 +549,8 @@ async def get_running_tasks(
     if cached:
         return cached
 
+    _cleanup_stale_active_tasks(db)
+
     tasks = (
         db.query(Task)
         .filter(Task.status.in_(["pending", "running"]))
@@ -541,6 +581,8 @@ async def get_task_diagnostics(
     db: Session = Depends(get_db),
     user=Depends(require_user)
 ) -> TaskDiagnosticsResponse:
+    _cleanup_stale_active_tasks(db)
+
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
     environment = _build_environment_sections(tushare_service, db)
@@ -1005,6 +1047,8 @@ async def get_admin_summary(
     from app.models import Candidate, AnalysisResult, StockDaily
     from sqlalchemy import select, func
 
+    _cleanup_stale_active_tasks(db)
+
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
 
@@ -1132,7 +1176,7 @@ async def get_admin_summary(
     # 9. 数据生产状态
     data_production = {
         "raw_data_exists": data_status.get("raw_data", {}).get("exists", False),
-        "raw_data_count": raw_count,
+        "raw_data_count": raw_stock_count,
         "raw_data_latest": latest_db_date,
         "candidates_exists": data_status.get("candidates", {}).get("exists", False),
         "candidates_count": candidate_count,

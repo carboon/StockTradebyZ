@@ -877,6 +877,13 @@ class TaskService:
         )
         return running_task
 
+    def is_task_process_alive(self, task_id: int) -> bool:
+        """判断任务对应的子进程是否仍然存活。"""
+        process = self.running_tasks.get(task_id)
+        if process is None:
+            return False
+        return process.returncode is None
+
     async def cancel_task(self, task_id: int) -> bool:
         """取消任务"""
         if task_id in self.running_tasks:

@@ -44,6 +44,7 @@ pip-wheel-metadata/
 .env
 .env.*
 !.env.example
+.docker/
 .claude/settings.local.json
 config/.claude/settings.local.json
 
