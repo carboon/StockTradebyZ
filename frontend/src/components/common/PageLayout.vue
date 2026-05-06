@@ -79,8 +79,16 @@
             @click="router.push('/update')"
           >
             <span class="badge-dot" />
-            <span>{{ configStore.dataInitialized ? '首次初始化已完成' : '首次初始化待完成' }}</span>
+            <span>{{ configStore.dataInitialized ? '首次初始化已完成' : '数据状态待同步' }}</span>
           </div>
+          <el-button
+            :icon="Refresh"
+            :loading="refreshing"
+            text
+            @click="handlePageRefresh"
+          >
+            刷新
+          </el-button>
           <el-button text @click="router.push('/config')">
             <el-icon><Setting /></el-icon>
           </el-button>
@@ -141,10 +149,10 @@
         class="status-banner status-banner--info"
       >
         <div class="status-banner__content">
-          <strong>数据源已就绪，但首次初始化尚未全部完成。</strong>
+          <strong>数据源已就绪，但数据库同步状态仍需确认。</strong>
           <span>{{ configStore.initializationMessage }}</span>
         </div>
-        <el-button type="primary" plain @click="router.push('/update')">
+        <el-button type="primary" @click="router.push('/update')">
           去任务中心
         </el-button>
       </div>
@@ -169,7 +177,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document,
@@ -188,7 +196,11 @@ const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
 const authStore = useAuthStore()
 
+// 注入页面提供的刷新函数
+const pageRefreshHandler = inject<(() => Promise<void>) | null>('pageRefresh', null)
+
 const isCollapsed = ref(false)
+const refreshing = ref(false)
 const activeTasks = ref<Task[]>([])
 const incrementalStatus = ref<IncrementalUpdateStatus | null>(null)
 let progressPoller: ReturnType<typeof setInterval> | null = null
@@ -222,24 +234,25 @@ const headerProgress = computed(() => {
       secondaryParts.push(`失败 ${meta.failed_count}`)
     }
 
-    const isFetchStage = meta?.stage === 'fetch_data'
-    const fetchPercent = current != null && total ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : null
-    if (isFetchStage && (meta?.initial_completed ?? 0) > 0) {
+    // 新的6阶段流程：阶段1是"数据准备"
+    const isDataPreparingStage = meta?.stage === 'data_preparing' || meta?.stage === 'fetch_data' || meta?.stage === 'csv_import'
+    const dataPreparingPercent = current != null && total ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : null
+    if (isDataPreparingStage && (meta?.initial_completed ?? 0) > 0) {
       secondaryParts.push(`已恢复 ${meta?.initial_completed} 只`)
     }
 
     return {
-      eyebrow: isFetchStage ? 'Tushare 数据源' : '',
-      title: isFetchStage
-        ? '原始数据抓取中'
+      eyebrow: isDataPreparingStage ? '数据准备' : '',
+      title: isDataPreparingStage
+        ? '数据准备进行中'
         : (configStore.dataInitialized ? '全量任务进行中' : '首次初始化进行中'),
-      subtitle: isFetchStage
+      subtitle: isDataPreparingStage
         ? `${configStore.dataInitialized ? '全量更新' : '首次初始化'} / 第 1 步`
         : (meta?.stage_label || getStageLabel(meta?.stage || task.task_stage)),
       percent: Math.max(0, Math.min(100, meta?.percent ?? task.progress ?? 0)),
       percentLabel: '全流程',
-      primary: isFetchStage && current != null && total != null
-        ? `已抓取 ${current}/${total} 只${fetchPercent != null ? `（抓取完成 ${fetchPercent}%）` : ''}`
+      primary: isDataPreparingStage && current != null && total != null
+        ? `已处理 ${current}/${total} 只${dataPreparingPercent != null ? `（完成 ${dataPreparingPercent}%）` : ''}`
         : current != null && total != null
           ? `进度 ${current}/${total}`
           : stageIndex != null && stageTotal != null
@@ -302,6 +315,21 @@ function toggleSidebar() {
   isCollapsed.value = !isCollapsed.value
 }
 
+async function handlePageRefresh() {
+  refreshing.value = true
+  try {
+    // 如果当前页面提供了刷新函数，使用它
+    if (pageRefreshHandler) {
+      await pageRefreshHandler()
+    } else {
+      // 通用刷新：重新加载当前路由
+      await router.go(0)
+    }
+  } finally {
+    refreshing.value = false
+  }
+}
+
 function goNoticeRoute() {
   if (noticeStore.notice?.actionRoute) {
     router.push(noticeStore.notice.actionRoute)
@@ -313,12 +341,18 @@ function getStageLabel(stage?: string | null): string {
     queued: '排队中',
     starting: '启动中',
     preparing: '准备中',
-    fetch_data: '抓取原始数据',
+    // 新的6阶段流程
+    data_preparing: '数据准备',
+    fetch_data: '数据准备',         // 兼容旧名称
+    csv_import: 'CSV 回灌',
     build_pool: '量化初选',
-    build_candidates: '导出候选图表',
-    pre_filter: '生成评分结果',
-    score_review: '导出 PASS 图表',
-    finalize: '输出推荐结果',
+    filter_candidates: '候选筛选',  // 新名称
+    build_candidates: '候选筛选',   // 兼容旧名称
+    score_analysis: '评分分析',     // 新名称
+    pre_filter: '评分分析',         // 兼容旧名称
+    export_results: '结果导出',     // 新名称
+    score_review: '结果导出',       // 兼容旧名称
+    finalize: '输出推荐',
     completed: '已完成',
     failed: '执行失败',
     cancelled: '已取消',

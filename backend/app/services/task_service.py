@@ -18,6 +18,7 @@ import asyncio
 import json
 import locale
 import logging
+import math
 import os
 import sys
 import threading
@@ -32,6 +33,24 @@ from app.time_utils import utc_now
 ROOT = Path(__file__).parent.parent.parent.parent
 
 logger = logging.getLogger(__name__)
+
+
+def _should_skip_task_log_line(message: str) -> bool:
+    """过滤无价值高噪音日志，避免挤占任务日志与刷新带宽。"""
+    text = (message or "").strip()
+    if not text:
+        return True
+
+    lower = text.lower()
+    if "sqlalchemy.engine.engine" in lower:
+        return True
+    if text.startswith("SELECT ") or text.startswith("INSERT ") or text.startswith("UPDATE ") or text.startswith("DELETE "):
+        return True
+    if text.startswith("FROM ") or text.startswith("WHERE "):
+        return True
+    if text.startswith("[cached since ") or text.startswith("[generated in "):
+        return True
+    return False
 
 
 # 任务日志缓冲区
@@ -179,25 +198,58 @@ class TaskService:
     _creation_lock = threading.Lock()
     _running_tasks: Dict[int, asyncio.subprocess.Process] = {}
     _cancelled_tasks: set[int] = set()
+
+    # 全量更新步骤定义（断点续传支持）
+    # 优化后的6阶段流程
+    FULL_UPDATE_STEPS = [
+        "data_preparing",   # 阶段1: 数据准备（评估 CSV + 回灌 + 增量更新）
+        "build_pool",       # 阶段2: 量化初选
+        "filter_candidates",# 阶段3: 候选筛选
+        "score_analysis",   # 阶段4: 评分分析
+        "export_results",   # 阶段5: 结果导出
+        "completed",        # 阶段6: 完成
+    ]
+
     STAGE_INFO = {
+        # === 新的6阶段流程（优化后） ===
         "queued": {"label": "排队中", "index": 0, "total": 6, "percent": 0},
         "starting": {"label": "启动中", "index": 0, "total": 6, "percent": 0},
         "preparing": {"label": "准备中", "index": 0, "total": 6, "percent": 2},
-        "fetch_data": {"label": "抓取原始数据", "index": 1, "total": 6, "percent": 10},
-        "build_pool": {"label": "量化初选", "index": 2, "total": 6, "percent": 35},
-        "build_candidates": {"label": "导出候选图表", "index": 3, "total": 6, "percent": 55},
-        "pre_filter": {"label": "生成评分结果", "index": 4, "total": 6, "percent": 72},
-        "score_review": {"label": "导出 PASS 图表", "index": 5, "total": 6, "percent": 88},
-        "finalize": {"label": "输出推荐结果", "index": 6, "total": 6, "percent": 96},
+
+        # 阶段1: 数据准备（15%）
+        "data_preparing": {"label": "数据准备", "detail": "评估 CSV + 回灌数据库 + 增量更新", "index": 1, "total": 6, "percent": 15},
+        "fetch_data": {"label": "数据准备", "detail": "增量/全量抓取数据", "index": 1, "total": 6, "percent": 15},  # 兼容旧名称
+        "csv_import": {"label": "数据准备", "detail": "CSV 回灌中", "index": 1, "total": 6, "percent": 8},   # CSV 回灌子步骤
+
+        # 阶段2: 量化初选（35%）
+        "build_pool": {"label": "量化初选", "detail": "筛选流动性股票", "index": 2, "total": 6, "percent": 35},
+
+        # 阶段3: 候选筛选（55%）
+        "filter_candidates": {"label": "候选筛选", "detail": "导出候选图表", "index": 3, "total": 6, "percent": 55},
+        "build_candidates": {"label": "候选筛选", "detail": "导出候选图表", "index": 3, "total": 6, "percent": 55},  # 兼容旧名称
+
+        # 阶段4: 评分分析（75%）
+        "score_analysis": {"label": "评分分析", "detail": "生成评分结果", "index": 4, "total": 6, "percent": 75},
+        "pre_filter": {"label": "评分分析", "detail": "生成评分结果", "index": 4, "total": 6, "percent": 75},  # 兼容旧名称
+
+        # 阶段5: 结果导出（90%）
+        "export_results": {"label": "结果导出", "detail": "导出 PASS 图表", "index": 5, "total": 6, "percent": 90},
+        "score_review": {"label": "结果导出", "detail": "导出 PASS 图表", "index": 5, "total": 6, "percent": 90},  # 兼容旧名称
+
+        # 阶段6: 完成（100%）
+        "finalize": {"label": "输出推荐", "detail": "生成最终结果", "index": 6, "total": 6, "percent": 100},
+        "completed": {"label": "已完成", "detail": "全量初始化完成", "index": 6, "total": 6, "percent": 100},
+        "failed": {"label": "执行失败", "index": 6, "total": 6, "percent": 100},
+        "cancelled": {"label": "已取消", "index": 6, "total": 6, "percent": 100},
+
+        # === 其他任务类型 ===
         "analysis": {"label": "单股分析", "index": 1, "total": 1, "percent": 50},
         "generating_history": {"label": "生成历史数据", "index": 1, "total": 2, "percent": 50},
         "generating_history_detail": {"label": "生成诊断详情", "index": 1, "total": 2, "percent": 50},
-        # 阶段6：历史回溯阶段
+
+        # === 历史回溯阶段 ===
         "backfill_initializing": {"label": "初始化历史回溯", "index": 1, "total": 2, "percent": 10},
         "backfill_processing": {"label": "回溯处理中", "index": 2, "total": 2, "percent": 50},
-        "completed": {"label": "已完成", "index": 6, "total": 6, "percent": 100},
-        "failed": {"label": "执行失败", "index": 6, "total": 6, "percent": 100},
-        "cancelled": {"label": "已取消", "index": 6, "total": 6, "percent": 100},
     }
 
     def __init__(self, db: Session, manager=None):
@@ -406,6 +458,7 @@ class TaskService:
         params_json = task.params_json or {}
         # 使用 task.progress 的初始值，避免在异常处理时访问可能过期的 task 对象
         initial_progress = 0
+        task_started_monotonic = time.perf_counter()
 
         task.status = "running"
         task.started_at = utc_now()
@@ -444,6 +497,7 @@ class TaskService:
             task.task_stage = "completed"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("completed", progress=100, message="任务执行完成")
+            task.result_json = self._append_runtime_metrics(task.result_json, task_started_monotonic)
             db.commit()
             self._record_task_log(task, "任务执行完成", "success", immediate=True, task_id=saved_task_id, task_stage="completed")
             await self._publish_ops_task_event(task, "task_completed")
@@ -453,6 +507,7 @@ class TaskService:
             task.task_stage = "cancelled"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("cancelled", progress=task.progress, message="任务已取消")
+            task.result_json = self._append_runtime_metrics(task.result_json, task_started_monotonic)
             db.commit()
             self._record_task_log(task, "任务已取消", "warning", immediate=True, task_id=saved_task_id, task_stage="cancelled")
             await self._publish_ops_task_event(task, "task_cancelled")
@@ -467,6 +522,7 @@ class TaskService:
             task.task_stage = "failed"
             task.completed_at = utc_now()
             task.progress_meta_json = self._build_stage_meta("failed", progress=current_progress, message=f"任务执行失败: {str(e)}")
+            task.result_json = self._append_runtime_metrics(task.result_json, task_started_monotonic)
             db.commit()
             self._record_task_log(task, f"任务执行失败: {str(e)}", "error", immediate=True, task_id=saved_task_id, task_stage="failed")
             await self._publish_ops_task_event(task, "task_failed")
@@ -483,13 +539,40 @@ class TaskService:
 
     async def _run_full_update(self, task: Any, db: Session):
         """运行全量更新"""
+        stage_started_at: dict[str, float] = {}
+        stage_durations: dict[str, float] = {}
+        last_marked_stage: Optional[str] = None  # 追踪上一个已标记的步骤
+
+        def mark_stage(stage_name: Optional[str]) -> None:
+            if not stage_name:
+                return
+            now = time.perf_counter()
+            previous_stage = task.task_stage
+            if previous_stage and previous_stage in stage_started_at:
+                elapsed = now - stage_started_at[previous_stage]
+                if math.isfinite(elapsed) and elapsed >= 0:
+                    stage_durations[previous_stage] = round(elapsed, 3)
+            stage_started_at[stage_name] = now
+
         params = task.params_json or {}
         reviewer = params.get("reviewer", "quant")
         skip_fetch = params.get("skip_fetch", False)
         start_from = params.get("start_from", 1)
+        reset_derived_state = bool(params.get("reset_derived_state", False))
         task.task_stage = "preparing"
         task.progress_meta_json = self._build_stage_meta("preparing", progress=2, message="正在准备全量初始化任务")
+        mark_stage("preparing")
         db.commit()
+
+        # 检查是否为恢复执行，初始化 steps_completed
+        if task.steps_completed is None:
+            task.steps_completed = {}
+
+        if reset_derived_state:
+            self._reset_full_update_state(db, task)
+            self._mark_step_completed(task, "resetting", db)
+            task.progress_meta_json = self._build_stage_meta("preparing", progress=3, message="已重置数据库状态，准备重新执行全量初始化")
+            db.commit()
 
         # 构建命令
         cmd = [
@@ -522,6 +605,16 @@ class TaskService:
             send_log,
         )
 
+        # 阶段到步骤名称的映射
+        stage_to_step = {
+            "fetch_data": "fetch_data",
+            "build_pool": "build_pool",
+            "build_candidates": "build_candidates",
+            "pre_filter": "pre_filter",
+            "score_review": "score_review",
+            "finalize": "finalize",
+        }
+
         while True:
             line = await process.stdout.readline()
             if not line:
@@ -538,8 +631,16 @@ class TaskService:
 
                 stage = self._parse_stage(line)
                 if stage and stage != task.task_stage:
+                    mark_stage(stage)
                     task.task_stage = stage
                     task.progress_meta_json = self._build_stage_meta(stage, progress=task.progress, message=line)
+
+                    # 标记步骤完成（断点续传支持）
+                    step_name = stage_to_step.get(stage)
+                    if step_name and step_name != last_marked_stage:
+                        self._mark_step_completed(task, step_name, db)
+                        last_marked_stage = step_name
+
                 # 解析并更新进度
                 progress = parse_progress(line)
                 if progress is not None:
@@ -549,13 +650,19 @@ class TaskService:
                     task.progress_meta_json = self._merge_progress_meta(task, progress_payload)
                     payload_stage = progress_payload.get("stage")
                     if payload_stage:
+                        if str(payload_stage) != task.task_stage:
+                            mark_stage(str(payload_stage))
                         task.task_stage = str(payload_stage)
+
+                        # 检查是否为 CSV 回灌完成
+                        if payload_stage == "fetch_data" and progress_payload.get("csv_imported_count"):
+                            self._mark_step_completed(task, "csv_import", db)
                 elif stage and (not task.progress_meta_json or task.progress_meta_json.get("stage") != stage):
                     task.progress_meta_json = self._build_stage_meta(stage, progress=task.progress, message=line)
 
                 # 结构化进度行只更新状态，不写日志表（避免膨胀）
                 # 非进度行使用缓冲区批量写入
-                if not is_progress_line(line):
+                if not is_progress_line(line) and not _should_skip_task_log_line(line):
                     self._record_task_log(task, line, log_type, stage=stage)
 
                 # 每处理100行输出提交一次状态，避免频繁写库
@@ -594,7 +701,40 @@ class TaskService:
             "stock_basic_synced": synced_count,
             "candidate_synced": candidate_synced,
             "analysis_synced": analysis_synced,
+            "stage_metrics": {
+                "durations_seconds": stage_durations,
+            },
         }
+
+    def _reset_full_update_state(self, db: Session, task: Any) -> None:
+        """重置数据库中的全量初始化结果，但保留 CSV 原始文件供步骤 1 续跑。"""
+        from app.cache import cache
+        from app.models import (
+            AnalysisResult,
+            Candidate,
+            DailyB1Check,
+            DailyB1CheckDetail,
+            StockAnalysis,
+            StockDaily,
+            TomorrowStarRun,
+        )
+
+        task.task_stage = "resetting"
+        task.progress = 1
+        self._record_task_log(task, "开始重置数据库中的 K 线、候选、分析与统计结果（保留 CSV 原始文件）", "warning", immediate=True, stage="resetting")
+
+        db.query(AnalysisResult).delete(synchronize_session=False)
+        db.query(Candidate).delete(synchronize_session=False)
+        db.query(TomorrowStarRun).delete(synchronize_session=False)
+        db.query(DailyB1CheckDetail).delete(synchronize_session=False)
+        db.query(DailyB1Check).delete(synchronize_session=False)
+        db.query(StockAnalysis).delete(synchronize_session=False)
+        db.query(StockDaily).delete(synchronize_session=False)
+        db.commit()
+
+        cache.delete("data_status")
+        cache.delete("running_tasks")
+        self._record_task_log(task, "数据库派生状态已重置，后续将根据 CSV 与最新交易日重新评估抓取进度", "info", immediate=True, stage="resetting")
 
     async def _run_single_analysis(self, task: Any, db: Session, params_json: dict = None):
         """运行单股分析"""
@@ -1161,6 +1301,133 @@ class TaskService:
             stage=used_stage,
             immediate=immediate,
         )
+
+    @staticmethod
+    def _append_runtime_metrics(result_json: Optional[dict[str, Any]], started_at_monotonic: float) -> dict[str, Any]:
+        payload = dict(result_json or {})
+        elapsed = time.perf_counter() - started_at_monotonic
+        if math.isfinite(elapsed) and elapsed >= 0:
+            payload["runtime_metrics"] = {
+                "total_seconds": round(elapsed, 3),
+            }
+        return payload
+
+    def _mark_step_completed(self, task: Any, step_name: str, db: Session) -> None:
+        """标记步骤为已完成。
+
+        Args:
+            task: 任务对象
+            step_name: 步骤名称
+            db: 数据库会话
+        """
+        if task.steps_completed is None:
+            task.steps_completed = {}
+        task.steps_completed[step_name] = True
+        db.commit()
+        self._record_task_log(task, f"步骤 '{step_name}' 已标记为完成", "info", stage=step_name, immediate=True)
+
+    def _get_next_step(self, task: Any) -> Optional[str]:
+        """获取下一个需要执行的步骤。
+
+        Args:
+            task: 任务对象
+
+        Returns:
+            下一个步骤名称，如果所有步骤已完成则返回 None
+        """
+        steps_completed = task.steps_completed or {}
+        for step in self.FULL_UPDATE_STEPS:
+            if not steps_completed.get(step, False):
+                return step
+        return None
+
+    def _get_step_start_from(self, task: Any) -> int:
+        """根据已完成的步骤计算 start_from 参数。
+
+        Args:
+            task: 任务对象
+
+        Returns:
+            start_from 步骤编号 (1-6)
+        """
+        steps_completed = task.steps_completed or {}
+
+        # 步骤映射到 run_all.py 的 start_from 参数
+        step_to_start_from = {
+            "resetting": 1,
+            "fetch_data": 1,
+            "csv_import": 1,
+            "build_pool": 2,
+            "build_candidates": 3,
+            "pre_filter": 4,
+            "score_review": 5,
+            "finalize": 6,
+        }
+
+        # 找到第一个未完成的步骤
+        for step in self.FULL_UPDATE_STEPS:
+            if not steps_completed.get(step, False):
+                return step_to_start_from.get(step, 1)
+
+        # 所有步骤都已完成，返回 6
+        return 6
+
+    def can_resume_task(self, task: Any) -> bool:
+        """检查任务是否可以恢复执行。
+
+        Args:
+            task: 任务对象
+
+        Returns:
+            是否可以恢复
+        """
+        if task.status not in ("failed", "cancelled"):
+            return False
+        if task.task_type not in self.FULL_TASK_TYPES:
+            return False
+        # 检查是否有未完成的步骤
+        steps_completed = task.steps_completed or {}
+        for step in self.FULL_UPDATE_STEPS:
+            if not steps_completed.get(step, False):
+                return True
+        return False
+
+    def get_resume_info(self, task: Any) -> dict[str, Any]:
+        """获取任务恢复信息。
+
+        Args:
+            task: 任务对象
+
+        Returns:
+            恢复信息字典
+        """
+        steps_completed = task.steps_completed or {}
+        completed_steps = [step for step in self.FULL_UPDATE_STEPS if steps_completed.get(step, False)]
+        next_step = self._get_next_step(task)
+        start_from = self._get_step_start_from(task)
+
+        step_labels = {
+            "resetting": "重置数据库",
+            "fetch_data": "拉取 K 线数据",
+            "csv_import": "CSV 回灌",
+            "build_pool": "量化初选",
+            "build_candidates": "导出候选图表",
+            "pre_filter": "生成评分结果",
+            "score_review": "导出 PASS 图表",
+            "finalize": "输出推荐结果",
+        }
+
+        return {
+            "task_id": task.id,
+            "can_resume": self.can_resume_task(task),
+            "completed_steps": completed_steps,
+            "completed_step_labels": [step_labels.get(s, s) for s in completed_steps],
+            "next_step": next_step,
+            "next_step_label": step_labels.get(next_step, next_step) if next_step else None,
+            "start_from": start_from,
+            "total_steps": len(self.FULL_UPDATE_STEPS),
+            "progress_percent": int(len(completed_steps) / len(self.FULL_UPDATE_STEPS) * 100) if self.FULL_UPDATE_STEPS else 0,
+        }
 
 
 def flush_task_log_buffer() -> None:

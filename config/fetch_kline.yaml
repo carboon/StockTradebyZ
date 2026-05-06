@@ -20,4 +20,5 @@ exclude_boards: []
 out: "./data/raw"
 
 # 并发下载线程数
-workers: 8
+# 生产机若为 2U4G，建议从 4 起步；先观察 PostgreSQL CPU/IO 再决定是否提高
+workers: 4

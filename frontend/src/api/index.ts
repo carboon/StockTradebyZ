@@ -49,6 +49,18 @@ type RequestOptions = {
   timeoutMs?: number
 }
 
+export class AppRequestError extends Error {
+  status?: number
+  code?: string
+
+  constructor(message: string, options?: { status?: number; code?: string }) {
+    super(message)
+    this.name = 'AppRequestError'
+    this.status = options?.status
+    this.code = options?.code
+  }
+}
+
 const TIMEOUTS = {
   short: 10000,
   standard: 20000,
@@ -95,7 +107,7 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
     if (error.code === 'ECONNABORTED') {
-      return Promise.reject(new Error('请求超时。若你刚启动了初始化或分析任务，它可能仍在后台运行，请前往任务中心继续查看。'))
+      return Promise.reject(new AppRequestError('请求超时。若你刚启动了初始化或分析任务，它可能仍在后台运行，请前往任务中心继续查看。', { code: error.code }))
     }
     const requestUrl = error.config?.url || ''
     const isLoginRequest = requestUrl.includes('/v1/auth/login')
@@ -103,7 +115,7 @@ api.interceptors.response.use(
     // 登录接口的 401 应保留后端原始文案，避免误报为“登录已过期”
     if (error.response?.status === 401 && isLoginRequest) {
       const message = error.response.data?.detail || error.response.data?.message || '用户名或密码错误'
-      return Promise.reject(new Error(message))
+      return Promise.reject(new AppRequestError(message, { status: 401 }))
     }
 
     // 401 未授权：清除 token 并跳转登录页
@@ -119,10 +131,10 @@ api.interceptors.response.use(
       if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
         window.location.href = '/login'
       }
-      return Promise.reject(new Error('登录已过期，请重新登录'))
+      return Promise.reject(new AppRequestError('登录已过期，请重新登录', { status: 401 }))
     }
     const message = error.response?.data?.detail || error.response?.data?.message || error.message || '请求失败'
-    return Promise.reject(new Error(message))
+    return Promise.reject(new AppRequestError(message, { status: error.response?.status, code: error.code }))
   }
 )
 
@@ -282,8 +294,12 @@ export const apiTasks = {
   getStatus: () => api.get<never, DataStatus>('/v1/tasks/status', { timeout: TIMEOUTS.short }),
 
   // 启动更新
-  startUpdate: (reviewer: string = 'quant', skipFetch: boolean = false, startFrom: number = 1) =>
-    api.post<{ reviewer: string; skip_fetch: boolean; start_from: number }, TaskResponse>('/v1/tasks/start', { reviewer, skip_fetch: skipFetch, start_from: startFrom }, { timeout: TIMEOUTS.short }),
+  startUpdate: (reviewer: string = 'quant', skipFetch: boolean = false, startFrom: number = 1, resetDerivedState: boolean = false) =>
+    api.post<{ reviewer: string; skip_fetch: boolean; start_from: number; reset_derived_state: boolean }, TaskResponse>(
+      '/v1/tasks/start',
+      { reviewer, skip_fetch: skipFetch, start_from: startFrom, reset_derived_state: resetDerivedState },
+      { timeout: TIMEOUTS.short },
+    ),
 
   // 启动增量更新
   startIncrementalUpdate: (endDate?: string) =>

@@ -258,6 +258,7 @@ class Task(Base):
     result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    steps_completed: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=dict)  # 步骤完成状态: {"resetting": true, "fetch_data": false, ...}
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

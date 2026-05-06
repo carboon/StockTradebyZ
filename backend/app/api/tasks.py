@@ -5,7 +5,9 @@ Tasks API
 """
 import os
 import platform
+import csv
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_admin_user, require_user
 from app.api.rate_limit import status_api_rate_limit
 from app.cache import cache
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.database import get_db
 from app.models import Config, Task, TaskLog
 from app.services.task_service import TaskService
@@ -24,6 +26,7 @@ from app.services.tushare_service import TushareService
 from app.schemas import (
     AdminSummaryCard,
     AdminSummaryDataGap,
+    AdminPipelineStageSummary,
     AdminSummaryResponse,
     AdminSummaryTaskInfo,
     DataStatusResponse,
@@ -50,6 +53,149 @@ STATUS_CACHE_TTL = 30      # 状态缓存 30 秒
 RUNNING_CACHE_TTL = 10     # 运行中任务缓存 10 秒
 OVERVIEW_CACHE_TTL_SECONDS = 20
 _overview_cache: dict = {"data": None, "expires_at": 0.0}
+
+# CSV 进度评估缓存（优化性能）
+_csv_progress_cache: dict = {"data": None, "expires_at": 0.0}
+_CSV_PROGRESS_CACHE_TTL = 60  # CSV 进度缓存 60 秒
+
+
+def _load_expected_fetch_codes() -> set[str]:
+    import yaml
+
+    cfg_path = PROJECT_ROOT / "config" / "fetch_kline.yaml"
+    if not cfg_path.exists():
+        return set()
+
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    stocklist_path = Path(cfg.get("stocklist", "./pipeline/stocklist.csv"))
+    if not stocklist_path.is_absolute():
+        stocklist_path = PROJECT_ROOT / stocklist_path
+    if not stocklist_path.exists():
+        return set()
+
+    exclude_boards = {str(x).lower() for x in (cfg.get("exclude_boards") or [])}
+    codes: set[str] = set()
+    with open(stocklist_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            symbol = str(row.get("symbol", "")).zfill(6)
+            ts_code = str(row.get("ts_code", "")).upper()
+            if not symbol or symbol == "000000":
+                continue
+            board = "main"
+            if ts_code.endswith(".BJ") or symbol.startswith(("4", "8")):
+                board = "bj"
+            elif ts_code.endswith(".SZ") and symbol.startswith(("300", "301")):
+                board = "gem"
+            elif ts_code.endswith(".SH") and symbol.startswith("688"):
+                board = "star"
+            if board in exclude_boards:
+                continue
+            codes.add(symbol)
+    return codes
+
+
+def _get_latest_date_from_csv(csv_path: Path) -> str | None:
+    try:
+        with open(csv_path, encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return None
+        value = str(rows[-1].get("date", "")).strip()
+        if len(value) >= 10:
+            value = value[:10]
+        return value or None
+    except Exception:
+        return None
+
+
+def _assess_raw_csv_progress(latest_trade_date: str | None) -> dict[str, int | str | None]:
+    """评估 CSV 文件进度（带缓存优化）"""
+    import time
+
+    # 检查缓存
+    now = time.time()
+    if _csv_progress_cache["data"] is not None and now < _csv_progress_cache["expires_at"]:
+        return _csv_progress_cache["data"]
+
+    raw_dir = settings.raw_data_dir
+    expected_codes = _load_expected_fetch_codes()
+    ready = 0
+    missing = 0
+    stale = 0
+    invalid = 0
+    latest_local_date: str | None = None
+
+    # 采样检查优化：只检查前 100 个文件来快速评估状态
+    # 这样可以在大量文件时大幅提高响应速度
+    sample_size = min(100, len(expected_codes))
+    sampled_codes = list(expected_codes)[:sample_size]
+    sample_missing = 0
+    sample_ready = 0
+
+    for code in sampled_codes:
+        csv_path = raw_dir / f"{code}.csv"
+        if not csv_path.exists():
+            sample_missing += 1
+            continue
+        csv_latest = _get_latest_date_from_csv(csv_path)
+        if not csv_latest:
+            invalid += 1
+            continue
+        if latest_local_date is None or csv_latest > latest_local_date:
+            latest_local_date = csv_latest
+        if latest_trade_date and csv_latest < latest_trade_date:
+            stale += 1
+            continue
+        sample_ready += 1
+
+    # 基于采样结果推算整体状态
+    if len(expected_codes) > sample_size:
+        ratio = len(expected_codes) / sample_size
+        missing = int(sample_missing * ratio)
+        ready = int(sample_ready * ratio)
+        # stale 和 invalid 保持采样值，避免过度放大
+    else:
+        # 完整检查
+        for code in expected_codes:
+            csv_path = raw_dir / f"{code}.csv"
+            if not csv_path.exists():
+                missing += 1
+                continue
+            csv_latest = _get_latest_date_from_csv(csv_path)
+            if not csv_latest:
+                invalid += 1
+                continue
+            if latest_local_date is None or csv_latest > latest_local_date:
+                latest_local_date = csv_latest
+            if latest_trade_date and csv_latest < latest_trade_date:
+                stale += 1
+                continue
+            ready += 1
+
+    result = {
+        "expected_total": len(expected_codes),
+        "ready_count": ready,
+        "missing_count": missing,
+        "stale_count": stale,
+        "invalid_count": invalid,
+        "latest_local_date": latest_local_date,
+    }
+
+    # 更新缓存
+    _csv_progress_cache["data"] = result
+    _csv_progress_cache["expires_at"] = now + _CSV_PROGRESS_CACHE_TTL
+
+    return result
+
+
+def _raise_initialization_in_progress(task: Task) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail=f"正在初始化，请等待（任务 #{task.id}）",
+    )
 
 
 def _cleanup_stale_active_tasks(db: Session) -> set[int]:
@@ -121,6 +267,7 @@ def _resolve_full_update_params(request: UpdateStartRequest, service: TushareSer
         "reviewer": request.reviewer,
         "skip_fetch": request.skip_fetch,
         "start_from": request.start_from,
+        "reset_derived_state": request.reset_derived_state,
     }
     if request.skip_fetch or request.start_from > 1:
         return params
@@ -134,7 +281,7 @@ def _resolve_full_update_params(request: UpdateStartRequest, service: TushareSer
     if not isinstance(raw_status, dict):
         return params
 
-    if raw_status.get("exists") and raw_status.get("is_latest") is True:
+    if raw_status.get("exists") and raw_status.get("is_latest_complete") is True:
         params["skip_fetch"] = True
         params["start_from"] = 2
 
@@ -240,10 +387,7 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
 
     existing_task = task_service.get_active_full_task()
     if existing_task:
-        return TaskResponse(
-            task=TaskItem.model_validate(existing_task, from_attributes=True),
-            ws_url=f"/ws/tasks/{existing_task.id}",
-        )
+        _raise_initialization_in_progress(existing_task)
 
     incremental_state = MarketService.get_update_state()
     if incremental_state.get("running"):
@@ -291,12 +435,7 @@ async def start_incremental_update(
     # 检查是否有全量任务在运行
     active_full_task = task_service.get_active_full_task()
     if active_full_task:
-        return {
-            "success": False,
-            "message": f"当前有全量初始化任务 #{active_full_task.id} 正在运行，请稍后再执行增量更新。",
-            "running": False,
-            "blocking_task_id": active_full_task.id,
-        }
+        _raise_initialization_in_progress(active_full_task)
 
     # 检查是否已有更新在运行
     update_state = MarketService.get_update_state()
@@ -448,6 +587,7 @@ async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_
 
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
+    raw_csv_progress = _assess_raw_csv_progress(data_status.get("raw_data", {}).get("latest_trade_date"))
     data_ready = all(bool(data_status[key].get("exists")) for key in ["raw_data", "candidates", "analysis"])
     failure_resolved = _is_failure_resolved(latest_failed, latest_success, data_ready=data_ready)
 
@@ -770,6 +910,91 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db), admin=Depends
         return {"status": "error", "message": "任务不存在或无法取消"}
 
 
+@router.get("/{task_id}/resume-info")
+async def get_task_resume_info(
+    task_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_user)
+) -> dict:
+    """获取任务恢复信息（断点续传）
+
+    返回任务的已完成步骤和可恢复的步骤信息。
+    """
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    task_service = TaskService(db)
+    resume_info = task_service.get_resume_info(task)
+
+    return resume_info
+
+
+@router.post("/{task_id}/resume")
+async def resume_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> TaskResponse:
+    """从失败点恢复任务执行（断点续传）
+
+    创建一个新的任务，从原任务失败的步骤继续执行。
+    """
+    from app.main import manager
+
+    # 获取原任务
+    original_task = db.query(Task).filter(Task.id == task_id).first()
+    if not original_task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if original_task.task_type not in TaskService.FULL_TASK_TYPES:
+        raise HTTPException(status_code=400, detail="只有全量更新任务支持断点续传")
+
+    task_service = TaskService(db, manager=manager)
+
+    # 检查是否可以恢复
+    if not task_service.can_resume_task(original_task):
+        raise HTTPException(
+            status_code=400,
+            detail=f"任务状态为 {original_task.status}，不支持恢复。只能恢复失败或已取消的全量更新任务。"
+        )
+
+    # 检查是否有活跃的全量任务
+    active_task = task_service.get_active_full_task()
+    if active_task:
+        _raise_initialization_in_progress(active_task)
+
+    # 获取恢复信息
+    resume_info = task_service.get_resume_info(original_task)
+
+    # 准备新任务参数
+    params = dict(original_task.params_json or {})
+    params["start_from"] = resume_info["start_from"]
+    params["skip_fetch"] = resume_info["start_from"] > 1
+    params["resume_from"] = resume_info["next_step"]
+    params["resumed_from_task_id"] = task_id
+    params["trigger_source"] = "manual_resume"
+
+    # 创建新任务
+    result = await task_service.create_task(original_task.task_type, params)
+
+    new_task = db.query(Task).filter(Task.id == result["task_id"]).first()
+
+    # 记录恢复日志
+    db.add(TaskLog(
+        task_id=new_task.id,
+        level="info",
+        stage="preparing",
+        message=f"从任务 #{task_id} 恢复执行，已步骤: {', '.join(resume_info['completed_step_labels'])}"
+    ))
+    db.commit()
+
+    return TaskResponse(
+        task=TaskItem.model_validate(new_task, from_attributes=True),
+        ws_url=result["ws_url"],
+    )
+
+
 @router.delete("/clear")
 async def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """清空历史任务"""
@@ -859,10 +1084,7 @@ async def fill_kline_gap(
     task_service = TaskService(db, manager=manager)
     active_full_task = task_service.get_active_full_task()
     if active_full_task:
-        return {
-            "success": False,
-            "message": f"当前有全量初始化任务 #{active_full_task.id} 正在运行，请稍后再执行增量更新。",
-        }
+        _raise_initialization_in_progress(active_full_task)
 
     # 执行补齐
     result = service.fill_kline_data(target_date=target_date)
@@ -898,6 +1120,10 @@ async def fill_tomorrow_star_gap(
     from app.services.incremental_service import get_incremental_fill_service
 
     service = get_incremental_fill_service()
+    task_service = TaskService(db)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
 
     # 执行补齐
     result = service.fill_tomorrow_star_results(
@@ -937,6 +1163,10 @@ async def fill_top5_diagnosis_gap(
     from app.services.incremental_service import get_incremental_fill_service
 
     service = get_incremental_fill_service()
+    task_service = TaskService(db)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
 
     # 执行补齐
     result = service.fill_top5_diagnosis_and_history(
@@ -984,10 +1214,7 @@ async def fill_all_gaps(
     task_service = TaskService(db, manager=manager)
     active_full_task = task_service.get_active_full_task()
     if active_full_task:
-        return {
-            "success": False,
-            "message": f"当前有全量初始化任务 #{active_full_task.id} 正在运行，请稍后再执行增量更新。",
-        }
+        _raise_initialization_in_progress(active_full_task)
 
     results = {}
 
@@ -1054,7 +1281,9 @@ async def get_admin_summary(
 
     # 1. 获取最新交易日
     latest_trade_date = data_status.get("raw_data", {}).get("latest_trade_date")
+    calendar_latest_trade_date = data_status.get("raw_data", {}).get("calendar_latest_trade_date")
     latest_db_date = data_status.get("raw_data", {}).get("latest_date")
+    raw_csv_progress = _assess_raw_csv_progress(latest_trade_date)
 
     # 2. 获取最新候选日期
     latest_candidate_result = db.execute(
@@ -1107,6 +1336,8 @@ async def get_admin_summary(
             stage_label=meta.get("stage_label") or task.task_stage,
             progress=task.progress,
             summary=task.summary,
+            task_stage=task.task_stage,
+            progress_meta_json=meta,
         )
 
     # 6. 最近任务结果
@@ -1136,6 +1367,65 @@ async def get_admin_summary(
         data_status.get("analysis", {}).get("exists"),
     ])
 
+    latest_day_stock_count = int(data_status.get("raw_data", {}).get("latest_date_stock_count") or 0)
+    expected_stock_count = int(data_status.get("raw_data", {}).get("expected_stock_count") or 0)
+    raw_is_latest = bool(data_status.get("raw_data", {}).get("is_latest"))
+    raw_is_latest_complete = bool(data_status.get("raw_data", {}).get("is_latest_complete"))
+
+    db_synced = bool(
+        latest_db_date
+        and latest_candidate_date
+        and latest_analysis_date
+        and latest_db_date == latest_candidate_date == latest_analysis_date
+    )
+    stats_ready = bool(
+        db_synced
+        and data_status.get("candidates", {}).get("exists")
+        and data_status.get("analysis", {}).get("exists")
+    )
+
+    pipeline_status = [
+        AdminPipelineStageSummary(
+            key="source_fetch",
+            label="Tushare 拉取",
+            status="success" if raw_is_latest_complete else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+            ready=raw_is_latest_complete,
+            value="已拉取完成" if raw_is_latest_complete else ("拉取未完成" if data_status.get("raw_data", {}).get("exists") else "待开始"),
+            meta=f"最新交易日: {latest_trade_date or '-'} | 数据最新日: {latest_db_date or '-'}",
+            detail=(
+                f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} | 缺失 {int(raw_csv_progress.get('missing_count') or 0):,} | 过期 {int(raw_csv_progress.get('stale_count') or 0):,} | 异常 {int(raw_csv_progress.get('invalid_count') or 0):,}"
+                if raw_csv_progress.get("expected_total")
+                else "尚未生成原始 K 线数据"
+            ),
+        ),
+        AdminPipelineStageSummary(
+            key="db_sync",
+            label="数据库同步",
+            status="success" if db_synced else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+            ready=db_synced,
+            value="已同步" if db_synced else "未同步完成",
+            meta=f"K线: {latest_db_date or '-'} | 候选: {latest_candidate_date or '-'} | 分析: {latest_analysis_date or '-'}",
+            detail=(
+                f"候选 {int(data_status.get('candidates', {}).get('count') or 0):,} 条，分析 {int(data_status.get('analysis', {}).get('count') or 0):,} 条"
+                if data_status.get("candidates", {}).get("exists") or data_status.get("analysis", {}).get("exists")
+                else "候选与分析结果尚未生成"
+            ),
+        ),
+        AdminPipelineStageSummary(
+            key="stats_compute",
+            label="结果计算",
+            status="success" if stats_ready else ("warning" if data_status.get("analysis", {}).get("exists") or data_status.get("candidates", {}).get("exists") else "info"),
+            ready=stats_ready,
+            value="已完成" if stats_ready else "未完成",
+            meta="候选清单 / 结果分析",
+            detail=(
+                f"最新统计日期 {latest_analysis_date or latest_candidate_date or '-'}"
+                if data_status.get("analysis", {}).get("exists") or data_status.get("candidates", {}).get("exists")
+                else "尚未生成可用统计结果"
+            ),
+        ),
+    ]
+
     # 8. 构建今日状态卡片
     raw_stock_count = data_status.get("raw_data", {}).get("stock_count", 0)
     raw_record_count = data_status.get("raw_data", {}).get("raw_record_count", 0)
@@ -1145,24 +1435,24 @@ async def get_admin_summary(
     today_status = [
         AdminSummaryCard(
             key="raw_data",
-            label="K线数据",
-            value=f"{raw_stock_count:,} 只" if raw_stock_count else "待生成",
-            status="success" if data_status.get("raw_data", {}).get("exists") else "warning",
-            meta=f"记录数: {raw_record_count:,} | 最新: {latest_db_date or '-'}",
+            label="Tushare 拉取",
+            value="已完成" if raw_is_latest_complete else ("进行中" if data_status.get("raw_data", {}).get("exists") else "待开始"),
+            status="success" if raw_is_latest_complete else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+            meta=f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} / {int(raw_csv_progress.get('expected_total') or 0):,} 只 | {raw_record_count:,} 条",
         ),
         AdminSummaryCard(
             key="candidates",
-            label="候选结果",
-            value=f"{candidate_count} 条" if candidate_count else "待生成",
-            status="success" if data_status.get("candidates", {}).get("exists") else "warning",
-            meta=f"最新: {latest_candidate_date or '-'}",
+            label="数据库同步",
+            value="已同步" if db_synced else "未同步完成",
+            status="success" if db_synced else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+            meta=f"K线 {latest_db_date or '-'} / 候选 {latest_candidate_date or '-'} / 分析 {latest_analysis_date or '-'}",
         ),
         AdminSummaryCard(
             key="analysis",
-            label="分析结果",
-            value=f"{analysis_count} 条" if analysis_count else "待生成",
-            status="success" if data_status.get("analysis", {}).get("exists") else "warning",
-            meta=f"最新: {latest_analysis_date or '-'}",
+            label="结果计算",
+            value="已完成" if stats_ready else "未完成",
+            status="success" if stats_ready else ("warning" if candidate_count or analysis_count else "info"),
+            meta=f"候选 {candidate_count:,} 条 / 分析 {analysis_count:,} 条",
         ),
         AdminSummaryCard(
             key="task",
@@ -1178,6 +1468,16 @@ async def get_admin_summary(
         "raw_data_exists": data_status.get("raw_data", {}).get("exists", False),
         "raw_data_count": raw_stock_count,
         "raw_data_latest": latest_db_date,
+        "raw_effective_latest_trade_date": latest_trade_date,
+        "raw_calendar_latest_trade_date": calendar_latest_trade_date,
+        "raw_ready_count": int(raw_csv_progress.get("ready_count") or 0),
+        "raw_missing_count": int(raw_csv_progress.get("missing_count") or 0),
+        "raw_invalid_count": int(raw_csv_progress.get("invalid_count") or 0),
+        "raw_expected_total": int(raw_csv_progress.get("expected_total") or 0),
+        # 停牌信息（从 check_data_status 获取）
+        "raw_suspended_count": int(data_status.get("raw_data", {}).get("suspended_count", 0)),
+        "raw_long_stale_count": int(data_status.get("raw_data", {}).get("long_stale_count", 0)),
+        "raw_active_expected_count": int(data_status.get("raw_data", {}).get("expected_stock_count", 0)),
         "candidates_exists": data_status.get("candidates", {}).get("exists", False),
         "candidates_count": candidate_count,
         "candidates_latest": latest_candidate_date,
@@ -1230,6 +1530,7 @@ async def get_admin_summary(
 
     return AdminSummaryResponse(
         today_status=today_status,
+        pipeline_status=pipeline_status,
         data_production=data_production,
         data_gap=data_gap,
         current_task=current_task_info,
@@ -1295,6 +1596,9 @@ async def initialize_history_backfill(
 
     # 创建后台任务
     task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "history_backfill_initialize",
         {
@@ -1307,9 +1611,9 @@ async def initialize_history_backfill(
     return {
         "task_id": result["task_id"],
         "code": code,
-        "status": "pending" if not result.get("existing") else "existing",
+        "status": "pending",
         "ws_url": result["ws_url"],
-        "message": f"历史回溯初始化任务已创建" if not result.get("existing") else "复用现有任务",
+        "message": "历史回溯初始化任务已创建",
     }
 
 
@@ -1336,6 +1640,9 @@ async def incremental_history_backfill(
 
     # 创建后台任务
     task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "history_backfill_incremental",
         {
@@ -1348,9 +1655,9 @@ async def incremental_history_backfill(
     return {
         "task_id": result["task_id"],
         "code": code,
-        "status": "pending" if not result.get("existing") else "existing",
+        "status": "pending",
         "ws_url": result["ws_url"],
-        "message": f"增量历史补齐任务已创建" if not result.get("existing") else "复用现有任务",
+        "message": "增量历史补齐任务已创建",
     }
 
 
@@ -1405,6 +1712,9 @@ async def batch_history_backfill(
 
     # 创建后台任务
     task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "history_backfill_batch",
         {
@@ -1418,7 +1728,7 @@ async def batch_history_backfill(
     return {
         "task_id": result["task_id"],
         "codes": code_list,
-        "status": "pending" if not result.get("existing") else "existing",
+        "status": "pending",
         "ws_url": result["ws_url"],
-        "message": f"批量历史回溯任务已创建 ({len(code_list)} 只股票)" if not result.get("existing") else "复用现有任务",
+        "message": f"批量历史回溯任务已创建 ({len(code_list)} 只股票)",
     }

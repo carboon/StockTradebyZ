@@ -38,7 +38,12 @@ export const useConfigStore = defineStore('config', () => {
     }
 
     const missing: string[] = []
-    if (!status.raw_data?.exists) missing.push('原始数据')
+    const rawCsvLikelyReady = Boolean(status.raw_data?.latest_trade_date)
+      && (Boolean(status.candidates?.exists) || Boolean(status.analysis?.exists))
+    if (!status.raw_data?.exists && !rawCsvLikelyReady) missing.push('原始数据')
+    if (!status.raw_data?.exists && rawCsvLikelyReady) {
+      return '候选结果和分析结果已生成，但数据库中的 K 线主表尚未同步完成。请前往任务中心查看“数据库同步”阶段状态。'
+    }
     if (!status.candidates?.exists) missing.push('候选结果')
     if (!status.analysis?.exists) missing.push('分析结果')
 

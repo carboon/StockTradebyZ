@@ -5,12 +5,13 @@ Tushare 数据服务
 """
 import os
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 import subprocess
 import sys
 import time
+from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
@@ -225,8 +226,6 @@ class TushareService:
             return None
 
         try:
-            from datetime import timedelta
-
             acquire_tushare_slot("trade_cal")
             today = datetime.now().strftime("%Y%m%d")
             start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
@@ -272,6 +271,106 @@ class TushareService:
         self._latest_data_ready_cache[cache_key] = (now, ready)
         return ready
 
+    def get_effective_latest_trade_date(self) -> Optional[str]:
+        """获取用于判断“是否过期”的有效最新交易日。
+
+        规则：
+        - 北京时间 17:00 前，不把当日直接视为应完成同步的目标日；
+        - 17:00 后，如果当天数据在 Tushare 已可读，则目标日为当天；
+        - 否则回退到上一个开市日。
+        """
+        latest_trade_date = self.get_latest_trade_date()
+        if not latest_trade_date:
+            return None
+
+        try:
+            bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            latest_dt = datetime.fromisoformat(latest_trade_date).date()
+
+            if latest_dt < bj_now.date():
+                return latest_trade_date
+
+            if bj_now.hour < 17:
+                acquire_tushare_slot("trade_cal")
+                start_date = (bj_now - timedelta(days=10)).strftime("%Y%m%d")
+                end_date = bj_now.strftime("%Y%m%d")
+                df = self.pro.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date)
+                if df is None or df.empty:
+                    return latest_trade_date
+                trade_days = df[df["is_open"] == 1].sort_values("cal_date", ascending=False)
+                previous_days = [
+                    f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}"
+                    for day in trade_days["cal_date"].tolist()
+                    if f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}" < latest_trade_date
+                ]
+                return previous_days[0] if previous_days else latest_trade_date
+
+            if self.is_trade_date_data_ready(latest_trade_date):
+                return latest_trade_date
+
+            acquire_tushare_slot("trade_cal")
+            start_date = (bj_now - timedelta(days=10)).strftime("%Y%m%d")
+            end_date = bj_now.strftime("%Y%m%d")
+            df = self.pro.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date)
+            if df is None or df.empty:
+                return latest_trade_date
+            trade_days = df[df["is_open"] == 1].sort_values("cal_date", ascending=False)
+            previous_days = [
+                f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}"
+                for day in trade_days["cal_date"].tolist()
+                if f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}" < latest_trade_date
+            ]
+            return previous_days[0] if previous_days else latest_trade_date
+        except Exception:
+            return latest_trade_date
+
+    def get_suspended_stocks(self, trade_date: str) -> set[str]:
+        """获取指定日期的停牌股票代码集合
+
+        Args:
+            trade_date: 交易日期，格式 YYYY-MM-DD
+
+        Returns:
+            停牌股票代码集合（6位代码）
+        """
+        if not self.token or not trade_date:
+            return set()
+
+        try:
+            from app.utils.stock_metadata import resolve_ts_code
+            import tushare as ts
+
+            # 转换日期格式 YYYY-MM-DD -> YYYYMMDD
+            date_yyyymmdd = trade_date.replace("-", "")
+
+            # 获取停牌信息
+            acquire_tushare_slot("suspend")
+            df = self.pro.suspend(
+                suspend_date=date_yyyymmdd,
+                fields="ts_code,suspend_date,suspend_reason"
+            )
+
+            if df is None or df.empty:
+                return set()
+
+            # 提取停牌股票的6位代码
+            # 注意：suspend 接口返回的所有记录都是停牌股票，不需要检查 is_suspended 字段
+            suspended_codes = set()
+            for _, row in df.iterrows():
+                ts_code = row.get("ts_code", "")
+                if ts_code:
+                    # 从 ts_code (如 000001.SZ) 提取6位代码
+                    code = ts_code.split(".")[0] if "." in ts_code else ts_code
+                    if len(code) == 6:
+                        suspended_codes.add(code)
+
+            return suspended_codes
+        except Exception as e:
+            # 获取停牌信息失败不影响主流程，返回空集
+            import logging
+            logging.getLogger("tushare_service").warning(f"获取停牌信息失败: {e}")
+            return set()
+
     def get_raw_data_path(self, code: str) -> Path:
         """获取原始数据文件路径（已弃用，保留用于兼容）"""
         from app.config import settings
@@ -309,7 +408,13 @@ class TushareService:
         from sqlalchemy import func, select, distinct
         import json
 
-        latest_trade_date = self.get_latest_trade_date()
+        latest_trade_date = self.get_effective_latest_trade_date()
+        calendar_latest_trade_date = self.get_latest_trade_date()
+
+        # 获取预期的股票总数（从 stocklist.csv）
+        from backend.app.api.tasks import _load_expected_fetch_codes
+        expected_codes = _load_expected_fetch_codes()
+        expected_total = len(expected_codes)
 
         status = {
             "raw_data": {
@@ -318,7 +423,11 @@ class TushareService:
                 "raw_record_count": 0,
                 "latest_date": None,
                 "latest_trade_date": latest_trade_date,
+                "calendar_latest_trade_date": calendar_latest_trade_date,
                 "is_latest": False,
+                "latest_date_stock_count": 0,
+                "expected_stock_count": expected_total,
+                "is_latest_complete": False,
             },
             "candidates": {"exists": False, "count": 0, "latest_date": None},
             "analysis": {"exists": False, "count": 0, "latest_date": None},
@@ -341,9 +450,11 @@ class TushareService:
                 if latest:
                     latest_local_date = latest[0].isoformat() if hasattr(latest[0], "isoformat") else str(latest[0])
                     status["raw_data"]["latest_date"] = latest_local_date
-                    status["raw_data"]["is_latest"] = bool(
-                        latest_trade_date and latest_local_date == latest_trade_date
-                    )
+                    latest_day_stock_count = db.execute(
+                        select(func.count(distinct(StockDaily.code)))
+                        .where(StockDaily.trade_date == latest[0])
+                    ).scalar() or 0
+                    status["raw_data"]["latest_date_stock_count"] = latest_day_stock_count
 
                 # 获取有数据的股票数
                 stocks_with_data = db.execute(
@@ -353,6 +464,74 @@ class TushareService:
                     status["raw_data"]["stock_count"] = stocks_with_data
                     status["kline"]["exists"] = True
                     status["kline"]["count"] = stocks_with_data
+
+                # 获取停牌股票信息（从预期总数中排除）
+                suspended_codes = self.get_suspended_stocks(latest_trade_date) if latest_trade_date else set()
+
+                # 额外获取"长期无数据"的股票（可能是长期停牌或退市）
+                # 如果某只股票的最新数据早于最新交易日，认为是停牌
+                from datetime import timedelta
+                long_stale_codes = set()
+
+                if latest_trade_date and latest:
+                    try:
+                        from datetime import datetime
+                        latest_dt = datetime.fromisoformat(latest_trade_date) if isinstance(latest_trade_date, str) else latest_trade_date
+                        # 使用最新交易日的前一天作为阈值，只要有数据的股票都应该在最新交易日有数据
+                        stale_threshold = latest_dt - timedelta(days=1)
+
+                        # 获取每只股票的最新交易日期
+                        subquery = db.execute(
+                            select(StockDaily.code, func.max(StockDaily.trade_date).label('max_date'))
+                            .group_by(StockDaily.code)
+                        ).all()
+
+                        for code, max_date in subquery:
+                            # 如果最新数据早于最新交易日的前一天，认为停牌
+                            if max_date < stale_threshold.date():
+                                long_stale_codes.add(code)
+                    except Exception as e:
+                        import logging
+                        logging.getLogger("tushare_service").warning(f"获取停牌股票失败: {e}")
+
+                # 合并停牌股票和长期停牌股票
+                all_excluded_codes = suspended_codes | long_stale_codes
+                active_expected_count = expected_total - len(all_excluded_codes)
+
+                # 判断是否为最新日期且数据完整
+                # is_latest: 数据库最新日期是否等于最新交易日
+                # is_latest_complete: 最新交易日数据是否齐全（排除停牌股票后达到100%）
+                is_latest_date = bool(
+                    latest_trade_date and status["raw_data"]["latest_date"] == latest_trade_date
+                )
+
+                # 调试日志
+                import logging
+                logger = logging.getLogger("tushare_service")
+                logger.info(
+                    f"数据完成度判断: expected_total={expected_total}, "
+                    f"suspended={len(suspended_codes)}, long_stale={len(long_stale_codes)}, "
+                    f"active_expected={active_expected_count}, "
+                    f"latest_date_stock_count={status['raw_data']['latest_date_stock_count']}, "
+                    f"is_latest_date={is_latest_date}, "
+                    f"latest_trade_date={latest_trade_date}, latest_db_date={status['raw_data']['latest_date']}"
+                )
+
+                # 排除停牌股票后，要求活跃股票100%完成
+                is_latest_complete = bool(
+                    is_latest_date
+                    and active_expected_count > 0
+                    and status["raw_data"]["latest_date_stock_count"] >= active_expected_count
+                )
+
+                logger.info(f"is_latest_complete={is_latest_complete}")
+
+                status["raw_data"]["is_latest"] = is_latest_date
+                status["raw_data"]["is_latest_complete"] = is_latest_complete
+                # 更新预期的活跃股票数（用于前端显示）
+                status["raw_data"]["expected_stock_count"] = active_expected_count
+                status["raw_data"]["suspended_count"] = len(suspended_codes)
+                status["raw_data"]["long_stale_count"] = len(long_stale_codes)
 
             # 检查候选数据
             candidate_count = db.execute(

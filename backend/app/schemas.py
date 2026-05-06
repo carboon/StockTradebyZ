@@ -446,6 +446,20 @@ class UpdateStartRequest(BaseModel):
     reviewer: str = "quant"
     skip_fetch: bool = False
     start_from: int = 1
+    reset_derived_state: bool = False
+
+
+class TaskResumeInfo(BaseModel):
+    """任务恢复信息（断点续传）"""
+    task_id: int
+    can_resume: bool
+    completed_steps: List[str]
+    completed_step_labels: List[str]
+    next_step: Optional[str] = None
+    next_step_label: Optional[str] = None
+    start_from: int
+    total_steps: int
+    progress_percent: int
 
 
 # ==================== K线数据 ====================
@@ -641,6 +655,8 @@ class AdminSummaryTaskInfo(BaseModel):
     stage_label: str | None
     progress: int
     summary: str | None
+    task_stage: str | None = None
+    progress_meta_json: Dict[str, Any] | None = None
 
 
 class AdminSummaryDataGap(BaseModel):
@@ -651,10 +667,23 @@ class AdminSummaryDataGap(BaseModel):
     latest_trade_date: str | None
 
 
+class AdminPipelineStageSummary(BaseModel):
+    """总览中的单阶段摘要"""
+    key: str
+    label: str
+    status: str = "info"
+    ready: bool
+    value: str
+    meta: str | None = None
+    detail: str | None = None
+
+
 class AdminSummaryResponse(BaseModel):
     """管理员总览摘要响应"""
     # 今日状态
     today_status: list[AdminSummaryCard]
+    # 三段式生产状态
+    pipeline_status: list[AdminPipelineStageSummary]
     # 数据生产状态
     data_production: dict[str, str | int | bool | None]
     # 数据缺口

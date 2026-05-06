@@ -401,6 +401,7 @@ import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
 import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, StockSearchItem, WatchlistItem } from '@/types'
 import { useConfigStore } from '@/store/config'
+import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 
 const route = useRoute()
 const router = useRouter()
@@ -626,7 +627,9 @@ async function searchStock(requestId: number) {
     matchedStock = await resolveDiagnosisSearchCode(keyword)
   } catch (error: any) {
     if (isRequestCanceled(error)) return
-    ElMessage.error('搜索股票失败: ' + error.message)
+    console.error('resolveDiagnosisSearchCode failed:', error)
+    const message = getUserSafeErrorMessage(error, '搜索股票失败')
+    ElMessage.error(isInitializationPendingError(error) ? message : `搜索股票失败: ${message}`)
     return
   }
 
@@ -812,7 +815,9 @@ async function triggerHistoryRefresh(silent: boolean = false) {
   } catch (error: any) {
     if (isRequestCanceled(error)) return
     if (!silent) {
-      ElMessage.error('刷新历史数据失败: ' + error.message)
+      console.error('triggerHistoryRefresh failed:', error)
+      const message = getUserSafeErrorMessage(error, '刷新历史数据失败')
+      ElMessage.error(isInitializationPendingError(error) ? message : `刷新历史数据失败: ${message}`)
     }
     refreshingHistory.value = false
   } finally {
@@ -935,7 +940,8 @@ async function loadKlineData() {
   } catch (error: any) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load kline:', error)
-    ElMessage.error('加载K线数据失败: ' + error.message)
+    const message = getUserSafeErrorMessage(error, '加载K线数据失败')
+    ElMessage.error(isInitializationPendingError(error) ? message : `加载K线数据失败: ${message}`)
   } finally {
     finishRequest('kline', signal)
   }
@@ -1184,7 +1190,9 @@ async function analyzeStock() {
     startAnalysisPolling()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
-    ElMessage.error('提交分析任务失败: ' + error.message)
+    console.error('analyzeStock failed:', error)
+    const message = getUserSafeErrorMessage(error, '提交分析任务失败')
+    ElMessage.error(isInitializationPendingError(error) ? message : `提交分析任务失败: ${message}`)
     analyzing.value = false
     finishRequest('analyze', signal)
   }
@@ -1258,7 +1266,7 @@ async function checkAnalysisResult() {
     } else if (data.status === 'failed') {
       // 任务失败
       stopAnalysisPolling()
-      ElMessage.error(data.error || '分析任务执行失败')
+      ElMessage.error(isInitializationPendingError({ message: data.error || '' }) ? '系统尚未完成初始化' : (data.error || '分析任务执行失败'))
       analyzing.value = false
     }
   } catch (error: any) {
@@ -1297,7 +1305,9 @@ async function addCurrentToWatchlist() {
     persistDiagnosisState()
     ElMessage.success(`已将 ${stockCode.value}${stockName.value ? ` ${stockName.value}` : ''} 纳入重点观察`)
   } catch (error: any) {
-    ElMessage.error('纳入重点观察失败: ' + error.message)
+    console.error('addCurrentToWatchlist failed:', error)
+    const message = getUserSafeErrorMessage(error, '纳入重点观察失败')
+    ElMessage.error(isInitializationPendingError(error) ? message : `纳入重点观察失败: ${message}`)
   } finally {
     addingToWatchlist.value = false
   }

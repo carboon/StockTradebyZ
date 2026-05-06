@@ -13,13 +13,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ROOT_ENV_FILE = PROJECT_ROOT / ".env"
 BACKEND_ENV_FILE = PROJECT_ROOT / "backend" / ".env"
+DEPLOY_ENV_FILE = PROJECT_ROOT / "deploy" / ".env"
 
 
 class Settings(BaseSettings):
     """应用配置"""
 
     model_config = SettingsConfigDict(
-        env_file=(str(ROOT_ENV_FILE), str(BACKEND_ENV_FILE)),
+        env_file=(str(DEPLOY_ENV_FILE), str(ROOT_ENV_FILE), str(BACKEND_ENV_FILE)),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -27,7 +28,8 @@ class Settings(BaseSettings):
 
     # 应用配置
     app_name: str = "StockTrader"
-    debug: bool = True
+    debug: bool = Field(default=False, alias="DEBUG")
+    sql_echo: bool = Field(default=False, alias="SQL_ECHO")
     host: str = Field(default="0.0.0.0", alias="BACKEND_HOST")
     port: int = Field(default=8000, alias="BACKEND_PORT")
 

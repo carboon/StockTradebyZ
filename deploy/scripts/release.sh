@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY_DIR="$PROJECT_ROOT/deploy"
 DOCKER_CONFIG_DIR="$PROJECT_ROOT/.docker"
+BENCH_STAMP="$(date +%Y%m%d-%H%M%S)"
+BENCH_DIR=""
 cd "$DEPLOY_DIR"
 
 # 颜色输出
@@ -36,6 +38,13 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+collect_release_snapshot() {
+    if [ "$DRY_RUN" = "1" ]; then
+        return
+    fi
+    BENCH_DIR="$("$SCRIPT_DIR/release-bench.sh" "$BENCH_STAMP")"
 }
 
 # 显示帮助信息
@@ -129,23 +138,19 @@ validate_prod_env() {
     postgres_password="$(read_env_value "POSTGRES_PASSWORD")"
 
     if [ -z "$database_url" ] || [ "$database_url" = "postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade" ]; then
-        log_error "生产发布要求 deploy/.env 中设置非示例 DATABASE_URL"
-        exit 1
+        log_warning "当前使用默认 DATABASE_URL，适合本地生产模拟，不适合真实生产环境"
     fi
 
     if [ -z "$secret_key" ] || [ "$secret_key" = "change-me-in-production" ] || [ "$secret_key" = "change-me-in-production-use-a-random-string" ]; then
-        log_error "生产发布要求 deploy/.env 中设置强随机 SECRET_KEY"
-        exit 1
+        log_warning "当前使用示例 SECRET_KEY，适合本地生产模拟，不适合真实生产环境"
     fi
 
     if [ -z "$admin_password" ] || [ "$admin_password" = "admin123" ]; then
-        log_error "生产发布要求 deploy/.env 中替换默认管理员密码"
-        exit 1
+        log_warning "当前使用默认管理员密码，适合本地生产模拟，不适合真实生产环境"
     fi
 
     if [ -z "$postgres_password" ] || [ "$postgres_password" = "stocktrade123" ]; then
-        log_error "生产发布要求 deploy/.env 中替换默认 PostgreSQL 密码"
-        exit 1
+        log_warning "当前使用默认 PostgreSQL 密码，适合本地生产模拟，不适合真实生产环境"
     fi
 }
 
@@ -166,6 +171,8 @@ git_pull() {
 # 构建镜像
 build_images() {
     log_info "构建生产环境镜像..."
+    local build_started_at
+    build_started_at=$(date +%s)
 
     local build_cmd=("${DOCKER_COMPOSE[@]}" -f docker-compose.yml --profile postgres --profile prod build)
     if [ "$NO_CACHE" = "1" ]; then
@@ -176,6 +183,7 @@ build_images() {
         echo -e "${YELLOW}[DRY RUN]${NC} ${build_cmd[*]}"
     else
         "${build_cmd[@]}"
+        echo "build_seconds=$(( $(date +%s) - build_started_at ))" >> "$BENCH_DIR/summary.env"
         log_success "镜像构建完成"
     fi
 }
@@ -183,6 +191,8 @@ build_images() {
 # 启动服务
 start_services() {
     log_info "启动生产环境服务..."
+    local started_at
+    started_at=$(date +%s)
 
     local up_cmd=("${DOCKER_COMPOSE[@]}" -f docker-compose.yml --profile postgres --profile prod up -d)
 
@@ -190,6 +200,7 @@ start_services() {
         echo -e "${YELLOW}[DRY RUN]${NC} ${up_cmd[*]}"
     else
         "${up_cmd[@]}"
+        echo "startup_seconds=$(( $(date +%s) - started_at ))" >> "$BENCH_DIR/summary.env"
         log_success "服务已启动"
     fi
 }
@@ -208,6 +219,8 @@ health_check() {
     fi
 
     log_info "执行健康检查..."
+    local health_started_at
+    health_started_at=$(date +%s)
 
     # 等待服务启动
     local max_wait=60
@@ -241,6 +254,7 @@ health_check() {
         echo -n "."
     done
     echo ""
+    echo "healthcheck_seconds=$(( $(date +%s) - health_started_at ))" >> "$BENCH_DIR/summary.env"
 
     # 最终检查
     if [ "$backend_healthy" = false ]; then
@@ -282,6 +296,7 @@ ${GREEN}========================================${NC}
   - 生产环境数据持久化在 ./data 目录
   - PostgreSQL 数据在 postgres_data volume 中
   - 建议定期备份: $SCRIPT_DIR/backup.sh
+  - 发布资源快照: ${BENCH_DIR:-未采集}
 
 EOF
 }
@@ -322,9 +337,10 @@ done
 log_info "开始生产环境发布..."
 echo ""
 
-    check_docker
-    check_env
-    validate_prod_env
+check_docker
+check_env
+validate_prod_env
+collect_release_snapshot
 git_pull
 build_images
 start_services

@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import asyncio
 import sys
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -22,6 +23,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 ROOT = Path(__file__).parent.parent.parent
 BACKEND = Path(__file__).parent.parent
 DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE = ROOT / "data" / ".disable_tomorrow_star_bootstrap"
+LOG_DIR = ROOT / "data" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+BACKEND_LOG_FILE = LOG_DIR / "backend.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(BACKEND_LOG_FILE, encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 # 确保 PYTHONPATH 包含项目根目录，使用平台相关分隔符兼容 Windows。
 pythonpath_entries = [
@@ -123,8 +137,8 @@ if not _TEST_MODE:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage FastAPI startup/shutdown lifecycle without deprecated hooks."""
-    print(f"🚀 StockTrader API v{app.version} 启动成功")
-    print(f"📍 API 文档: http://{settings.host}:{settings.port}/docs")
+    logger.info("StockTrader API v%s 启动成功", app.version)
+    logger.info("API 文档: http://%s:%s/docs", settings.host, settings.port)
 
     async def bootstrap_tomorrow_star_window() -> None:
         try:
@@ -133,13 +147,13 @@ async def lifespan(app: FastAPI):
                 180,
             )
         except Exception as exc:
-            print(f"⚠️ 明日之星 180 日窗口补齐启动失败: {exc}")
+            logger.exception("明日之星 180 日窗口补齐启动失败: %s", exc)
 
     if not _TEST_MODE and not DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE.exists():
         asyncio.create_task(bootstrap_tomorrow_star_window())
 
     yield
-    print("👋 StockTrader API 已关闭")
+    logger.info("StockTrader API 已关闭")
 
 # 创建 FastAPI 应用
 app = FastAPI(

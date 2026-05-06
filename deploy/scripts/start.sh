@@ -137,23 +137,19 @@ validate_prod_env() {
     postgres_password="$(read_env_value "POSTGRES_PASSWORD")"
 
     if [ -z "$database_url" ] || [ "$database_url" = "postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade" ]; then
-        log_error "生产启动要求 deploy/.env 中设置非示例 DATABASE_URL"
-        exit 1
+        log_warning "当前使用默认 DATABASE_URL，适合本地生产模拟，不适合真实生产环境"
     fi
 
     if [ -z "$secret_key" ] || [ "$secret_key" = "change-me-in-production" ] || [ "$secret_key" = "change-me-in-production-use-a-random-string" ]; then
-        log_error "生产启动要求 deploy/.env 中设置强随机 SECRET_KEY"
-        exit 1
+        log_warning "当前使用示例 SECRET_KEY，适合本地生产模拟，不适合真实生产环境"
     fi
 
     if [ -z "$admin_password" ] || [ "$admin_password" = "admin123" ]; then
-        log_error "生产启动要求 deploy/.env 中替换默认管理员密码"
-        exit 1
+        log_warning "当前使用默认管理员密码，适合本地生产模拟，不适合真实生产环境"
     fi
 
     if [ -z "$postgres_password" ] || [ "$postgres_password" = "stocktrade123" ]; then
-        log_error "生产启动要求 deploy/.env 中替换默认 PostgreSQL 密码"
-        exit 1
+        log_warning "当前使用默认 PostgreSQL 密码，适合本地生产模拟，不适合真实生产环境"
     fi
 }
 

@@ -29,6 +29,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -90,6 +91,31 @@ def _emit_stage_progress(stage: str, message: str, *, percent: int | None = None
         "percent": percent if percent is not None else info.get("percent", 0),
         "eta_seconds": eta_seconds,
         "message": message,
+    }
+    print(f"{PROGRESS_JSON_PREFIX} {json.dumps(payload, ensure_ascii=False)}", flush=True)
+
+
+def _emit_observability_progress(
+    *,
+    stage: str,
+    message: str,
+    percent: int,
+    ready_count: int | None = None,
+    incremental_count: int | None = None,
+    full_count: int | None = None,
+    csv_imported_count: int | None = None,
+    csv_failed_count: int | None = None,
+) -> None:
+    payload = {
+        "kind": "stage",
+        "stage": stage,
+        "percent": percent,
+        "message": message,
+        "ready_count": ready_count,
+        "incremental_count": incremental_count,
+        "full_count": full_count,
+        "csv_imported_count": csv_imported_count,
+        "csv_failed_count": csv_failed_count,
     }
     print(f"{PROGRESS_JSON_PREFIX} {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
@@ -267,11 +293,49 @@ def _sync_raw_csv_to_db_if_needed(raw_dir: Path, *, latest_trade_date: str | Non
         )
         print("=" * 60)
 
-        result = get_daily_data_service().batch_import_from_csv(raw_dir)
+        # 计算初始已完成数量（数据库中已有数据的股票数）
+        # 这些股票的 CSV 会被跳过或快速处理
+        initial_completed = db_stock_count if raw_status.get("exists") else 0
+
+        # 定义进度回调函数
+        def progress_cb(current, total, code, status):
+            percent = 5 + int((current / total) * 3)  # 5% -> 8%
+            # 计算 actual_total：实际需要处理的总数 = 总数 - 初始已完成
+            actual_total = max(0, total - initial_completed)
+            actual_current = max(0, current - initial_completed) if current > initial_completed else 0
+            # 确保 current 不超过 total
+            display_current = min(current, total)
+
+            _emit_observability_progress(
+                stage="fetch_data",
+                percent=percent,
+                message=f"CSV 回灌中: {current}/{total} ({code})",
+                current=display_current,
+                total=total,
+                initial_completed=initial_completed,
+                completed_in_run=actual_current,
+            )
+
+        result = get_daily_data_service().batch_import_csv_fast(raw_dir, progress_callback=progress_cb)
+        imported = int(result.get("imported") or 0)
+        failed = int(result.get("failed") or 0)
+        # 计算实际在本次运行中处理的数量
+        completed_in_run = imported
         if result.get("success"):
             print(
-                f"[INFO] CSV 回灌完成: imported={result.get('imported')} "
-                f"failed={result.get('failed')}"
+                f"[INFO] CSV 回灌完成: imported={imported} "
+                f"failed={failed}"
+            )
+            _emit_observability_progress(
+                stage="fetch_data",
+                percent=8,
+                message=f"CSV 回灌完成: imported={imported} failed={failed}",
+                current=csv_count,
+                total=csv_count,
+                initial_completed=initial_completed,
+                completed_in_run=completed_in_run,
+                csv_imported_count=imported,
+                csv_failed_count=failed,
             )
         else:
             print(f"[WARN] CSV 回灌未完成: {result.get('message')}")
@@ -300,8 +364,79 @@ def _get_local_latest_date(raw_dir: Path) -> str | None:
     return latest_date
 
 
+def _get_latest_date_from_csv(csv_path: Path) -> str | None:
+    """读取单个 CSV 中的最新交易日，格式返回 YYYYMMDD。"""
+    try:
+        df = pd.read_csv(csv_path)
+        if "date" in df.columns and not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            latest = df["date"].max()
+            return latest.strftime("%Y%m%d")
+    except Exception:
+        return None
+    return None
+
+
+def _assess_raw_data_progress(raw_dir: Path, expected_codes: set[str], latest_trade_date: str | None) -> dict[str, Any]:
+    """评估 raw CSV 的真实抓取进度。
+
+    关注三类问题：
+    - 文件缺失
+    - 文件存在但无有效日期
+    - 文件最新日期落后于最新交易日
+    """
+    if not raw_dir.exists():
+        return {
+            "expected_total": len(expected_codes),
+            "ready_codes": 0,
+            "missing_codes": sorted(expected_codes),
+            "stale_codes": [],
+            "invalid_codes": [],
+            "latest_local_date": None,
+            "is_complete": False,
+        }
+
+    ready_codes = 0
+    missing_codes: list[str] = []
+    stale_codes: list[str] = []
+    invalid_codes: list[str] = []
+    latest_local_date: str | None = None
+
+    for code in sorted(expected_codes):
+        csv_path = raw_dir / f"{code}.csv"
+        if not csv_path.exists():
+            missing_codes.append(code)
+            continue
+
+        csv_latest = _get_latest_date_from_csv(csv_path)
+        if not csv_latest:
+            invalid_codes.append(code)
+            continue
+
+        csv_latest_fmt = f"{csv_latest[:4]}-{csv_latest[4:6]}-{csv_latest[6:]}"
+        if latest_local_date is None or csv_latest_fmt > latest_local_date:
+            latest_local_date = csv_latest_fmt
+
+        if latest_trade_date and csv_latest_fmt < latest_trade_date:
+            stale_codes.append(code)
+            continue
+
+        ready_codes += 1
+
+    is_complete = not missing_codes and not stale_codes and not invalid_codes and ready_codes == len(expected_codes)
+    return {
+        "expected_total": len(expected_codes),
+        "ready_codes": ready_codes,
+        "missing_codes": missing_codes,
+        "stale_codes": stale_codes,
+        "invalid_codes": invalid_codes,
+        "latest_local_date": latest_local_date,
+        "is_complete": is_complete,
+    }
+
+
 def _get_latest_trade_date() -> str | None:
-    """读取最新交易日；失败时返回 None。"""
+    """读取用于过期判断的有效最新交易日；失败时返回 None。"""
     token = _load_env_var("TUSHARE_TOKEN")
     if not token:
         return None
@@ -321,7 +456,30 @@ def _get_latest_trade_date() -> str | None:
             return None
 
         latest = str(trade_days.iloc[0]["cal_date"])
-        return f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+        latest_trade_date = f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+        bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+        if latest_trade_date < bj_now.strftime("%Y-%m-%d"):
+            return latest_trade_date
+
+        if bj_now.hour < 17:
+            previous_days = [
+                f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}"
+                for day in trade_days["cal_date"].tolist()
+                if f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}" < latest_trade_date
+            ]
+            return previous_days[0] if previous_days else latest_trade_date
+
+        base_df = pro.daily(ts_code="000001.SZ", start_date=latest, end_date=latest)
+        if base_df is not None and not base_df.empty:
+            return latest_trade_date
+
+        previous_days = [
+            f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}"
+            for day in trade_days["cal_date"].tolist()
+            if f"{str(day)[:4]}-{str(day)[4:6]}-{str(day)[6:]}" < latest_trade_date
+        ]
+        return previous_days[0] if previous_days else latest_trade_date
     except Exception as exc:
         print(f"[WARN] 获取最新交易日失败，将继续执行抓取避免使用旧数据: {exc}")
         return None
@@ -430,15 +588,41 @@ def main() -> None:
         help="从第 N 步开始执行（1~5），跳过前面的步骤",
     )
     parser.add_argument(
+        "--resume-from", type=str, metavar="STEP",
+        choices=["fetch_data", "csv_import", "build_pool", "build_candidates", "pre_filter", "score_review", "finalize"],
+        help="从指定步骤恢复执行（断点续传），可选值: fetch_data, csv_import, build_pool, build_candidates, pre_filter, score_review, finalize",
+    )
+    parser.add_argument(
         "--db", action="store_true",
         help="将 K 线数据写入数据库（传递给 fetch_kline 步骤）",
     )
     args = parser.parse_args()
     target_date = os.environ.get("TARGET_DATE", "").strip() or None
 
-    start = args.start_from
+    # 处理 --resume-from 参数（断点续传）
+    if args.resume_from:
+        resume_step_map = {
+            "fetch_data": 1,
+            "csv_import": 1,
+            "build_pool": 2,
+            "build_candidates": 3,
+            "pre_filter": 4,
+            "score_review": 5,
+            "finalize": 6,
+        }
+        start = resume_step_map.get(args.resume_from, 1)
+        if args.resume_from == "fetch_data":
+            # 恢复到 fetch_data 时，不跳过抓取
+            skip_fetch = False
+        else:
+            # 其他恢复点都跳过 fetch
+            skip_fetch = True
+        print(f"[INFO] 断点续传: 从步骤 '{args.resume_from}' (步骤 {start}) 开始执行")
+    else:
+        start = args.start_from
+        skip_fetch = args.skip_fetch
 
-    if args.skip_fetch and start == 1:
+    if skip_fetch and start == 1:
         start = 2
 
     reviewer_info = REVIEWERS[args.reviewer]
@@ -463,9 +647,10 @@ def main() -> None:
     if start <= 1:
         raw_dir = ROOT / "data" / "raw"
         expected_codes = _load_expected_fetch_codes()
-        has_complete_data = _has_all_expected_data(raw_dir, expected_codes=expected_codes)
-        local_latest_date = _get_local_latest_date(raw_dir) if has_complete_data else None
-        latest_trade_date = _get_latest_trade_date() if has_complete_data and not args.skip_fetch else None
+        latest_trade_date = _get_latest_trade_date() if not args.skip_fetch else None
+        raw_progress = _assess_raw_data_progress(raw_dir, expected_codes=expected_codes, latest_trade_date=latest_trade_date)
+        local_latest_date = raw_progress.get("latest_local_date")
+        has_complete_data = bool(raw_progress.get("is_complete"))
 
         if has_complete_data and not args.skip_fetch and latest_trade_date and local_latest_date == latest_trade_date:
             print(f"\n{'='*60}")
@@ -480,17 +665,44 @@ def main() -> None:
             if args.db:
                 _sync_raw_csv_to_db_if_needed(raw_dir, latest_trade_date=local_latest_date)
         else:
-            if has_complete_data:
-                if latest_trade_date and local_latest_date and local_latest_date < latest_trade_date:
-                    print(
-                        f"[INFO] 本地数据最新日期为 {local_latest_date}，"
-                        f"落后于最新交易日 {latest_trade_date}，将执行步骤 1。"
-                    )
-                else:
-                    print("[INFO] 数据文件虽已存在，但无法确认已是最新交易日，将执行步骤 1。")
+            missing_count = len(raw_progress.get("missing_codes", []))
+            stale_count = len(raw_progress.get("stale_codes", []))
+            invalid_count = len(raw_progress.get("invalid_codes", []))
+            ready_count = raw_progress.get("ready_codes", 0)
+            expected_total = raw_progress.get("expected_total", 0)
+
+            if expected_total:
+                print(
+                    f"[INFO] 当前 CSV 进度: 已就绪 {ready_count}/{expected_total}"
+                    f" | 缺失 {missing_count} | 过期 {stale_count} | 异常 {invalid_count}"
+                )
+            if latest_trade_date:
+                print(f"[INFO] 最新交易日: {latest_trade_date} | 本地 CSV 最新日期: {local_latest_date or '-'}")
+
+            # 判断是否需要增量更新还是全量抓取
+            # 只有当几乎没有任何数据时（ready_count < expected_total 的 10%）才使用全量抓取
+            use_incremental = ready_count > (expected_total * 0.1)
+
+            if use_incremental:
+                print(f"[步骤] 1  拉取 K 线数据 — 增量模式（只更新缺失/过期/异常的股票）")
+            else:
+                print(f"[步骤] 1  拉取 K 线数据 — 全量模式（数据缺失较多，重新抓取全部）")
+
+            if args.db:
+                _sync_raw_csv_to_db_if_needed(
+                    raw_dir,
+                    latest_trade_date=latest_trade_date or local_latest_date,
+                )
+
+            fetch_cmd = [PYTHON, "-m", "pipeline.fetch_kline"]
+            if use_incremental:
+                fetch_cmd.append("--incremental")
+            if args.db:
+                fetch_cmd.append("--db")
+
             _run(
-                "1  拉取 K 线数据（fetch_kline）",
-                [PYTHON, "-m", "pipeline.fetch_kline"] + (["--db"] if args.db else []),
+                f"1  拉取 K 线数据（fetch_kline - {'增量' if use_incremental else '全量'}）",
+                fetch_cmd,
             )
 
     # ── 步骤 2：量化初选 ─────────────────────────────────────────────

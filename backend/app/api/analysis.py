@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
-from app.api.tasks import _cleanup_stale_active_tasks
+from app.api.tasks import _cleanup_stale_active_tasks, _raise_initialization_in_progress
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
 from app.services.analysis_service import analysis_service
@@ -415,6 +415,9 @@ async def generate_diagnosis_history(
 
     # 创建历史生成任务（阶段5：统一通过任务系统）
     task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "generate_history",
         {
@@ -431,7 +434,7 @@ async def generate_diagnosis_history(
         "code": code,
         "status": "pending" if not result.get("existing") else "existing",
         "ws_url": result["ws_url"],
-        "message": f"历史数据生成任务已创建" if not result.get("existing") else "复用现有生成任务",
+        "message": "历史数据生成任务已创建" if not result.get("existing") else "正在初始化，请等待",
     }
 
 
@@ -501,6 +504,9 @@ async def generate_diagnosis_history_detail(
         }
 
     task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "generate_history_detail",
         {
@@ -517,7 +523,7 @@ async def generate_diagnosis_history_detail(
         "check_date": check_date,
         "status": "pending" if not result.get("existing") else "existing",
         "ws_url": result["ws_url"],
-        "message": "诊断详情生成任务已创建" if not result.get("existing") else "复用现有详情任务",
+        "message": "诊断详情生成任务已创建" if not result.get("existing") else "正在初始化，请等待",
     }
 
 
@@ -542,6 +548,9 @@ async def analyze_stock(
 
     # 创建后台分析任务
     task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "single_analysis",
         {"code": code, "reviewer": "quant", "trigger_source": "manual"}
@@ -552,7 +561,7 @@ async def analyze_stock(
         "code": code,
         "status": "pending" if not result.get("existing") else "existing",
         "ws_url": result["ws_url"],
-        "message": "分析任务已创建" if not result.get("existing") else "复用现有分析任务",
+        "message": "分析任务已创建" if not result.get("existing") else "正在初始化，请等待",
     }
 
 
@@ -653,6 +662,9 @@ async def generate_tomorrow_star(
     """手动生成明日之星"""
     ensure_tushare_ready()
     task_service = TaskService(db)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
 
     result = await task_service.create_task(
         "tomorrow_star",

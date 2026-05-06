@@ -269,6 +269,7 @@ import type {
   TomorrowStarWindowStatusResponse,
 } from '@/types'
 import { useConfigStore } from '@/store/config'
+import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 
 const router = useRouter()
 const configStore = useConfigStore()
@@ -647,7 +648,8 @@ async function loadData(skipLatestLoad: boolean = false) {
   } catch (error: any) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load data:', error)
-    ElMessage.error('加载数据失败: ' + error.message)
+    const message = getUserSafeErrorMessage(error, '加载数据失败')
+    ElMessage.error(isInitializationPendingError(error) ? message : `加载数据失败: ${message}`)
   } finally {
     finishRequest('loadData', signal)
     if (requestId === loadDataRequestId) {
@@ -720,7 +722,7 @@ async function loadLatestCandidates() {
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load latest candidates:', error)
-    ElMessage.error('加载最新候选股票失败')
+    ElMessage.error(getUserSafeErrorMessage(error, '加载最新候选股票失败'))
   } finally {
     finishRequest('latestCandidates', signal)
     loadingLatest.value = false
@@ -740,7 +742,7 @@ async function selectDate(row: HistoryRow) {
     if (row.status === 'running') {
       ElMessage.info(`${row.rawDate} 正在生成中，稍后再查看`)
     } else if (row.status === 'failed') {
-      ElMessage.warning(row.errorMessage || `${row.rawDate} 生成失败`)
+      ElMessage.warning(isInitializationPendingError({ message: row.errorMessage || '' }) ? '系统尚未完成初始化' : (row.errorMessage || `${row.rawDate} 生成失败`))
     } else {
       ElMessage.info(`${row.rawDate} 暂无可展示结果`)
     }
@@ -790,7 +792,7 @@ async function selectDate(row: HistoryRow) {
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load selected date data:', error)
-    ElMessage.error('加载数据失败')
+    ElMessage.error(getUserSafeErrorMessage(error, '加载数据失败'))
   } finally {
     finishRequest('latestCandidates', signal)
     loadingLatest.value = false
@@ -841,7 +843,7 @@ async function refreshCurrentCandidates() {
     } catch (error) {
       if (isRequestCanceled(error)) return
       console.error('Failed to refresh current candidates:', error)
-      ElMessage.error('刷新失败')
+      ElMessage.error(getUserSafeErrorMessage(error, '刷新失败'))
     } finally {
       finishRequest('latestCandidates', signal)
       loadingLatest.value = false

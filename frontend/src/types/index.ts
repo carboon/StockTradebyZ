@@ -161,6 +161,11 @@ export interface TaskProgressMeta {
   completed_in_run?: number | null
   failed_count?: number | null
   resume_supported?: boolean
+  ready_count?: number | null
+  incremental_count?: number | null
+  full_count?: number | null
+  csv_imported_count?: number | null
+  csv_failed_count?: number | null
 }
 
 export interface DataStatus {
@@ -581,6 +586,8 @@ export interface AdminSummaryTaskInfo {
   stage_label?: string | null
   progress: number
   summary?: string | null
+  task_stage?: string | null
+  progress_meta_json?: TaskProgressMeta | null
 }
 
 export interface AdminSummaryDataGap {
@@ -590,8 +597,19 @@ export interface AdminSummaryDataGap {
   latest_trade_date?: string | null
 }
 
+export interface AdminPipelineStageSummary {
+  key: string
+  label: string
+  status: 'success' | 'warning' | 'danger' | 'info'
+  ready: boolean
+  value: string
+  meta?: string | null
+  detail?: string | null
+}
+
 export interface AdminSummaryResponse {
   today_status: AdminSummaryCard[]
+  pipeline_status: AdminPipelineStageSummary[]
   data_production: Record<string, string | number | boolean | null>
   data_gap: AdminSummaryDataGap
   current_task: AdminSummaryTaskInfo | null

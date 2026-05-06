@@ -11,6 +11,7 @@ from typing import Optional
 
 import pandas as pd
 from sqlalchemy import distinct
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models import Stock, StockDaily
@@ -59,7 +60,7 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
 
     ensure_stock_row(db, normalized_code)
 
-    count = 0
+    records: list[dict] = []
     for _, row in df.iterrows():
         trade_date = row.get("date")
         if isinstance(trade_date, str):
@@ -67,31 +68,35 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
         elif isinstance(trade_date, (datetime, pd.Timestamp)):
             trade_date = trade_date.date() if hasattr(trade_date, 'date') else trade_date
 
-        existing = db.query(StockDaily).filter(
-            StockDaily.code == normalized_code,
-            StockDaily.trade_date == trade_date,
-        ).first()
+        records.append({
+            "code": normalized_code,
+            "trade_date": trade_date,
+            "open": float(row["open"]),
+            "close": float(row["close"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "volume": float(row["volume"]),
+        })
 
-        if existing:
-            existing.open = float(row["open"])
-            existing.close = float(row["close"])
-            existing.high = float(row["high"])
-            existing.low = float(row["low"])
-            existing.volume = float(row["volume"])
-        else:
-            db.add(StockDaily(
-                code=normalized_code,
-                trade_date=trade_date,
-                open=float(row["open"]),
-                close=float(row["close"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                volume=float(row["volume"]),
-            ))
-        count += 1
+    if not records:
+        return 0
+
+    stmt = pg_insert(StockDaily.__table__).values(records)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["code", "trade_date"],
+        set_={
+            "open": stmt.excluded.open,
+            "close": stmt.excluded.close,
+            "high": stmt.excluded.high,
+            "low": stmt.excluded.low,
+            "volume": stmt.excluded.volume,
+        },
+    )
+
+    db.execute(stmt)
 
     db.commit()
-    return count
+    return len(records)
 
 
 def bulk_save_daily_data(db: Session, data: dict[str, pd.DataFrame]) -> int:

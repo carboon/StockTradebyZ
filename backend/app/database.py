@@ -25,7 +25,7 @@ def _create_engine():
 
     engine = create_engine(
         db_url,
-        echo=settings.debug,
+        echo=settings.sql_echo,
         poolclass=QueuePool,
         pool_size=20,
         max_overflow=30,

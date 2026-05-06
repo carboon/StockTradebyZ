@@ -467,16 +467,20 @@ def full_fetch(
     checkpoint_path: Optional[Path] = None,
     db_url: Optional[str] = None,
 ) -> dict[str, Any]:
-    """全量抓取并支持断点恢复。"""
+    """智能抓取并支持断点恢复。"""
     if not codes:
         raise ValueError("股票代码列表为空")
 
     total = len(codes)
+    ready_codes, incremental_codes, full_codes = _classify_codes_by_local_csv(codes, out_dir, end)
     checkpoint_path = checkpoint_path or _build_checkpoint_path(codes, start, end, out_dir)
     checkpoint = _load_checkpoint(checkpoint_path)
     completed_codes, failed_codes = _restore_checkpoint_state(checkpoint, codes, out_dir)
+    completed_codes.update(ready_codes)
     initial_completed = len(completed_codes)
-    remaining_codes = [code for code in codes if code not in completed_codes]
+    remaining_incremental_codes = [code for code in incremental_codes if code not in completed_codes]
+    remaining_full_codes = [code for code in full_codes if code not in completed_codes]
+    remaining_codes = remaining_incremental_codes + remaining_full_codes
 
     if initial_completed > 0:
         logger.info(
@@ -488,6 +492,30 @@ def full_fetch(
         )
     else:
         logger.info("未检测到历史断点，将从头开始抓取。")
+
+    logger.info(
+        "本地 CSV 分类 | 已完整:%d | 增量补齐:%d | 全量重抓:%d",
+        len(ready_codes),
+        len(remaining_incremental_codes),
+        len(remaining_full_codes),
+    )
+    print(
+        f"[INFO] 本地 CSV 分类 | 已完整 {len(ready_codes)} | 增量补齐 {len(remaining_incremental_codes)} | 全量重抓 {len(remaining_full_codes)}",
+        flush=True,
+    )
+    _emit_progress({
+        "kind": "fetch",
+        "stage": "fetch_data",
+        "stage_label": "抓取原始数据",
+        "percent": 9,
+        "message": (
+            f"本地 CSV 分类 | 已完整 {len(ready_codes)} | "
+            f"增量补齐 {len(remaining_incremental_codes)} | 全量重抓 {len(remaining_full_codes)}"
+        ),
+        "ready_count": len(ready_codes),
+        "incremental_count": len(remaining_incremental_codes),
+        "full_count": len(remaining_full_codes),
+    })
 
     _save_checkpoint(
         checkpoint_path,
@@ -577,10 +605,11 @@ def full_fetch(
     maybe_emit_progress(None, force=True)
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(fetch_one, code, start, end, out_dir, db_url): code
-            for code in remaining_codes
-        }
+        futures = {}
+        for code in remaining_incremental_codes:
+            futures[executor.submit(fetch_one_incremental, code, end, out_dir, None, db_url)] = code
+        for code in remaining_full_codes:
+            futures[executor.submit(fetch_one, code, start, end, out_dir, db_url)] = code
         for future in as_completed(futures):
             code = futures[future]
             try:
@@ -650,6 +679,43 @@ def _get_latest_date_from_csv(csv_path: Path) -> Optional[str]:
     except Exception as e:
         logger.debug(f"读取 {csv_path} 失败: {e}")
     return None
+
+
+def _classify_codes_by_local_csv(
+    codes: List[str],
+    out_dir: Path,
+    end: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """按本地 CSV 状态分类。
+
+    ready_codes:
+        CSV 已存在且最新日期已达到目标交易日。
+    incremental_codes:
+        CSV 存在且可读，但最新日期落后于目标交易日，只需补增量。
+    full_codes:
+        CSV 缺失或损坏，需要全量重抓。
+    """
+    ready_codes: list[str] = []
+    incremental_codes: list[str] = []
+    full_codes: list[str] = []
+
+    for code in codes:
+        csv_path = out_dir / f"{code}.csv"
+        if not csv_path.exists():
+            full_codes.append(code)
+            continue
+
+        latest_date = _get_latest_date_from_csv(csv_path)
+        if not latest_date:
+            full_codes.append(code)
+            continue
+
+        if latest_date >= end:
+            ready_codes.append(code)
+        else:
+            incremental_codes.append(code)
+
+    return ready_codes, incremental_codes, full_codes
 
 
 def fetch_one_incremental(

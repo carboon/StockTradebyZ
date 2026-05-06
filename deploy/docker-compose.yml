@@ -38,6 +38,8 @@ services:
       dockerfile: deploy/docker/Dockerfile.backend
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
+        INSTALL_BUILD_DEPS: ${INSTALL_BUILD_DEPS:-0}
     container_name: stocktrade-backend
     ports:
       - "${BACKEND_PORT:-8000}:8000"
@@ -64,7 +66,7 @@ services:
         required: false
     restart: ${RESTART:-unless-stopped}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -29,7 +29,7 @@ RATE_LIMITS = {
     "anonymous": (60, 60),        # 60 requests per 60 seconds
     "authenticated": (300, 60),   # 300 requests per 60 seconds
     "admin": (1000, 60),          # 1000 requests per 60 seconds
-    "status_api": (10, 60),       # 状态 API: 10 requests per 60 seconds
+    "status_api": (120, 60),      # 状态 API: 120 requests per 60 seconds
     # 阶段5新增：轻计算限流
     "single_analysis": (10, 60),  # 单股分析：10次/分钟（防止滥用）
     "history_generation": (2, 3600),  # 历史生成：2次/小时
@@ -100,13 +100,19 @@ def rate_limit_dep(
 
 
 def status_api_rate_limit(request: Request) -> None:
-    """状态 API 的专用限流（10/min），避免频繁轮询。"""
+    """状态 API 的专用限流。
+
+    任务中心会并发轮询多个状态接口，因此这里按接口路径分桶，
+    并放宽到 120/min，避免正常页面刷新被误伤。
+    """
     if skip_rate_limit():
         return
 
     user_id = getattr(request.state, "user_id", None)
-    key = f"status:{user_id or request.client.host}"
-    _check_rate_limit(key, 10, 60)
+    client_key = user_id or (request.client.host if request.client else "unknown")
+    path = request.url.path
+    key = f"status:{client_key}:{path}"
+    _check_rate_limit(key, 120, 60)
 
 
 # 阶段5新增：轻计算专用限流依赖

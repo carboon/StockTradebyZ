@@ -4,6 +4,8 @@
 FROM python:3.12-slim
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG APT_MIRROR=deb.debian.org
+ARG INSTALL_BUILD_DEPS=0
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
@@ -11,21 +13,22 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app:/app/backend \
     PIP_INDEX_URL=${PIP_INDEX_URL}
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    curl \
-    ca-certificates \
-    git \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# 可选替换 Debian 软件源，加速国内构建。
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources && \
+    if [ "$INSTALL_BUILD_DEPS" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        g++ \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean; \
+    fi
 
 # 设置工作目录
 WORKDIR /app
 
 # 复制依赖文件
-COPY requirements.txt /app/
+COPY deploy/docker/requirements.backend-image.txt /app/requirements.txt
 COPY backend/requirements.txt /app/backend/
 
 # 安装 Python 依赖
@@ -49,7 +52,7 @@ EXPOSE 8000
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"
 
 # 生产模式运行
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

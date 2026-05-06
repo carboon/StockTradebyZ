@@ -233,6 +233,7 @@ import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
 import { apiTasks } from '@/api'
 import { saveInitTaskViewState } from '@/utils/initTaskViewState'
+import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import type { TaskDiagnosticCheck, TaskDiagnosticsResponse } from '@/types'
 
 const configStore = useConfigStore()
@@ -546,7 +547,9 @@ async function saveConfigs(startInitialization: boolean) {
       router.push('/tomorrow-star')
     }
   } catch (error) {
-    ElMessage.error('保存失败: ' + error)
+    console.error('saveConfigs failed:', error)
+    const message = getUserSafeErrorMessage(error, '保存失败')
+    ElMessage.error(isInitializationPendingError(error) ? message : `保存失败: ${message}`)
   } finally {
     saving.value = false
     savingAndInitializing.value = false
