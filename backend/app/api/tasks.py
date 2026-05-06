@@ -49,17 +49,46 @@ from app.schemas import (
 router = APIRouter()
 
 # 缓存 TTL 配置（秒）
-STATUS_CACHE_TTL = 30      # 状态缓存 30 秒
-RUNNING_CACHE_TTL = 10     # 运行中任务缓存 10 秒
-OVERVIEW_CACHE_TTL_SECONDS = 20
+# 针对非实时系统优化：使用较长的缓存时间减少数据库压力
+STATUS_CACHE_TTL = 120         # 数据状态缓存 2 分钟
+RUNNING_CACHE_TTL = 10         # 运行中任务缓存 10 秒（需要相对及时）
+OVERVIEW_CACHE_TTL_SECONDS = 60  # 总览缓存 1 分钟
 _overview_cache: dict = {"data": None, "expires_at": 0.0}
 
 # CSV 进度评估缓存（优化性能）
 _csv_progress_cache: dict = {"data": None, "expires_at": 0.0}
-_CSV_PROGRESS_CACHE_TTL = 60  # CSV 进度缓存 60 秒
+_CSV_PROGRESS_CACHE_TTL = 120  # CSV 进度缓存 2 分钟
+
+# 预期股票代码缓存（避免重复读取 CSV）
+_expected_codes_cache: dict = {"data": None, "expires_at": 0.0}
+_EXPECTED_CODES_CACHE_TTL = 600  # 10 分钟缓存（股票列表很少变化）
+
+
+def _clear_all_caches(db: Session | None = None) -> None:
+    """清除所有相关缓存"""
+    import time
+    _overview_cache["expires_at"] = 0.0
+    _csv_progress_cache["expires_at"] = 0.0
+    _expected_codes_cache["expires_at"] = 0.0
+
+    # 清除数据库级元数据缓存
+    if db:
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            metadata_service = get_admin_summary_metadata_service(db)
+            metadata_service.invalidate()
+        except Exception:
+            pass  # 不影响主流程
 
 
 def _load_expected_fetch_codes() -> set[str]:
+    import time
+
+    # 检查缓存
+    now = time.time()
+    if _expected_codes_cache["data"] is not None and now < _expected_codes_cache["expires_at"]:
+        return _expected_codes_cache["data"]
+
     import yaml
 
     cfg_path = PROJECT_ROOT / "config" / "fetch_kline.yaml"
@@ -94,6 +123,11 @@ def _load_expected_fetch_codes() -> set[str]:
             if board in exclude_boards:
                 continue
             codes.add(symbol)
+
+    # 更新缓存
+    _expected_codes_cache["data"] = codes
+    _expected_codes_cache["expires_at"] = now + _EXPECTED_CODES_CACHE_TTL
+
     return codes
 
 
@@ -233,6 +267,14 @@ def _cleanup_stale_active_tasks(db: Session) -> set[int]:
         db.commit()
         cache.delete("running_tasks")
         _overview_cache["expires_at"] = 0.0
+
+    # 清除管理员总览元数据缓存
+    try:
+        from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+        metadata_service = get_admin_summary_metadata_service(db)
+        metadata_service.invalidate()
+    except Exception:
+        pass  # 不影响主流程
 
     return stale_ids
 
@@ -900,6 +942,12 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db), admin=Depends
                 db.add(TaskLog(task_id=task.id, level="warning", stage="cancelled", message="任务已取消"))
             db.commit()
             _overview_cache["expires_at"] = 0.0
+            try:
+                from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+                metadata_service = get_admin_summary_metadata_service(db)
+                metadata_service.invalidate()
+            except Exception:
+                pass  # 不影响主流程
             return {"status": "ok", "message": "任务已取消"}
         else:
             return {"status": "error", "message": f"任务状态为 {task.status}，无需取消"}
@@ -1009,6 +1057,7 @@ async def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_use
             db.query(Task).filter(Task.id.in_(finished_task_ids)).delete(synchronize_session=False)
         db.commit()
         _overview_cache["expires_at"] = 0.0
+        _admin_summary_cache["expires_at"] = 0.0
         return {"status": "ok", "message": "历史任务已清空"}
     except Exception as e:
         db.rollback()
@@ -1092,6 +1141,7 @@ async def fill_kline_gap(
     # 清除缓存
     cache.delete("data_status")
     _overview_cache["expires_at"] = 0.0
+    _admin_summary_cache["expires_at"] = 0.0
 
     return {
         "success": result.status in ["completed", "partial"],
@@ -1134,6 +1184,7 @@ async def fill_tomorrow_star_gap(
     # 清除缓存
     cache.delete("data_status")
     _overview_cache["expires_at"] = 0.0
+    _admin_summary_cache["expires_at"] = 0.0
 
     return {
         "success": result.status in ["completed", "partial"],
@@ -1177,6 +1228,7 @@ async def fill_top5_diagnosis_gap(
     # 清除缓存
     cache.delete("data_status")
     _overview_cache["expires_at"] = 0.0
+    _admin_summary_cache["expires_at"] = 0.0
 
     return {
         "success": result.status in ["completed", "partial"],
@@ -1241,6 +1293,7 @@ async def fill_all_gaps(
     # 清除缓存
     cache.delete("data_status")
     _overview_cache["expires_at"] = 0.0
+    _admin_summary_cache["expires_at"] = 0.0
 
     # 计算整体状态
     all_completed = all(
@@ -1267,289 +1320,34 @@ async def get_admin_summary(
 ) -> AdminSummaryResponse:
     """获取管理员总览摘要（仅管理员）
 
-    合并分散的运行状态信息，为管理员任务中心首页提供一站式数据。
-    包括：最新交易日、数据缺口、当前任务状态、最近任务结果等。
+    使用数据库级元数据缓存，响应时间约 50-100ms。
+    - 缓存未过期：直接返回缓存
+    - 缓存过期：返回旧数据，后台异步更新
+    - 首次访问：同步计算并缓存（约 2-5 秒）
     """
-    from datetime import date, datetime, timedelta
-    from app.models import Candidate, AnalysisResult, StockDaily
-    from sqlalchemy import select, func
+    from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
 
-    _cleanup_stale_active_tasks(db)
+    service = get_admin_summary_metadata_service(db)
+    return await service.get_cached_summary()
 
-    tushare_service = TushareService()
-    data_status = tushare_service.check_data_status()
 
-    # 1. 获取最新交易日
-    latest_trade_date = data_status.get("raw_data", {}).get("latest_trade_date")
-    calendar_latest_trade_date = data_status.get("raw_data", {}).get("calendar_latest_trade_date")
-    latest_db_date = data_status.get("raw_data", {}).get("latest_date")
-    raw_csv_progress = _assess_raw_csv_progress(latest_trade_date)
+@router.post("/admin/summary/refresh")
+async def refresh_admin_summary(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user)
+) -> dict:
+    """强制刷新管理员总览缓存（仅管理员）
 
-    # 2. 获取最新候选日期
-    latest_candidate_result = db.execute(
-        select(Candidate.pick_date)
-        .order_by(Candidate.pick_date.desc())
-        .limit(1)
-    ).first()
-    latest_candidate_date = latest_candidate_result[0].isoformat() if latest_candidate_result else None
+    手动触发重新计算并缓存管理员总览数据。
+    用于用户点击刷新按钮时。
 
-    # 3. 获取最新分析日期
-    latest_analysis_result = db.execute(
-        select(AnalysisResult.pick_date)
-        .order_by(AnalysisResult.pick_date.desc())
-        .limit(1)
-    ).first()
-    latest_analysis_date = latest_analysis_result[0].isoformat() if latest_analysis_result else None
+    Returns:
+        {"success": true, "message": "...", "from_cache": false, "data": {...}}
+    """
+    from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
 
-    # 4. 计算缺口天数
-    gap_days = 0
-    has_gap = False
-    if latest_trade_date and latest_db_date:
-        try:
-            trade_dt = datetime.fromisoformat(latest_trade_date).date() if isinstance(latest_trade_date, str) else latest_trade_date
-            db_dt = datetime.fromisoformat(latest_db_date).date() if isinstance(latest_db_date, str) else latest_db_date
-            gap = (trade_dt - db_dt).days
-            if gap > 0:
-                gap_days = gap
-                has_gap = True
-        except (ValueError, TypeError):
-            pass
-
-    # 5. 当前任务状态
-    running_tasks = (
-        db.query(Task)
-        .filter(Task.status.in_(["pending", "running"]))
-        .order_by(Task.created_at.desc())
-        .all()
-    )
-
-    current_task_info = None
-    task_status = "idle"
-    if running_tasks:
-        task = running_tasks[0]
-        task_status = "running"
-        meta = task.progress_meta_json or {}
-        current_task_info = AdminSummaryTaskInfo(
-            id=task.id,
-            task_type=task.task_type,
-            status=task.status,
-            stage_label=meta.get("stage_label") or task.task_stage,
-            progress=task.progress,
-            summary=task.summary,
-            task_stage=task.task_stage,
-            progress_meta_json=meta,
-        )
-
-    # 6. 最近任务结果
-    latest_completed = (
-        db.query(Task)
-        .filter(Task.status == "completed")
-        .order_by(Task.completed_at.desc(), Task.id.desc())
-        .first()
-    )
-    latest_failed = (
-        db.query(Task)
-        .filter(Task.status == "failed")
-        .order_by(Task.completed_at.desc(), Task.id.desc())
-        .first()
-    )
-
-    latest_task_summary = None
-    if latest_completed:
-        latest_task_summary = latest_completed.summary or f"任务 #{latest_completed.id} 于 {latest_completed.completed_at.strftime('%Y-%m-%d %H:%M')} 完成"
-    elif latest_failed:
-        latest_task_summary = latest_failed.error_message or latest_failed.summary or f"任务 #{latest_failed.id} 失败"
-
-    # 7. 系统就绪状态
-    system_ready = all([
-        data_status.get("raw_data", {}).get("exists"),
-        data_status.get("candidates", {}).get("exists"),
-        data_status.get("analysis", {}).get("exists"),
-    ])
-
-    latest_day_stock_count = int(data_status.get("raw_data", {}).get("latest_date_stock_count") or 0)
-    expected_stock_count = int(data_status.get("raw_data", {}).get("expected_stock_count") or 0)
-    raw_is_latest = bool(data_status.get("raw_data", {}).get("is_latest"))
-    raw_is_latest_complete = bool(data_status.get("raw_data", {}).get("is_latest_complete"))
-
-    db_synced = bool(
-        latest_db_date
-        and latest_candidate_date
-        and latest_analysis_date
-        and latest_db_date == latest_candidate_date == latest_analysis_date
-    )
-    stats_ready = bool(
-        db_synced
-        and data_status.get("candidates", {}).get("exists")
-        and data_status.get("analysis", {}).get("exists")
-    )
-
-    pipeline_status = [
-        AdminPipelineStageSummary(
-            key="source_fetch",
-            label="Tushare 拉取",
-            status="success" if raw_is_latest_complete else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
-            ready=raw_is_latest_complete,
-            value="已拉取完成" if raw_is_latest_complete else ("拉取未完成" if data_status.get("raw_data", {}).get("exists") else "待开始"),
-            meta=f"最新交易日: {latest_trade_date or '-'} | 数据最新日: {latest_db_date or '-'}",
-            detail=(
-                f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} | 缺失 {int(raw_csv_progress.get('missing_count') or 0):,} | 过期 {int(raw_csv_progress.get('stale_count') or 0):,} | 异常 {int(raw_csv_progress.get('invalid_count') or 0):,}"
-                if raw_csv_progress.get("expected_total")
-                else "尚未生成原始 K 线数据"
-            ),
-        ),
-        AdminPipelineStageSummary(
-            key="db_sync",
-            label="数据库同步",
-            status="success" if db_synced else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
-            ready=db_synced,
-            value="已同步" if db_synced else "未同步完成",
-            meta=f"K线: {latest_db_date or '-'} | 候选: {latest_candidate_date or '-'} | 分析: {latest_analysis_date or '-'}",
-            detail=(
-                f"候选 {int(data_status.get('candidates', {}).get('count') or 0):,} 条，分析 {int(data_status.get('analysis', {}).get('count') or 0):,} 条"
-                if data_status.get("candidates", {}).get("exists") or data_status.get("analysis", {}).get("exists")
-                else "候选与分析结果尚未生成"
-            ),
-        ),
-        AdminPipelineStageSummary(
-            key="stats_compute",
-            label="结果计算",
-            status="success" if stats_ready else ("warning" if data_status.get("analysis", {}).get("exists") or data_status.get("candidates", {}).get("exists") else "info"),
-            ready=stats_ready,
-            value="已完成" if stats_ready else "未完成",
-            meta="候选清单 / 结果分析",
-            detail=(
-                f"最新统计日期 {latest_analysis_date or latest_candidate_date or '-'}"
-                if data_status.get("analysis", {}).get("exists") or data_status.get("candidates", {}).get("exists")
-                else "尚未生成可用统计结果"
-            ),
-        ),
-    ]
-
-    # 8. 构建今日状态卡片
-    raw_stock_count = data_status.get("raw_data", {}).get("stock_count", 0)
-    raw_record_count = data_status.get("raw_data", {}).get("raw_record_count", 0)
-    candidate_count = data_status.get("candidates", {}).get("count", 0)
-    analysis_count = data_status.get("analysis", {}).get("count", 0)
-
-    today_status = [
-        AdminSummaryCard(
-            key="raw_data",
-            label="Tushare 拉取",
-            value="已完成" if raw_is_latest_complete else ("进行中" if data_status.get("raw_data", {}).get("exists") else "待开始"),
-            status="success" if raw_is_latest_complete else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
-            meta=f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} / {int(raw_csv_progress.get('expected_total') or 0):,} 只 | {raw_record_count:,} 条",
-        ),
-        AdminSummaryCard(
-            key="candidates",
-            label="数据库同步",
-            value="已同步" if db_synced else "未同步完成",
-            status="success" if db_synced else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
-            meta=f"K线 {latest_db_date or '-'} / 候选 {latest_candidate_date or '-'} / 分析 {latest_analysis_date or '-'}",
-        ),
-        AdminSummaryCard(
-            key="analysis",
-            label="结果计算",
-            value="已完成" if stats_ready else "未完成",
-            status="success" if stats_ready else ("warning" if candidate_count or analysis_count else "info"),
-            meta=f"候选 {candidate_count:,} 条 / 分析 {analysis_count:,} 条",
-        ),
-        AdminSummaryCard(
-            key="task",
-            label="任务状态",
-            value=f"{len(running_tasks)} 运行中" if running_tasks else "空闲",
-            status="warning" if running_tasks else ("danger" if latest_failed else "success"),
-            meta=current_task_info.stage_label if current_task_info else (latest_task_summary or "系统正常"),
-        ),
-    ]
-
-    # 9. 数据生产状态
-    data_production = {
-        "raw_data_exists": data_status.get("raw_data", {}).get("exists", False),
-        "raw_data_count": raw_stock_count,
-        "raw_data_latest": latest_db_date,
-        "raw_effective_latest_trade_date": latest_trade_date,
-        "raw_calendar_latest_trade_date": calendar_latest_trade_date,
-        "raw_ready_count": int(raw_csv_progress.get("ready_count") or 0),
-        "raw_missing_count": int(raw_csv_progress.get("missing_count") or 0),
-        "raw_invalid_count": int(raw_csv_progress.get("invalid_count") or 0),
-        "raw_expected_total": int(raw_csv_progress.get("expected_total") or 0),
-        # 停牌信息（从 check_data_status 获取）
-        "raw_suspended_count": int(data_status.get("raw_data", {}).get("suspended_count", 0)),
-        "raw_long_stale_count": int(data_status.get("raw_data", {}).get("long_stale_count", 0)),
-        "raw_active_expected_count": int(data_status.get("raw_data", {}).get("expected_stock_count", 0)),
-        "candidates_exists": data_status.get("candidates", {}).get("exists", False),
-        "candidates_count": candidate_count,
-        "candidates_latest": latest_candidate_date,
-        "analysis_exists": data_status.get("analysis", {}).get("exists", False),
-        "analysis_count": analysis_count,
-        "analysis_latest": latest_analysis_date,
-    }
-
-    # 10. 数据缺口
-    data_gap = AdminSummaryDataGap(
-        has_gap=has_gap,
-        gap_days=gap_days if has_gap else None,
-        latest_local_date=latest_db_date,
-        latest_trade_date=latest_trade_date,
-    )
-
-    # 11. 待处理事项
-    pending_actions = []
-    if has_gap and gap_days > 0:
-        pending_actions.append({
-            "type": "warning",
-            "title": "数据缺口",
-            "message": f"K线数据落后 {gap_days} 个交易日",
-            "action": "增量更新",
-            "route": "/update?tab=tasks&action=incremental",
-        })
-    if latest_failed and not (latest_completed and latest_completed.completed_at > latest_failed.completed_at):
-        pending_actions.append({
-            "type": "error",
-            "title": "失败任务",
-            "message": f"任务 #{latest_failed.id} 失败: {latest_failed.error_message or '未知错误'}",
-            "action": "查看日志",
-            "route": f"/update?tab=logs&taskId={latest_failed.id}",
-        })
-    if not system_ready:
-        missing = []
-        if not data_status.get("raw_data", {}).get("exists"):
-            missing.append("K线数据")
-        if not data_status.get("candidates", {}).get("exists"):
-            missing.append("候选结果")
-        if not data_status.get("analysis", {}).get("exists"):
-            missing.append("分析结果")
-        pending_actions.append({
-            "type": "info",
-            "title": "首次初始化",
-            "message": f"待生成: {', '.join(missing)}",
-            "action": "开始初始化",
-            "route": "/update?tab=tasks&action=init",
-        })
-
-    return AdminSummaryResponse(
-        today_status=today_status,
-        pipeline_status=pipeline_status,
-        data_production=data_production,
-        data_gap=data_gap,
-        current_task=current_task_info,
-        latest_task={
-            "id": latest_completed.id if latest_completed else None,
-            "status": "completed" if latest_completed else ("failed" if latest_failed else None),
-            "summary": latest_task_summary,
-            "completed_at": latest_completed.completed_at.isoformat() if latest_completed and latest_completed.completed_at else None,
-        },
-        gap_days=gap_days,
-        task_status=task_status,
-        latest_task_summary=latest_task_summary,
-        latest_trade_date=latest_trade_date,
-        latest_db_date=latest_db_date,
-        latest_candidate_date=latest_candidate_date,
-        latest_analysis_date=latest_analysis_date,
-        system_ready=system_ready,
-        pending_actions=pending_actions,
-    )
+    service = get_admin_summary_metadata_service(db)
+    return await service.force_refresh()
 
 
 # ==================== 阶段6：历史回溯相关 API ====================

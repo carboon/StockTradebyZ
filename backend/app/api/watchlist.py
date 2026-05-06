@@ -8,10 +8,14 @@ Watchlist API
 from datetime import date as date_class
 from typing import List, Optional
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.api.cache_decorators import build_watchlist_cache_key, invalidate_watchlist_cache
 from app.api.deps import require_user
+from app.cache import cache
 from app.database import get_db
 from app.models import Watchlist, Stock, StockAnalysis
 from app.services.analysis_cache import analysis_cache
@@ -25,6 +29,8 @@ from app.schemas import (
     WatchlistAddRequest,
     WatchlistUpdateRequest,
     WatchlistAnalysisItem,
+    WatchlistAnalysisResult,
+    WatchlistDerivedData,
 )
 
 router = APIRouter()
@@ -227,11 +233,13 @@ def _build_watchlist_history_item(
     verdict = history_item.get("verdict")
     signal_type = history_item.get("signal_type")
     current_price = history_item.get("close_price")
+    parsed_date = pd.to_datetime(str(history_item.get("check_date", ""))[:10], errors="coerce")
+    analysis_date = parsed_date.date() if not pd.isna(parsed_date) else date_class.today()
 
     return WatchlistAnalysisItem(
         id=synthetic_id,
         watchlist_id=watchlist_id,
-        analysis_date=date_class.fromisoformat(str(history_item["check_date"])[:10]),
+        analysis_date=analysis_date,
         close_price=current_price,
         verdict=verdict,
         score=score,
@@ -306,6 +314,24 @@ async def get_watchlist(
         except ValueError:
             raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD 格式")
 
+    watchlist_signature = (
+        db.query(
+            func.count(Watchlist.id),
+            func.max(Watchlist.added_at),
+        )
+        .filter(Watchlist.user_id == user.id, Watchlist.is_active == True)
+        .first()
+    )
+    watchlist_count = int(watchlist_signature[0] or 0)
+    latest_added_at = watchlist_signature[1].isoformat() if watchlist_signature and watchlist_signature[1] else "none"
+    cache_key = build_watchlist_cache_key(
+        user.id,
+        f"{target_date.isoformat() if target_date else 'latest'}:{watchlist_count}:{latest_added_at}",
+    )
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        return WatchlistResponse(**cached_result)
+
     # 获取拼装后的数据
     results = service.get_watchlist_with_analysis(user.id, target_date)
 
@@ -327,13 +353,15 @@ async def get_watchlist(
 
         # 添加分析结果（扩展字段）
         if item.get("analysis"):
-            base_item.analysis = item["analysis"]
+            base_item.analysis = WatchlistAnalysisResult(**item["analysis"])
         if item.get("derived"):
-            base_item.derived = item["derived"]
+            base_item.derived = WatchlistDerivedData(**item["derived"])
 
         items.append(base_item)
 
-    return WatchlistResponse(items=items, total=len(items))
+    response = WatchlistResponse(items=items, total=len(items))
+    cache.set(cache_key, response.model_dump(mode="json"), ttl=120)
+    return response
 
 
 @router.post("/", response_model=WatchlistItem)
@@ -365,6 +393,8 @@ async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(g
         db.add(w)
         db.commit()
         db.refresh(w)
+
+    invalidate_watchlist_cache(user.id)
 
     stock = db.query(Stock).filter(Stock.code == w.code).first()
     if stock is None:
@@ -413,6 +443,7 @@ async def update_watchlist_item(
 
     db.commit()
     db.refresh(w)
+    invalidate_watchlist_cache(user.id)
 
     stock = db.query(Stock).filter(Stock.code == w.code).first()
 
@@ -439,6 +470,7 @@ async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), use
     # 软删除
     w.is_active = False
     db.commit()
+    invalidate_watchlist_cache(user.id)
 
     return {"status": "ok", "message": "已删除"}
 
@@ -675,12 +707,12 @@ async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db), user=
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
-    # 调用 stock API 获取 K线数据
-    from app.api.stock import get_kline_data
+    # 直接调用底层实现，避免跨路由调用时 Depends 未解析
+    from app.api.stock import _get_kline_data_impl
     from app.schemas import KLineDataRequest
 
     kline_request = KLineDataRequest(code=w.code, days=120, include_weekly=True)
-    kline_data = await get_kline_data(kline_request)
+    kline_data = await _get_kline_data_impl(kline_request, db)
 
     return {
         "code": w.code,

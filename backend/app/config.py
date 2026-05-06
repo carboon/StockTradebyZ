@@ -80,6 +80,22 @@ class Settings(BaseSettings):
     admin_default_username: str = "admin"
     admin_default_password: str = "admin123"
 
+    # Redis 缓存配置
+    redis_url: str = Field(default="", alias="REDIS_URL")
+    redis_host: str = Field(default="localhost", alias="REDIS_HOST")
+    redis_port: int = Field(default=6379, alias="REDIS_PORT")
+    redis_db: int = Field(default=0, alias="REDIS_DB")
+    redis_password: str = Field(default="", alias="REDIS_PASSWORD")
+
+    @property
+    def redis_url_resolved(self) -> str:
+        """解析 Redis URL"""
+        if self.redis_url:
+            return self.redis_url
+        if self.redis_password:
+            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/{self.redis_db}"
+        return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
     # 运行环境
     environment: str = "development"  # development / production
 

@@ -680,6 +680,17 @@ class TaskService:
         # 保存结果
         from app.services.tushare_service import TushareService
         tushare_service = TushareService()
+        # 清除数据状态缓存
+        TushareService.clear_data_status_cache()
+
+        # 清除管理员总览元数据缓存
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            metadata_service = get_admin_summary_metadata_service(db)
+            metadata_service.invalidate()
+        except Exception:
+            pass  # 不影响主流程
+
         try:
             synced_count = tushare_service.sync_stock_list_to_db(db)
         except Exception as exc:
@@ -923,6 +934,15 @@ class TaskService:
             code,
         )
 
+        # 清除相关缓存
+        TushareService.clear_data_status_cache()
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            metadata_service = get_admin_summary_metadata_service(db)
+            metadata_service.invalidate()
+        except Exception:
+            pass  # 不影响主流程
+
         task.result_json = result.to_dict()
         task.task_stage = "completed"
         task.progress = 100
@@ -978,6 +998,15 @@ class TaskService:
             target_date=target_date,
             progress_callback=progress_callback,
         )
+
+        # 清除相关缓存
+        TushareService.clear_data_status_cache()
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            metadata_service = get_admin_summary_metadata_service(db)
+            metadata_service.invalidate()
+        except Exception:
+            pass  # 不影响主流程
 
         task.result_json = result
         task.task_stage = "completed"

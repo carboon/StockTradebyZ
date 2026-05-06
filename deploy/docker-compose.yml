@@ -32,6 +32,29 @@ services:
     networks:
       - stocktrade-net
 
+  # Redis 缓存服务
+  redis:
+    image: redis:7-alpine
+    container_name: stocktrade-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      sh -c "redis-server
+      --requirepass ${REDIS_PASSWORD:-stocktrade_redis_123}
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-stocktrade_redis_123} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - stocktrade-net
+
   backend:
     build:
       context: ..
@@ -56,12 +79,19 @@ services:
       - PYTHONPATH=/app:/app/backend
       # PostgreSQL 模式使用 DATABASE_URL (正式主库)
       - DATABASE_URL=${DATABASE_URL:-postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-stocktrade_redis_123}
       - BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173}
       - ENVIRONMENT=${ENVIRONMENT:-development}
     depends_on:
       postgres:
+        condition: service_healthy
+        required: false
+      redis:
         condition: service_healthy
         required: false
     restart: ${RESTART:-unless-stopped}
@@ -123,3 +153,4 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:

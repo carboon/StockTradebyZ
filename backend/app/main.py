@@ -53,6 +53,7 @@ from sqlalchemy import text
 from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
 from app.services.tomorrow_star_window_service import ensure_tomorrow_star_window
+from app.services.tushare_service import TushareService
 
 # 测试环境检测：pytest 收集阶段尚未设置 PYTEST_CURRENT_TEST，
 # 因此同时兼容 pytest 入口、已加载模块和显式测试标记环境变量。
@@ -149,8 +150,19 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.exception("明日之星 180 日窗口补齐启动失败: %s", exc)
 
+    async def warm_stock_metadata_cache() -> None:
+        try:
+            warmed = await asyncio.to_thread(TushareService().warm_stock_list_cache)
+            if warmed:
+                logger.info("股票基础列表缓存预热完成")
+            else:
+                logger.warning("股票基础列表缓存预热失败或返回空结果")
+        except Exception as exc:
+            logger.exception("股票基础列表缓存预热失败: %s", exc)
+
     if not _TEST_MODE and not DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE.exists():
         asyncio.create_task(bootstrap_tomorrow_star_window())
+        asyncio.create_task(warm_stock_metadata_cache())
 
     yield
     logger.info("StockTrader API 已关闭")

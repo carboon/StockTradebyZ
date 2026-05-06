@@ -377,3 +377,15 @@ class StockDaily(Base):
     low: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AdminSummaryMetadata(Base):
+    """管理员总览元数据缓存表"""
+    __tablename__ = "admin_summary_metadata"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False, comment="缓存的JSON数据")
+    version: Mapped[int] = mapped_column(Integer, default=1, comment="版本号，用于乐观锁")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, comment="创建时间")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, comment="更新时间")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, comment="过期时间")

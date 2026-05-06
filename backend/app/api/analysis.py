@@ -15,9 +15,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.api.cache_decorators import (
+    build_candidates_cache_key,
+    build_freshness_cache_key,
+)
 from app.api.deps import require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
 from app.api.tasks import _cleanup_stale_active_tasks, _raise_initialization_in_progress
+from app.cache import cache
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
 from app.services.analysis_service import analysis_service
@@ -149,6 +154,11 @@ async def get_tomorrow_star_freshness(
 
     _cleanup_stale_active_tasks(db)
 
+    cache_key = build_freshness_cache_key()
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result
+
     latest_trade_date = market_service.get_latest_trade_date() if market_service.token else None
     latest_trade_data_ready = (
         TushareService().is_trade_date_data_ready(latest_trade_date)
@@ -192,7 +202,7 @@ async def get_tomorrow_star_freshness(
         str(incremental_state.get("progress", 0)),
     ])
 
-    return {
+    result = {
         "latest_trade_date": latest_trade_date,
         "latest_trade_data_ready": latest_trade_data_ready,
         "local_latest_date": local_latest_date,
@@ -224,6 +234,8 @@ async def get_tomorrow_star_freshness(
             "message": incremental_state.get("message", ""),
         },
     }
+    cache.set(cache_key, result, ttl=60)
+    return result
 
 
 @router.get("/tomorrow-star/candidates", response_model=CandidatesResponse)
@@ -238,6 +250,10 @@ async def get_candidates(
     import pandas as pd
 
     requested_date = analysis_service._normalize_pick_date(date)
+    cache_key = build_candidates_cache_key(requested_date, limit)
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        return CandidatesResponse(**cached_result)
 
     try:
         persisted_pick_date, persisted_candidates = CandidateService(db).load_candidates(requested_date, limit=limit)
@@ -265,13 +281,15 @@ async def get_candidates(
                     )
                 )
 
-            return CandidatesResponse(
+            response = CandidatesResponse(
                 pick_date=response_pick_date,
                 candidates=items,
                 total=len(persisted_candidates),
                 status="ok",
                 message=None,
             )
+            cache.set(cache_key, response.model_dump(mode="json"), ttl=180)
+            return response
 
         running_task = (
             db.query(Task)
@@ -282,7 +300,7 @@ async def get_candidates(
             .order_by(Task.created_at.desc())
             .first()
         )
-        return CandidatesResponse(
+        response = CandidatesResponse(
             pick_date=pd.Timestamp(requested_date).date() if requested_date else None,
             candidates=[],
             total=0,
@@ -291,6 +309,8 @@ async def get_candidates(
             has_running_task=running_task is not None,
             running_task_id=running_task.id if running_task else None,
         )
+        cache.set(cache_key, response.model_dump(mode="json"), ttl=30)
+        return response
     except Exception as e:
         import traceback
         traceback.print_exc()

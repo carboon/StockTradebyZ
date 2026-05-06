@@ -1280,8 +1280,11 @@ watch(selectedTask, (newTask) => {
 
 watch(activeTab, (newTab) => {
   persistViewState()
+  // 切换到总览标签时加载管理员数据，但不阻塞
   if (newTab === 'dashboard') {
-    void loadAdminSummary()
+    loadAdminSummary().catch((error) => {
+      console.error('Failed to load admin summary on tab switch:', error)
+    })
   }
 })
 
@@ -1298,16 +1301,32 @@ onMounted(async () => {
   if (restoredState.activeTab) {
     activeTab.value = restoredState.activeTab
   }
-  try {
-    await configStore.checkTushareStatus()
-  } catch (error) {
-    console.error('Failed to check tushare status:', error)
-  }
-  await reloadAll()
-  await loadAdminSummary()
-  await handleRouteAction()
+
+  // 先建立 WebSocket 连接和启动轮询
   connectOpsSocket()
   startPoller()
+
+  // 非阻塞加载数据 - 让页面先渲染，数据后台加载
+  Promise.all([
+    // 检查 Tushare 状态
+    configStore.checkTushareStatus().catch((error) => {
+      console.error('Failed to check tushare status:', error)
+    }),
+    // 加载运行中任务和状态
+    reloadAll().catch((error) => {
+      console.error('Failed to reload all:', error)
+    }),
+    // 加载管理员总览
+    loadAdminSummary().catch((error) => {
+      console.error('Failed to load admin summary:', error)
+    }),
+    // 处理路由 action
+    handleRouteAction().catch((error) => {
+      console.error('Failed to handle route action:', error)
+    }),
+  ]).catch(() => {
+    // 忽略单个错误，已在上面的 catch 中处理
+  })
 })
 
 onUnmounted(() => {
@@ -1396,8 +1415,25 @@ async function loadAdminSummary() {
 async function refreshOverview() {
   // 保存当前页签状态，避免刷新后页签被重置
   const currentTab = activeTab.value
-  await reloadAll()
-  await loadAdminSummary()
+
+  // 显示加载提示但不阻塞
+  const loadingMessage = ElMessage.info({
+    message: '刷新中...',
+    duration: 0,
+  })
+
+  try {
+    // 并行加载所有数据
+    await Promise.all([
+      reloadAll(),
+      loadAdminSummary(),
+    ])
+  } catch (error) {
+    console.error('Failed to refresh overview:', error)
+  } finally {
+    loadingMessage.close()
+  }
+
   // 恢复页签状态
   activeTab.value = currentTab
 }
@@ -1800,12 +1836,17 @@ let poller: ReturnType<typeof setInterval> | null = null
 
 function startPoller() {
   stopPoller()
+  // 非实时系统：30秒轮询间隔（配合后端2分钟缓存）
+  // 当有运行中任务时仍保持较短间隔以获得及时更新
+  const pollInterval = runningTasks.value.length > 0 ? 10000 : 30000
+
   poller = setInterval(async () => {
     if (document.visibilityState === 'hidden') return
+    // WebSocket 连接正常且有运行中任务时，依靠推送而不是轮询
     if (opsWs?.readyState === WebSocket.OPEN && runningTasks.value.length > 0) return
 
     await reloadAll()
-  }, 5000)
+  }, pollInterval)
 }
 
 function stopPoller() {

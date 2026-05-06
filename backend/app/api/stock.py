@@ -3,17 +3,18 @@ Stock API
 ~~~~~~~~~
 股票数据相关 API
 """
-import csv
+import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy import or_
+from sqlalchemy.orm import Session
 
 from app.api.deps import require_user
+from app.api.cache_decorators import cached_kline, cached_stock_search, invalidate_stock_cache
 from app.database import get_db
 from app.models import Stock
 from app.services.kline_service import get_daily_data
@@ -48,7 +49,52 @@ def _stock_search_rank(item: dict, keyword: str, normalized_code: str) -> tuple[
     return (4, code)
 
 
+def _query_stock_matches(db: Session, keyword: str, normalized_code: str, limit: int) -> list[Stock]:
+    db_filters = []
+    if normalized_code:
+        db_filters.append(Stock.code.like(f"{normalized_code}%"))
+    db_filters.append(Stock.name.like(f"%{keyword}%"))
+    return (
+        db.query(Stock)
+        .filter(or_(*db_filters))
+        .limit(limit * 2)
+        .all()
+    )
+
+
+def _query_tushare_matches(keyword: str, normalized_code: str, limit: int) -> list[dict]:
+    lookup = TushareService().get_stock_list()
+    if lookup is None or lookup.empty:
+        return []
+
+    frame = lookup.copy()
+    frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
+    code_mask = frame["symbol"].str.startswith(normalized_code) if normalized_code else False
+    name_mask = frame["name"].astype(str).str.contains(keyword, na=False)
+    matched = frame[code_mask | name_mask].head(limit * 3)
+
+    results = []
+    for _, row in matched.iterrows():
+        code = str(row.get("symbol", "")).zfill(6)
+        if not code or code == "000000":
+            continue
+        results.append({
+            "code": code,
+            "name": row.get("name"),
+            "market": TushareService._to_exchange(row.get("ts_code", "")),
+            "industry": row.get("industry"),
+        })
+    return results
+
+
+def _normalize_numeric(value: object) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
 @router.get("/search", response_model=StockSearchResponse)
+@cached_stock_search(ttl=600)
 async def search_stocks(
     q: str,
     limit: int = 10,
@@ -64,16 +110,8 @@ async def search_stocks(
     normalized_code = "".join(ch for ch in keyword if ch.isdigit())
     items_by_code: dict[str, dict] = {}
 
-    db_filters = []
-    if normalized_code:
-        db_filters.append(Stock.code.like(f"{normalized_code}%"))
-    db_filters.append(Stock.name.like(f"%{keyword}%"))
-    db_matches = (
-        db.query(Stock)
-        .filter(or_(*db_filters))
-        .limit(limit * 2)
-        .all()
-    )
+    db_matches = _query_stock_matches(db, keyword, normalized_code, limit)
+    tushare_matches = await asyncio.to_thread(_query_tushare_matches, keyword, normalized_code, limit)
     for stock in db_matches:
         items_by_code[stock.code] = {
             "code": stock.code,
@@ -82,27 +120,8 @@ async def search_stocks(
             "industry": stock.industry,
         }
 
-    if len(items_by_code) < limit:
-        try:
-            lookup = TushareService().get_stock_list()
-            if lookup is not None and not lookup.empty:
-                frame = lookup.copy()
-                frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
-                code_mask = frame["symbol"].str.startswith(normalized_code) if normalized_code else False
-                name_mask = frame["name"].astype(str).str.contains(keyword, na=False)
-                matched = frame[code_mask | name_mask].head(limit * 3)
-                for _, row in matched.iterrows():
-                    code = str(row.get("symbol", "")).zfill(6)
-                    if not code or code == "000000":
-                        continue
-                    items_by_code.setdefault(code, {
-                        "code": code,
-                        "name": row.get("name"),
-                        "market": TushareService._to_exchange(row.get("ts_code", "")),
-                        "industry": row.get("industry"),
-                    })
-        except Exception:
-            pass
+    for item in tushare_matches:
+        items_by_code.setdefault(item["code"], item)
 
     ranked_items = sorted(
         items_by_code.values(),
@@ -116,7 +135,7 @@ async def search_stocks(
 
 @router.get("/{code}", response_model=StockResponse)
 async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
-    """获取股票基本信息（只读模式，不触发自动同步）"""
+    """获取股票基本信息"""
     code = code.zfill(6)
     stock = db.query(Stock).filter(Stock.code == code).first()
 
@@ -133,15 +152,40 @@ async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(
             exists=True,
         )
 
-    # GET 接口不触发自动同步（只读模式）
-    # 如果数据库中不存在，返回基本信息，不调用 sync_stock_to_db
-    # 数据同步应由后台任务负责
+    try:
+        stock = TushareService().sync_stock_to_db(db, code)
+    except Exception:
+        stock = None
+
+    if stock:
+        return StockResponse(
+            code=stock.code,
+            name=stock.name,
+            market=stock.market,
+            industry=stock.industry,
+            exists=True,
+        )
+
     return StockResponse(code=code, exists=exists)
 
 
 @router.post("/kline", response_model=KLineResponse)
 async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> KLineResponse:
-    """获取 K线数据（纯数据库版本）"""
+    """获取 K线数据（纯数据库版本，带缓存）"""
+    from app.api.cache_decorators import build_kline_cache_key
+    from app.cache import cache
+
+    cache_key = build_kline_cache_key(request.code, request.days, request.include_weekly)
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        return KLineResponse(**cached_result)
+
+    result = await _get_kline_data_impl(request, db)
+    cache.set(cache_key, result.model_dump(mode="json"), ttl=300)
+    return result
+
+
+async def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineResponse:
     code = request.code.zfill(6)
 
     try:
@@ -149,6 +193,8 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
         end = date.today()
         start = end - timedelta(days=request.days * 2)  # 多取一些确保足够
         db_df = get_daily_data(db, code, start, end)
+        if db_df is None or db_df.empty:
+            db_df = analysis_service.load_stock_data(code)
 
         if db_df is None or db_df.empty:
             raise HTTPException(status_code=404, detail=f"股票 {code} 数据不存在，请先执行数据初始化")
@@ -179,31 +225,20 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
         # 确定成交量列名（可能是 vol 或 volume）
         vol_col = "vol" if "vol" in df.columns else "volume" if "volume" in df.columns else None
 
-        # 转换为响应格式
         daily_data = []
-        for _, row in df.iterrows():
-            try:
-                volume_val = 0
-                if vol_col:
-                    volume_val = float(row.get(vol_col, 0)) if not pd.isna(row.get(vol_col)) else 0
-
-                daily_data.append(
-                    KLineDataPoint(
-                        date=row["date"].strftime("%Y-%m-%d"),
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                        volume=volume_val,
-                        ma5=float(row["ma5"]) if not pd.isna(row["ma5"]) else None,
-                        ma10=float(row["ma10"]) if not pd.isna(row["ma10"]) else None,
-                        ma20=float(row["ma20"]) if not pd.isna(row["ma20"]) else None,
-                        ma60=float(row["ma60"]) if not pd.isna(row["ma60"]) else None,
-                    )
-                )
-            except (ValueError, TypeError):
-                # 跳过有问题的行
-                continue
+        for record in df.to_dict("records"):
+            daily_data.append(KLineDataPoint(
+                date=pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
+                open=float(record["open"]),
+                high=float(record["high"]),
+                low=float(record["low"]),
+                close=float(record["close"]),
+                volume=float(record.get(vol_col, 0) or 0) if vol_col and not pd.isna(record.get(vol_col)) else 0.0,
+                ma5=_normalize_numeric(record.get("ma5")),
+                ma10=_normalize_numeric(record.get("ma10")),
+                ma20=_normalize_numeric(record.get("ma20")),
+                ma60=_normalize_numeric(record.get("ma60")),
+            ))
 
         weekly_data = None
         if request.include_weekly and len(df) > 5 and vol_col:
@@ -231,23 +266,19 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
                 weekly["ma10"] = weekly["close"].rolling(window=10).mean()
 
                 weekly_data = []
-                for _, row in weekly.iterrows():
-                    try:
-                        weekly_data.append(
-                            KLineDataPoint(
-                                date=row["date"].strftime("%Y-%m-%d"),
-                                open=float(row["open"]),
-                                high=float(row["high"]),
-                                low=float(row["low"]),
-                                close=float(row["close"]),
-                                volume=float(row[vol_col]) if not pd.isna(row[vol_col]) else 0,
-                                ma5=float(row["ma5"]) if not pd.isna(row["ma5"]) else None,
-                                ma10=float(row["ma10"]) if not pd.isna(row["ma10"]) else None,
-                            )
-                        )
-                    except (ValueError, TypeError):
-                        # 跳过有问题的行
-                        continue
+                for record in weekly.to_dict("records"):
+                    weekly_data.append(KLineDataPoint(
+                        date=pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
+                        open=float(record["open"]),
+                        high=float(record["high"]),
+                        low=float(record["low"]),
+                        close=float(record["close"]),
+                        volume=float(record.get(vol_col, 0) or 0) if not pd.isna(record.get(vol_col)) else 0.0,
+                        ma5=_normalize_numeric(record.get("ma5")),
+                        ma10=_normalize_numeric(record.get("ma10")),
+                        ma20=None,
+                        ma60=None,
+                    ))
             except Exception:
                 # 如果周线计算失败，忽略周线数据
                 weekly_data = None

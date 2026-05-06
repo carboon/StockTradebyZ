@@ -13,11 +13,11 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 import pandas as pd
 
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
-from app.models import Watchlist, Stock, StockAnalysis
+from app.models import Watchlist, Stock, StockAnalysis, StockDaily
 from app.services.analysis_cache import analysis_cache
-from app.services.kline_service import get_daily_data
 
 
 def _resolve_analysis_trade_date(result: dict, df) -> date_class:
@@ -199,32 +199,8 @@ class WatchlistAnalysisService:
         codes = [w.code for w, _ in watchlist_items]
 
         # 2. 批量查询公共分析结果
-        if trade_date is None:
-            # 如果没有指定日期，查询最新的分析结果
-            stock_analysis_query = (
-                self.db.query(StockAnalysis)
-                .filter(
-                    StockAnalysis.code.in_(codes),
-                )
-                .distinct(StockAnalysis.code)
-                .order_by(StockAnalysis.code, StockAnalysis.trade_date.desc())
-            )
-        else:
-            stock_analysis_query = (
-                self.db.query(StockAnalysis)
-                .filter(
-                    StockAnalysis.code.in_(codes),
-                    StockAnalysis.trade_date == trade_date,
-                )
-            )
-
-        stock_analyses = stock_analysis_query.all()
-
-        # 构建 code -> StockAnalysis 的映射
-        analysis_map: Dict[str, StockAnalysis] = {}
-        for analysis in stock_analyses:
-            if analysis.code not in analysis_map:
-                analysis_map[analysis.code] = analysis
+        analysis_map = self._load_analysis_map(codes, trade_date)
+        levels_map = self._load_support_resistance_map(codes)
 
         # 3. 拼装结果
         results = []
@@ -266,11 +242,8 @@ class WatchlistAnalysisService:
                     "volume_healthy": analysis.volume_healthy,
                 }
 
-                # 动态计算支撑/阻力位
-                # df = self._load_stock_data(w.code)
-                # support_level, resistance_level = _calc_support_resistance(df)
-                # TODO: 从 K线数据计算支撑/阻力位
-                support_level, resistance_level = None, None
+                # 批量预取近 20 日行情后统一计算支撑/阻力位，避免逐只股票重复查库
+                support_level, resistance_level = levels_map.get(w.code, (None, None))
 
                 # 派生字段
                 item["derived"] = {
@@ -315,6 +288,102 @@ class WatchlistAnalysisService:
             results.append(item)
 
         return results
+
+    def _load_analysis_map(
+        self,
+        codes: List[str],
+        trade_date: Optional[date_class],
+    ) -> Dict[str, StockAnalysis]:
+        if not codes:
+            return {}
+
+        if trade_date is not None:
+            stock_analyses = (
+                self.db.query(StockAnalysis)
+                .filter(
+                    StockAnalysis.code.in_(codes),
+                    StockAnalysis.trade_date == trade_date,
+                )
+                .all()
+            )
+            return {analysis.code: analysis for analysis in stock_analyses}
+
+        latest_trade_dates = (
+            self.db.query(
+                StockAnalysis.code.label("code"),
+                func.max(StockAnalysis.trade_date).label("latest_trade_date"),
+            )
+            .filter(StockAnalysis.code.in_(codes))
+            .group_by(StockAnalysis.code)
+            .subquery()
+        )
+
+        stock_analyses = (
+            self.db.query(StockAnalysis)
+            .join(
+                latest_trade_dates,
+                and_(
+                    StockAnalysis.code == latest_trade_dates.c.code,
+                    StockAnalysis.trade_date == latest_trade_dates.c.latest_trade_date,
+                ),
+            )
+            .all()
+        )
+        return {analysis.code: analysis for analysis in stock_analyses}
+
+    def _load_support_resistance_map(
+        self,
+        codes: List[str],
+        lookback: int = 20,
+    ) -> Dict[str, tuple[float | None, float | None]]:
+        if not codes:
+            return {}
+
+        trade_dates_subquery = (
+            self.db.query(
+                StockDaily.code.label("code"),
+                StockDaily.trade_date.label("trade_date"),
+                func.row_number().over(
+                    partition_by=StockDaily.code,
+                    order_by=StockDaily.trade_date.desc(),
+                ).label("rn"),
+            )
+            .filter(StockDaily.code.in_(codes))
+            .subquery()
+        )
+
+        rows = (
+            self.db.query(
+                StockDaily.code,
+                StockDaily.trade_date,
+                StockDaily.low,
+                StockDaily.high,
+            )
+            .join(
+                trade_dates_subquery,
+                and_(
+                    StockDaily.code == trade_dates_subquery.c.code,
+                    StockDaily.trade_date == trade_dates_subquery.c.trade_date,
+                ),
+            )
+            .filter(trade_dates_subquery.c.rn <= lookback)
+            .all()
+        )
+
+        grouped: Dict[str, List[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(row.code, []).append({
+                "date": row.trade_date,
+                "low": row.low,
+                "high": row.high,
+            })
+
+        levels_map: Dict[str, tuple[float | None, float | None]] = {}
+        for code, values in grouped.items():
+            df = pd.DataFrame(values)
+            levels_map[code] = _calc_support_resistance(df)
+
+        return levels_map
 
     def get_stock_analysis_from_cache(
         self,

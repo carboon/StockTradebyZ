@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from zoneinfo import ZoneInfo
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
@@ -23,13 +24,17 @@ class TushareService:
     _verify_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
     _stock_list_cache: dict[str, tuple[float, pd.DataFrame]] = {}
     _latest_data_ready_cache: dict[str, tuple[float, bool]] = {}
+    # check_data_status 缓存（非实时系统，使用较长缓存时间）
+    _data_status_cache: dict[str, tuple[float, dict]] = {}
+    _data_status_cache_ttl = 300  # 5分钟缓存 - 数据只有在交易完成后才会更新
 
     def __init__(self, token: Optional[str] = None):
         if token is not None:
             self.token = token
         else:
             from app.config import settings
-            self.token = os.environ.get("TUSHARE_TOKEN", "") or settings.tushare_token
+            env_token = os.environ.get("TUSHARE_TOKEN", "")
+            self.token = env_token if env_token else ""
         self._pro = None
 
     @property
@@ -45,6 +50,8 @@ class TushareService:
     def verify_token(self) -> tuple[bool, str]:
         """验证 Token 是否有效"""
         cache_key = self.token or ""
+        if self._pro is None:
+            self._verify_cache.pop(cache_key, None)
         cached = self._verify_cache.get(cache_key)
         now = time.time()
         if cached and now - cached[0] < 60:
@@ -66,6 +73,8 @@ class TushareService:
     def get_stock_list(self) -> pd.DataFrame:
         """获取股票列表"""
         cache_key = self.token or ""
+        if self._pro is None:
+            self._stock_list_cache.pop(cache_key, None)
         cached = self._stock_list_cache.get(cache_key)
         now = time.time()
         if cached and now - cached[0] < 3600:
@@ -79,6 +88,14 @@ class TushareService:
         )
         self._stock_list_cache[cache_key] = (now, df)
         return df
+
+    def warm_stock_list_cache(self) -> bool:
+        """预热股票列表缓存，失败时吞掉异常并返回 False。"""
+        try:
+            df = self.get_stock_list()
+            return df is not None and not df.empty
+        except Exception:
+            return False
 
     @staticmethod
     def _to_exchange(ts_code: str) -> Optional[str]:
@@ -378,7 +395,7 @@ class TushareService:
         return raw_dir / f"{code}.csv"
 
     def load_stock_data(self, code: str) -> Optional[pd.DataFrame]:
-        """从数据库加载股票数据（替代原来的 CSV 读取）"""
+        """优先从数据库加载股票数据，失败时回退 CSV 文件。"""
         from app.services.kline_service import get_daily_data
         from app.database import SessionLocal
         from datetime import timedelta
@@ -386,11 +403,17 @@ class TushareService:
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=365)
 
-        with SessionLocal() as db:
-            df = get_daily_data(db, code, start_date, end_date)
+        try:
+            with SessionLocal() as db:
+                df = get_daily_data(db, code, start_date, end_date)
+        except SQLAlchemyError:
+            df = None
 
         if df is None or df.empty:
-            return None
+            csv_path = self.get_raw_data_path(code)
+            if not csv_path.exists():
+                return None
+            df = pd.read_csv(csv_path)
 
         df.columns = [c.lower() for c in df.columns]
         if "date" in df.columns:
@@ -401,7 +424,16 @@ class TushareService:
         return df.sort_values("date").reset_index(drop=True)
 
     def check_data_status(self) -> dict:
-        """检查数据状态（基于数据库）"""
+        """检查数据状态，优先数据库，失败时回退本地文件系统。"""
+        # 检查缓存
+        now = time.time()
+        cache_key = "data_status"
+        if self._pro is None:
+            self._data_status_cache.pop(cache_key, None)
+        cached = self._data_status_cache.get(cache_key)
+        if cached and now - cached[0] < self._data_status_cache_ttl:
+            return cached[1]
+
         from app.config import settings
         from app.database import SessionLocal
         from app.models import StockDaily, Candidate, AnalysisResult
@@ -419,6 +451,7 @@ class TushareService:
         status = {
             "raw_data": {
                 "exists": False,
+                "count": 0,
                 "stock_count": 0,
                 "raw_record_count": 0,
                 "latest_date": None,
@@ -434,137 +467,127 @@ class TushareService:
             "kline": {"exists": False, "count": 0, "latest_date": None},
         }
 
-        with SessionLocal() as db:
-            # 检查 K线数据（数据库）
-            kline_count = db.execute(select(func.count()).select_from(StockDaily)).scalar()
-            if kline_count and kline_count > 0:
-                status["raw_data"]["exists"] = True
-                status["raw_data"]["raw_record_count"] = kline_count
+        try:
+            with SessionLocal() as db:
+                # 检查 K线数据（数据库）
+                kline_count = db.execute(select(func.count()).select_from(StockDaily)).scalar()
+                if kline_count and kline_count > 0:
+                    status["raw_data"]["exists"] = True
+                    status["raw_data"]["raw_record_count"] = kline_count
 
-                # 获取最新日期
-                latest = db.execute(
-                    select(StockDaily.trade_date)
-                    .order_by(StockDaily.trade_date.desc())
-                    .limit(1)
-                ).first()
-                if latest:
-                    latest_local_date = latest[0].isoformat() if hasattr(latest[0], "isoformat") else str(latest[0])
-                    status["raw_data"]["latest_date"] = latest_local_date
-                    latest_day_stock_count = db.execute(
+                    # 获取最新日期
+                    latest = db.execute(
+                        select(StockDaily.trade_date)
+                        .order_by(StockDaily.trade_date.desc())
+                        .limit(1)
+                    ).first()
+                    if latest:
+                        latest_local_date = latest[0].isoformat() if hasattr(latest[0], "isoformat") else str(latest[0])
+                        status["raw_data"]["latest_date"] = latest_local_date
+                        latest_day_stock_count = db.execute(
+                            select(func.count(distinct(StockDaily.code)))
+                            .where(StockDaily.trade_date == latest[0])
+                        ).scalar() or 0
+                        status["raw_data"]["latest_date_stock_count"] = latest_day_stock_count
+
+                    # 获取有数据的股票数
+                    stocks_with_data = db.execute(
                         select(func.count(distinct(StockDaily.code)))
-                        .where(StockDaily.trade_date == latest[0])
-                    ).scalar() or 0
-                    status["raw_data"]["latest_date_stock_count"] = latest_day_stock_count
+                    ).scalar()
+                    if stocks_with_data:
+                        status["raw_data"]["stock_count"] = stocks_with_data
+                        status["raw_data"]["count"] = stocks_with_data
+                        status["kline"]["exists"] = True
+                        status["kline"]["count"] = stocks_with_data
 
-                # 获取有数据的股票数
-                stocks_with_data = db.execute(
-                    select(func.count(distinct(StockDaily.code)))
-                ).scalar()
-                if stocks_with_data:
-                    status["raw_data"]["stock_count"] = stocks_with_data
-                    status["kline"]["exists"] = True
-                    status["kline"]["count"] = stocks_with_data
+                    # 获取停牌股票信息（从预期总数中排除）
+                    suspended_codes = self.get_suspended_stocks(latest_trade_date) if latest_trade_date else set()
 
-                # 获取停牌股票信息（从预期总数中排除）
-                suspended_codes = self.get_suspended_stocks(latest_trade_date) if latest_trade_date else set()
+                    # 额外获取"长期无数据"的股票（可能是长期停牌或退市）
+                    from datetime import timedelta
+                    long_stale_codes = set()
 
-                # 额外获取"长期无数据"的股票（可能是长期停牌或退市）
-                # 如果某只股票的最新数据早于最新交易日，认为是停牌
-                from datetime import timedelta
-                long_stale_codes = set()
+                    if latest_trade_date and latest:
+                        try:
+                            from datetime import datetime
+                            latest_dt = datetime.fromisoformat(latest_trade_date) if isinstance(latest_trade_date, str) else latest_trade_date
+                            stale_threshold = latest_dt - timedelta(days=1)
 
-                if latest_trade_date and latest:
-                    try:
-                        from datetime import datetime
-                        latest_dt = datetime.fromisoformat(latest_trade_date) if isinstance(latest_trade_date, str) else latest_trade_date
-                        # 使用最新交易日的前一天作为阈值，只要有数据的股票都应该在最新交易日有数据
-                        stale_threshold = latest_dt - timedelta(days=1)
+                            stale_result = db.execute(
+                                select(StockDaily.code)
+                                .group_by(StockDaily.code)
+                                .having(func.max(StockDaily.trade_date) < stale_threshold.date())
+                            ).all()
 
-                        # 获取每只股票的最新交易日期
-                        subquery = db.execute(
-                            select(StockDaily.code, func.max(StockDaily.trade_date).label('max_date'))
-                            .group_by(StockDaily.code)
-                        ).all()
+                            long_stale_codes = {row[0] for row in stale_result}
+                        except Exception as e:
+                            import logging
+                            logging.getLogger("tushare_service").warning(f"获取长期停牌股票失败: {e}")
 
-                        for code, max_date in subquery:
-                            # 如果最新数据早于最新交易日的前一天，认为停牌
-                            if max_date < stale_threshold.date():
-                                long_stale_codes.add(code)
-                    except Exception as e:
-                        import logging
-                        logging.getLogger("tushare_service").warning(f"获取停牌股票失败: {e}")
+                    all_excluded_codes = suspended_codes | long_stale_codes
+                    active_expected_count = expected_total - len(all_excluded_codes)
 
-                # 合并停牌股票和长期停牌股票
-                all_excluded_codes = suspended_codes | long_stale_codes
-                active_expected_count = expected_total - len(all_excluded_codes)
+                    status["raw_data"]["is_latest"] = bool(
+                        status["raw_data"]["latest_date"] and latest_trade_date
+                        and status["raw_data"]["latest_date"] == latest_trade_date
+                    )
+                    status["raw_data"]["is_latest_complete"] = bool(
+                        status["raw_data"]["is_latest"]
+                        and active_expected_count > 0
+                        and status["raw_data"]["latest_date_stock_count"] >= active_expected_count
+                    )
 
-                # 判断是否为最新日期且数据完整
-                # is_latest: 数据库最新日期是否等于最新交易日
-                # is_latest_complete: 最新交易日数据是否齐全（排除停牌股票后达到100%）
-                is_latest_date = bool(
-                    latest_trade_date and status["raw_data"]["latest_date"] == latest_trade_date
-                )
+                candidate_count = db.execute(select(func.count()).select_from(Candidate)).scalar() or 0
+                if candidate_count > 0:
+                    status["candidates"]["exists"] = True
+                    status["candidates"]["count"] = candidate_count
+                    latest_candidate = db.execute(
+                        select(Candidate.pick_date)
+                        .order_by(Candidate.pick_date.desc())
+                        .limit(1)
+                    ).first()
+                    if latest_candidate:
+                        status["candidates"]["latest_date"] = latest_candidate[0].isoformat()
 
-                # 调试日志
-                import logging
-                logger = logging.getLogger("tushare_service")
-                logger.info(
-                    f"数据完成度判断: expected_total={expected_total}, "
-                    f"suspended={len(suspended_codes)}, long_stale={len(long_stale_codes)}, "
-                    f"active_expected={active_expected_count}, "
-                    f"latest_date_stock_count={status['raw_data']['latest_date_stock_count']}, "
-                    f"is_latest_date={is_latest_date}, "
-                    f"latest_trade_date={latest_trade_date}, latest_db_date={status['raw_data']['latest_date']}"
-                )
+                analysis_count = db.execute(select(func.count()).select_from(AnalysisResult)).scalar() or 0
+                if analysis_count > 0:
+                    status["analysis"]["exists"] = True
+                    status["analysis"]["count"] = analysis_count
+                    latest_analysis = db.execute(
+                        select(AnalysisResult.pick_date)
+                        .order_by(AnalysisResult.pick_date.desc())
+                        .limit(1)
+                    ).first()
+                    if latest_analysis:
+                        status["analysis"]["latest_date"] = latest_analysis[0].isoformat()
+        except SQLAlchemyError:
+            raw_dir = Path(getattr(settings, "data_dir", ROOT)) / "raw"
+            candidates_file = Path(getattr(settings, "data_dir", ROOT)) / "candidates" / "candidates_latest.json"
+            review_dir = Path(getattr(settings, "data_dir", ROOT)) / "review"
+            kline_dir = Path(getattr(settings, "data_dir", ROOT)) / "kline"
 
-                # 排除停牌股票后，要求活跃股票100%完成
-                is_latest_complete = bool(
-                    is_latest_date
-                    and active_expected_count > 0
-                    and status["raw_data"]["latest_date_stock_count"] >= active_expected_count
-                )
+            raw_files = list(raw_dir.glob("*.csv")) if raw_dir.exists() else []
+            status["raw_data"]["exists"] = bool(raw_files)
+            status["raw_data"]["count"] = len(raw_files)
+            status["raw_data"]["stock_count"] = len(raw_files)
 
-                logger.info(f"is_latest_complete={is_latest_complete}")
-
-                status["raw_data"]["is_latest"] = is_latest_date
-                status["raw_data"]["is_latest_complete"] = is_latest_complete
-                # 更新预期的活跃股票数（用于前端显示）
-                status["raw_data"]["expected_stock_count"] = active_expected_count
-                status["raw_data"]["suspended_count"] = len(suspended_codes)
-                status["raw_data"]["long_stale_count"] = len(long_stale_codes)
-
-            # 检查候选数据
-            candidate_count = db.execute(
-                select(func.count()).select_from(Candidate)
-            ).scalar()
-            if candidate_count and candidate_count > 0:
+            if candidates_file.exists():
                 status["candidates"]["exists"] = True
-                status["candidates"]["count"] = candidate_count
+                try:
+                    payload = json.loads(candidates_file.read_text(encoding="utf-8"))
+                    status["candidates"]["count"] = int(payload.get("count", 0) or 0)
+                    status["candidates"]["latest_date"] = payload.get("pick_date")
+                except Exception:
+                    pass
 
-                # 获取最新候选日期
-                latest_candidate = db.execute(
-                    select(Candidate.pick_date)
-                    .order_by(Candidate.pick_date.desc())
-                    .limit(1)
-                ).first()
-                if latest_candidate:
-                    status["candidates"]["latest_date"] = latest_candidate[0].isoformat()
+            status["analysis"]["exists"] = review_dir.exists() and any(review_dir.iterdir()) if review_dir.exists() else False
+            status["kline"]["exists"] = kline_dir.exists() and any(kline_dir.iterdir()) if kline_dir.exists() else False
 
-            # 检查分析结果
-            analysis_count = db.execute(
-                select(func.count()).select_from(AnalysisResult)
-            ).scalar()
-            if analysis_count and analysis_count > 0:
-                status["analysis"]["exists"] = True
-                status["analysis"]["count"] = analysis_count
-
-                # 获取最新分析日期
-                latest_analysis = db.execute(
-                    select(AnalysisResult.pick_date)
-                    .order_by(AnalysisResult.pick_date.desc())
-                    .limit(1)
-                ).first()
-                if latest_analysis:
-                    status["analysis"]["latest_date"] = latest_analysis[0].isoformat()
-
+        # 更新缓存
+        self._data_status_cache[cache_key] = (now, status)
         return status
+
+    @classmethod
+    def clear_data_status_cache(cls) -> None:
+        """清除数据状态缓存（在数据更新时调用）"""
+        cls._data_status_cache.clear()
