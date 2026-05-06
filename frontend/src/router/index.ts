@@ -34,13 +34,13 @@ const routes: RouteRecordRaw[] = [
     path: '/config',
     name: 'Config',
     component: () => import('@/views/Config.vue'),
-    meta: { title: '配置管理', icon: 'Setting', requiresAuth: true },
+    meta: { title: '配置管理', icon: 'Setting', requiresAuth: true, requiresAdmin: true },
   },
   {
     path: '/update',
     name: 'Update',
     component: () => import('@/views/Update.vue'),
-    meta: { title: '运维管理', icon: 'Refresh', requiresAuth: true },
+    meta: { title: '运维管理', icon: 'Refresh', requiresAuth: true, requiresAdmin: true },
   },
   {
     path: '/tomorrow-star',

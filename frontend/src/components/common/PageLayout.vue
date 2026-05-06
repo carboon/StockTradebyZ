@@ -41,7 +41,7 @@
         </div>
         <div class="header-right">
           <button
-            v-if="headerProgress"
+            v-if="authStore.isAdmin && headerProgress"
             class="header-progress-card"
             type="button"
             @click="router.push('/update')"
@@ -66,6 +66,7 @@
             </div>
           </button>
           <div
+            v-if="authStore.isAdmin"
             class="tushare-badge"
             :class="configStore.tushareReady ? 'is-ready' : 'is-pending'"
             @click="router.push('/config')"
@@ -74,6 +75,7 @@
             <span>{{ configStore.tushareReady ? 'Tushare 已就绪' : 'Tushare 待配置' }}</span>
           </div>
           <div
+            v-if="authStore.isAdmin"
             class="tushare-badge"
             :class="configStore.dataInitialized ? 'is-ready' : 'is-pending'"
             @click="router.push('/update')"
@@ -89,7 +91,7 @@
           >
             刷新
           </el-button>
-          <el-button text @click="router.push('/config')">
+          <el-button v-if="authStore.isAdmin" text @click="router.push('/config')">
             <el-icon><Setting /></el-icon>
           </el-button>
           <el-dropdown trigger="click" @command="handleUserCommand">
@@ -126,7 +128,7 @@
         </div>
       </div>
 
-      <div v-if="!configStore.apiAvailable" class="status-banner">
+      <div v-if="authStore.isAdmin && !configStore.apiAvailable" class="status-banner">
         <div class="status-banner__content">
           <strong>后端服务暂不可用。</strong>
           <span>{{ configStore.statusError || '请确认后端已启动，再重新检查。' }}</span>
@@ -135,7 +137,7 @@
           去查看
         </el-button>
       </div>
-      <div v-else-if="configStore.tushareStatus && !configStore.tushareReady" class="status-banner">
+      <div v-else-if="authStore.isAdmin && configStore.tushareStatus && !configStore.tushareReady" class="status-banner">
         <div class="status-banner__content">
           <strong>系统已启动，但行情数据源尚未就绪。</strong>
           <span>{{ configStore.tushareStatus.message || '请先在配置页填写并验证 TUSHARE_TOKEN。' }}</span>
@@ -145,7 +147,7 @@
         </el-button>
       </div>
       <div
-        v-else-if="configStore.tushareReady && !configStore.dataInitialized"
+        v-else-if="authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized"
         class="status-banner status-banner--info"
       >
         <div class="status-banner__content">
@@ -291,10 +293,11 @@ const menuRoutes = computed(() => {
     { path: '/tomorrow-star', icon: Star, meta: { title: '明日之星', icon: 'Star' } },
     { path: '/diagnosis', icon: Search, meta: { title: '单股诊断', icon: 'Search' } },
     { path: '/watchlist', icon: View, meta: { title: '重点观察', icon: 'View' } },
-    { path: '/update', icon: Refresh, meta: { title: '任务中心', icon: 'Refresh' } },
     { path: '/system-info', icon: Document, meta: { title: '系统说明', icon: 'Document' } },
   ]
   if (authStore.isAdmin) {
+    routes.push({ path: '/update', icon: Refresh, meta: { title: '任务中心', icon: 'Refresh' } })
+    routes.push({ path: '/config', icon: Setting, meta: { title: '配置管理', icon: 'Setting' } })
     routes.push({ path: '/admin', icon: Setting, meta: { title: '用户管理', icon: 'Setting' } })
   }
   return routes

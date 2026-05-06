@@ -382,10 +382,10 @@
 
     <!-- 初始状态 -->
     <el-empty v-else :description="emptyDescription" :image-size="120">
-      <el-button v-if="!configStore.dataInitialized && configStore.tushareReady" type="primary" @click="goTaskCenter">
+      <el-button v-if="authStore.isAdmin && !configStore.dataInitialized && configStore.tushareReady" type="primary" @click="goTaskCenter">
         前往任务中心初始化
       </el-button>
-      <el-button v-if="!configStore.tushareReady" @click="goConfig">
+      <el-button v-if="authStore.isAdmin && !configStore.tushareReady" @click="goConfig">
         前往配置
       </el-button>
     </el-empty>
@@ -400,11 +400,13 @@ import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
 import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, StockSearchItem, WatchlistItem } from '@/types'
+import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 const configStore = useConfigStore()
 const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state'
 const DIAGNOSIS_CHART_CACHE_KEY = 'stocktrade:diagnosis:chart-cache'
@@ -495,7 +497,7 @@ const scoreItems = computed(() => {
     },
   ]
 })
-const showInitializationAlert = computed(() => configStore.tushareReady && !configStore.dataInitialized)
+const showInitializationAlert = computed(() => authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized)
 const emptyDescription = computed(() => {
   if (!configStore.tushareReady) return '请先完成 Tushare 配置后再进行单股诊断'
   if (!configStore.dataInitialized) return '请先完成首次初始化，再进行单股诊断'

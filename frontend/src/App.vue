@@ -49,6 +49,7 @@ const isAuthPage = computed(() => {
 
 // 是否已登录
 const isLoggedIn = computed(() => authStore.isAuthenticated)
+const isAdmin = computed(() => authStore.isAdmin)
 
 // 系统状态检查的白名单路由（这些路由不会被强制跳转）
 const allowedRoutes = new Set(['/config', '/system-info', '/update'])
@@ -64,7 +65,7 @@ const gateType = computed<'api-unavailable' | 'tushare-unready' | 'initializatio
 
 // 是否显示模态对话框（登录页或未登录时不显示）
 const showStatusGate = computed(() => {
-  if (isAuthPage.value || !isLoggedIn.value) return false
+  if (isAuthPage.value || !isLoggedIn.value || !isAdmin.value) return false
   return gateType.value !== null && !isAllowedRoute.value
 })
 
@@ -155,7 +156,7 @@ watch(() => [route.path, gateType.value], () => {
 // 通知栏提示（仅已登录用户在非登录页显示）
 watch(() => [gateType.value, configStore.statusError, configStore.initializationMessage, isLoggedIn.value], () => {
   // 登录页或未登录时，不显示系统状态通知
-  if (isAuthPage.value || !isLoggedIn.value) {
+  if (isAuthPage.value || !isLoggedIn.value || !isAdmin.value) {
     noticeStore.clearNotice()
     return
   }

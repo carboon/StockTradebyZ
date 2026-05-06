@@ -42,7 +42,7 @@
       </div>
     </el-card>
     <el-alert
-      v-else-if="incrementalUpdate.status === 'failed'"
+      v-else-if="authStore.isAdmin && incrementalUpdate.status === 'failed'"
       class="page-alert"
       type="warning"
       :closable="false"
@@ -268,10 +268,12 @@ import type {
   TomorrowStarHistoryItem,
   TomorrowStarWindowStatusResponse,
 } from '@/types'
+import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 
 const router = useRouter()
+const authStore = useAuthStore()
 const configStore = useConfigStore()
 
 let loadDataRequestId = 0
@@ -364,7 +366,7 @@ const incrementalUpdate = ref<IncrementalUpdateStatus>({
 })
 
 const showCachedHint = computed(() => hydratedFromCache.value && !incrementalUpdate.value.running)
-const showInitializationAlert = computed(() => configStore.tushareReady && !configStore.dataInitialized)
+const showInitializationAlert = computed(() => authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized)
 const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && latestCandidates.value.length === 0)
 
 // 历史记录分页数据
