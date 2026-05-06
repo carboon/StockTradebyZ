@@ -2812,6 +2812,14 @@ function buildWebSocketUrl(path: string) {
     font-weight: 600;
   }
 
+  @media (max-width: 767px) {
+    .log-container {
+      height: auto;
+      min-height: 280px;
+      max-height: none;
+    }
+  }
+
   // 状态管理
   .health-card {
     .health-summary {

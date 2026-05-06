@@ -214,6 +214,8 @@ class DiagnosisHistoryResponse(BaseModel):
     name: Optional[str] = None
     history: List[B1CheckItem]
     total: int
+    page: int = 1
+    page_size: int = 10
     # 只读模式状态字段
     data_ready: bool = True  # True=有历史数据, False=暂无历史数据（未生成）
     message: Optional[str] = None
@@ -503,12 +505,18 @@ class UserRegister(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, description="用户名")
     password: str = Field(..., min_length=6, max_length=100, description="密码")
     display_name: str | None = Field(None, max_length=100, description="显示名称")
+    admin_wechat: str = Field(..., min_length=1, max_length=50, description="管理员微信验证答案")
 
 
 class UserLogin(BaseModel):
     """用户登录请求"""
     username: str = Field(..., description="用户名")
     password: str = Field(..., description="密码")
+
+
+class RegisterValidationPromptResponse(BaseModel):
+    """注册验证问题响应"""
+    question: str
 
 
 class TokenResponse(BaseModel):

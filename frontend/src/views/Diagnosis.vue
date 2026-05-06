@@ -227,6 +227,7 @@
                       <span class="collapse-title">评分明细</span>
                     </template>
                     <div class="score-details">
+                      <p class="score-summary">{{ analysisResult.comment || '-' }}</p>
                       <div class="score-grid">
                         <div class="score-item" v-for="item in scoreItems" :key="item.key">
                           <div class="score-header">
@@ -529,6 +530,18 @@
           </el-table-column>
           </el-table>
         </div>
+        <div v-if="historyTotal > historyPageSize" class="history-pagination">
+          <el-pagination
+            v-model:current-page="historyPage"
+            :page-size="historyPageSize"
+            layout="prev, pager, next"
+            :total="historyTotal"
+            :hide-on-single-page="false"
+            background
+            size="small"
+            @current-change="handleHistoryPageChange"
+          />
+        </div>
       </el-card>
 
       <el-dialog v-model="historyDetailVisible" title="每日检查详情" :width="isMobileViewport ? '94%' : '760px'" :fullscreen="isMobileViewport">
@@ -620,6 +633,9 @@ type DiagnosisSearchSuggestion = StockSearchItem & {
 }
 
 const historyData = ref<B1Check[]>([])
+const historyTotal = ref(0)
+const historyPage = ref(1)
+const historyPageSize = 10
 const historyDetailVisible = ref(false)
 const historyDetailLoading = ref(false)
 const historyDetailData = ref<DiagnosisHistoryDetailResponse | null>(null)
@@ -833,6 +849,7 @@ async function searchStock(requestId: number) {
   stockName.value = matchedStock.name || ''
   searchForm.value.code = stockCode.value
   analysisResult.value = null
+  historyPage.value = 1
 
   await loadStockInfo()
   if (requestId !== searchSequence) return
@@ -1356,8 +1373,15 @@ async function loadHistoryData() {
 
   const signal = beginRequest('historyLoad')
   try {
-    const data = await apiAnalysis.getDiagnosisHistory(stockCode.value, 180, { signal })
+    const data = await apiAnalysis.getDiagnosisHistory(
+      stockCode.value,
+      180,
+      historyPage.value,
+      historyPageSize,
+      { signal },
+    )
     historyData.value = data.history || []
+    historyTotal.value = data.total || 0
     persistDiagnosisState()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
@@ -1365,6 +1389,11 @@ async function loadHistoryData() {
   } finally {
     finishRequest('historyLoad', signal)
   }
+}
+
+async function handleHistoryPageChange(page: number) {
+  historyPage.value = page
+  await loadHistoryData()
 }
 
 // 分析任务轮询定时器
@@ -2214,6 +2243,12 @@ function normalizeRouteCode(code: unknown): string {
     overflow-x: auto;
   }
 
+  .history-pagination {
+    display: flex;
+    justify-content: center;
+    margin-top: 12px;
+  }
+
   .history-mobile-list {
     .history-card-list {
       display: grid;
@@ -2304,6 +2339,8 @@ function normalizeRouteCode(code: unknown): string {
 
 @media (max-width: 768px) {
   .diagnosis-page {
+    min-height: auto;
+
     .search-form-row {
       :deep(.el-form-item) {
         width: 100%;
@@ -2372,6 +2409,8 @@ function normalizeRouteCode(code: unknown): string {
     }
 
     .analysis-card {
+      height: auto;
+
       :deep(.el-card__body) {
         overflow: visible;
       }
@@ -2381,9 +2420,39 @@ function normalizeRouteCode(code: unknown): string {
           gap: 12px;
         }
 
-        .score-grid {
-          grid-template-columns: 1fr;
+        .score-details {
+          .score-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .score-item {
+            padding: 12px;
+            border-left-width: 4px;
+          }
+
+          .score-header {
+            align-items: flex-start;
+            gap: 8px;
+          }
+
+          .score-reason {
+            display: block;
+            -webkit-line-clamp: unset;
+            -webkit-box-orient: unset;
+            overflow: visible;
+            white-space: normal;
+            word-break: break-word;
+            color: #4b5563;
+            line-height: 1.6;
+            cursor: default;
+          }
         }
+      }
+    }
+
+    .history-card {
+      :deep(.el-card__body) {
+        overflow: visible;
       }
     }
 

@@ -60,6 +60,7 @@
             show-password
             :disabled="loading"
           />
+          <div class="field-hint field-hint--warning">安全起见，请不要与个人常用密码设置相同</div>
         </el-form-item>
 
         <el-form-item label="确认密码" prop="confirmPassword">
@@ -72,6 +73,15 @@
             show-password
             :disabled="loading"
             @keyup.enter="handleRegister"
+          />
+        </el-form-item>
+
+        <el-form-item :label="registerQuestion" prop="adminWechat">
+          <el-input
+            v-model="form.adminWechat"
+            placeholder="请输入答案"
+            size="large"
+            :disabled="loading"
           />
         </el-form-item>
 
@@ -103,12 +113,13 @@ import { ElMessage } from 'element-plus'
 import { TrendCharts, User, Lock } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
-import { checkHealth } from '@/api'
+import { apiAuth, checkHealth } from '@/api'
 
 const router = useRouter()
 const authStore = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
+const registerQuestionText = ref('系统管理员的微信名是什么')
 
 // 后端健康状态
 const backendHealthy = ref(true)
@@ -118,6 +129,7 @@ const form = reactive({
   displayName: '',
   password: '',
   confirmPassword: '',
+  adminWechat: '',
 })
 
 // 后端状态（用于显示提示，但不阻塞注册）
@@ -132,6 +144,7 @@ const backendStatus = computed(() => {
     message: '无法连接到后端服务，请确认服务已启动。您可以尝试点击注册，系统会自动重试。',
   }
 })
+const registerQuestion = computed(() => registerQuestionText.value || '系统管理员的微信名是什么')
 
 async function checkBackend() {
   const result = await checkHealth()
@@ -164,6 +177,9 @@ const rules: FormRules = {
     { required: true, message: '请确认密码', trigger: 'blur' },
     { validator: validateConfirm, trigger: 'blur' },
   ],
+  adminWechat: [
+    { required: true, message: '请输入答案', trigger: 'blur' },
+  ],
 }
 
 async function handleRegister() {
@@ -173,7 +189,12 @@ async function handleRegister() {
 
     loading.value = true
     try {
-      await authStore.register(form.username, form.password, form.displayName || undefined)
+      await authStore.register(
+        form.username,
+        form.password,
+        form.adminWechat,
+        form.displayName || undefined,
+      )
       ElMessage.success('注册成功')
       router.push('/login')
     } catch (err: unknown) {
@@ -191,6 +212,12 @@ async function handleRegister() {
 
 // 注册页挂载时检查后端状态
 onMounted(async () => {
+  try {
+    const prompt = await apiAuth.getRegisterValidationPrompt()
+    registerQuestionText.value = prompt.question || registerQuestionText.value
+  } catch {
+    // ignore and keep default prompt
+  }
   await checkBackend()
 })
 </script>
@@ -241,6 +268,17 @@ onMounted(async () => {
     align-items: center;
     gap: 8px;
   }
+}
+
+.field-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.field-hint--warning {
+  color: #b45309;
 }
 
 .login-btn {

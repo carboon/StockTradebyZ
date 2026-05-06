@@ -310,6 +310,8 @@ export interface DiagnosisHistoryResponse {
   name?: string
   history: B1Check[]
   total: number
+  page?: number
+  page_size?: number
   data_ready?: boolean
   message?: string | null
 }

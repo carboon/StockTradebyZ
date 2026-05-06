@@ -69,8 +69,8 @@ function mockStatus({ initialized = true } = {}) {
 }
 
 const latestCandidates = [
-  { code: '600000', kdj_j: 25, close_price: 10.5 },
-  { code: '000001', kdj_j: 12, close_price: 12.2 },
+  { code: '600000', name: '浦发银行', kdj_j: 25, close_price: 10.5 },
+  { code: '000001', name: '平安银行', kdj_j: 12, close_price: 12.2 },
 ]
 
 const latestResults = [
@@ -184,6 +184,8 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.latestCandidates).toHaveLength(2)
     expect(wrapper.vm.latestAnalysisResults).toHaveLength(4)
     expect(wrapper.vm.latestDate).toBe('2024-01-15')
+    expect(apiAnalysis.getCandidates).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiAnalysis.getResults).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('sorts top analysis results by verdict priority first, then score', async () => {
@@ -192,6 +194,14 @@ describe('TomorrowStar.vue', () => {
 
     const codes = wrapper.vm.topAnalysisResults.map((item: { code: string }) => item.code)
     expect(codes).toEqual(['C', 'B', 'A', 'D'])
+  })
+
+  it('resolves analysis result names from latest candidates', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.getAnalysisResultName({ code: '600000' })).toBe('浦发银行')
+    expect(wrapper.vm.getAnalysisResultName({ code: '999999' })).toBe('999999')
   })
 
   it('loads date-specific candidates and results when selecting a history row', async () => {

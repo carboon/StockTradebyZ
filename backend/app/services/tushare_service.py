@@ -465,6 +465,8 @@ class TushareService:
                 "latest_date_stock_count": 0,
                 "expected_stock_count": expected_total,
                 "is_latest_complete": False,
+                "suspended_count": 0,
+                "long_stale_count": 0,
             },
             "candidates": {"exists": False, "count": 0, "latest_date": None},
             "analysis": {"exists": False, "count": 0, "latest_date": None},
@@ -530,6 +532,8 @@ class TushareService:
 
                     all_excluded_codes = suspended_codes | long_stale_codes
                     active_expected_count = expected_total - len(all_excluded_codes)
+                    status["raw_data"]["suspended_count"] = len(suspended_codes)
+                    status["raw_data"]["long_stale_count"] = len(long_stale_codes)
 
                     status["raw_data"]["is_latest"] = bool(
                         status["raw_data"]["latest_date"] and latest_trade_date

@@ -33,10 +33,10 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function register(username: string, password: string, displayName?: string): Promise<void> {
+  async function register(username: string, password: string, adminWechat: string, displayName?: string): Promise<void> {
     loading.value = true
     try {
-      const res: LoginResponse = await apiAuth.register(username, password, displayName)
+      const res: LoginResponse = await apiAuth.register(username, password, adminWechat, displayName)
       token.value = res.access_token
       user.value = res.user
       localStorage.setItem(TOKEN_KEY, res.access_token)

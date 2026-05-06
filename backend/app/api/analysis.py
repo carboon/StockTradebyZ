@@ -385,6 +385,8 @@ async def get_analysis_results(
 async def get_diagnosis_history(
     code: str,
     days: int = 180,
+    page: int = 1,
+    page_size: int = 10,
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> DiagnosisHistoryResponse:
@@ -394,7 +396,14 @@ async def get_diagnosis_history(
     如果历史数据不存在，返回 data_ready=False 状态。
     """
     code = code.zfill(6)
-    history = analysis_service.get_stock_history_checks(code, days)
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), days, 50))
+    history_result = analysis_service.get_stock_history_checks(code, days, page, page_size)
+    if isinstance(history_result, tuple) and len(history_result) == 2:
+        history, total = history_result
+    else:
+        history = history_result or []
+        total = len(history)
     stock = db.query(Stock).filter(Stock.code == code).first()
     if stock is None:
         try:
@@ -406,9 +415,11 @@ async def get_diagnosis_history(
         code=code,
         name=stock.name if stock else None,
         history=[B1CheckItem.model_validate(h) for h in history],
-        total=len(history),
-        data_ready=len(history) > 0,
-        message="暂无历史数据，请先执行历史数据生成任务" if len(history) == 0 else None,
+        total=total,
+        page=page,
+        page_size=page_size,
+        data_ready=total > 0,
+        message="暂无历史数据，请先执行历史数据生成任务" if total == 0 else None,
     )
 
 

@@ -131,6 +131,27 @@
               </div>
             </el-form-item>
 
+            <el-divider content-position="left">注册验证</el-divider>
+
+            <el-form-item label="注册验证问题">
+              <el-input
+                v-model="configs.register_validation_question"
+                placeholder="例如：系统管理员的微信名是什么"
+                class="config-input"
+              />
+            </el-form-item>
+
+            <el-form-item label="注册验证答案">
+              <el-input
+                v-model="configs.register_validation_answer"
+                type="password"
+                show-password
+                placeholder="例如：船长"
+                class="config-input"
+              />
+              <div class="form-tip">注册时会要求回答该问题，答案匹配后才允许提交。</div>
+            </el-form-item>
+
             <!-- 保存按钮 -->
             <el-form-item class="desktop-actions" v-show="!isMobile">
               <el-button type="primary" :loading="saving" @click="saveConfigs(false)">
@@ -273,6 +294,8 @@ const configs = ref({
   gemini_api_key: '',
   default_reviewer: 'quant',
   min_score_threshold: 4.0,
+  register_validation_question: '系统管理员的微信名是什么',
+  register_validation_answer: '船长',
 })
 
 const verifying = ref(false)
@@ -416,6 +439,8 @@ async function loadConfigs() {
       gemini_api_key: configStore.configs.gemini_api_key || '',
       default_reviewer: configStore.configs.default_reviewer || 'quant',
       min_score_threshold: parseFloat(configStore.configs.min_score_threshold || '4.0'),
+      register_validation_question: configStore.configs.register_validation_question || '系统管理员的微信名是什么',
+      register_validation_answer: configStore.configs.register_validation_answer || '船长',
     }
   } catch (error) {
     console.error('Failed to load configs:', error)

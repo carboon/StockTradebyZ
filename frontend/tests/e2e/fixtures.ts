@@ -37,6 +37,13 @@ function buildTomorrowResults() {
 async function mockApi(page: Page, options: MockOptions = {}) {
   const isAdmin = options.admin ?? true
 
+  // Keep the catch-all handler first so the more specific routes registered
+  // below can override it. Playwright matches page.route handlers in reverse
+  // registration order.
+  await page.route('**/api/v1/**', async route => {
+    await route.fulfill({ json: {} })
+  })
+
   await page.route('**/api/health', async route => {
     await route.fulfill({ json: { status: 'ok' } })
   })
@@ -118,8 +125,8 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       json: {
         dates: ['2026-05-05', '2026-05-04'],
         history: [
-          { date: '2026-05-05', count: 18, pass: 5, status: 'ready' },
-          { date: '2026-05-04', count: 16, pass: 4, status: 'ready' },
+          { date: '2026-05-05', count: 18, pass: 5, status: 'success' },
+          { date: '2026-05-04', count: 16, pass: 4, status: 'success' },
         ],
       },
     })
@@ -366,10 +373,6 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       },
     })
   })
-
-  await page.route('**/api/**', async route => {
-    await route.fulfill({ json: {} })
-  })
 }
 
 type Fixtures = {
@@ -378,6 +381,15 @@ type Fixtures = {
 
 export const test = base.extend<Fixtures>({
   mockApp: async ({ page }, use) => {
+    page.on('pageerror', (error) => {
+      console.error('[playwright:pageerror]', error)
+    })
+    page.on('console', (message) => {
+      if (message.type() === 'error') {
+        console.error('[playwright:console:error]', message.text())
+      }
+    })
+
     await page.addInitScript(() => {
       window.localStorage.setItem('stocktrade_token', 'playwright-token')
     })

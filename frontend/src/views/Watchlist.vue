@@ -249,7 +249,7 @@
           <el-empty v-if="historyRows.length === 0" description="暂无分析记录" :image-size="60" />
           <div v-else-if="isMobile" class="history-mobile-list">
             <div
-              v-for="row in historyRows"
+              v-for="row in pagedHistoryRows"
               :key="`${row.id}-${row.analysis_date}`"
               class="history-mobile-card"
             >
@@ -283,7 +283,7 @@
               </div>
             </div>
           </div>
-          <el-table v-else :data="historyRows" class="history-table">
+          <el-table v-else :data="pagedHistoryRows" class="history-table">
             <el-table-column prop="analysis_date" label="交易日" min-width="130">
               <template #default="{ row }">
                 {{ formatTradeDate(row.analysis_date) }}
@@ -354,6 +354,17 @@
               </template>
             </el-table-column>
           </el-table>
+          <div v-if="historyRows.length > historyPageSize" class="history-pagination">
+            <el-pagination
+              v-model:current-page="historyPage"
+              :page-size="historyPageSize"
+              layout="prev, pager, next"
+              :total="historyRows.length"
+              :hide-on-single-page="false"
+              background
+              size="small"
+            />
+          </div>
         </el-card>
 
     <!-- 添加对话框 -->
@@ -529,6 +540,8 @@ const trendText = computed(() => {
 const latestAnalysis = computed(() => analysisHistory.value[0] || null)
 const summarySpan = computed(() => (isMobile.value ? 24 : 12))
 const actionSpan = computed(() => (isMobile.value ? 24 : 8))
+const historyPage = ref(1)
+const historyPageSize = 5
 const historyRows = computed(() => {
   const deduped = new Map<string, WatchlistAnalysis>()
 
@@ -541,6 +554,14 @@ const historyRows = computed(() => {
 
   return Array.from(deduped.values())
 })
+const pagedHistoryRows = computed(() => {
+  const start = (historyPage.value - 1) * historyPageSize
+  return historyRows.value.slice(start, start + historyPageSize)
+})
+
+function resetHistoryPagination() {
+  historyPage.value = 1
+}
 
 function getLatestAnalysisForStock(id: number): WatchlistAnalysis | null {
   if (selectedStock.value?.id === id && analysisHistory.value.length > 0) {
@@ -656,6 +677,7 @@ async function loadWatchlist() {
     if (!watchlist.value.length) {
       selectedStock.value = null
       analysisHistory.value = []
+      resetHistoryPagination()
       persistWatchlistState()
       return
     }
@@ -669,6 +691,7 @@ async function loadWatchlist() {
 
     if (!selectedStock.value) {
       analysisHistory.value = []
+      resetHistoryPagination()
       trendData.value = {
         outlook: 'neutral',
         support: null,
@@ -696,6 +719,7 @@ async function selectStock(row: WatchlistItem) {
   cancelRequest('analysis')
   cancelRequest('watchlistAnalyze')
   selectedStock.value = row
+  resetHistoryPagination()
   persistWatchlistState()
 
   // 并行加载K线和分析数据
@@ -805,6 +829,7 @@ async function loadAnalysis(id: number) {
     }
 
     analysisHistory.value = data
+    resetHistoryPagination()
     persistWatchlistState()
   } catch (error) {
     if (isRequestCanceled(error)) return
@@ -1400,6 +1425,12 @@ async function refreshAnalysisInBackground(id: number) {
     :deep(.el-table) {
       flex: 1;
     }
+
+    .history-pagination {
+      display: flex;
+      justify-content: center;
+      margin-top: 12px;
+    }
   }
 
   .risk-tooltip {
@@ -1750,6 +1781,7 @@ async function refreshAnalysisInBackground(id: number) {
 
 @media (max-width: 767px) {
   .watchlist-page {
+    min-height: auto;
     gap: 16px;
 
     .top-section {
@@ -1764,10 +1796,18 @@ async function refreshAnalysisInBackground(id: number) {
     .history-card {
       width: 100%;
       min-width: 0;
+
+      :deep(.el-card__body) {
+        overflow: visible;
+      }
     }
 
     .list-card {
       flex: none;
+
+      :deep(.el-card__body) {
+        overflow: visible;
+      }
     }
 
     .detail-card {
@@ -1832,6 +1872,7 @@ async function refreshAnalysisInBackground(id: number) {
     .top-section {
       flex-direction: column;
       height: auto;
+      min-height: 0;
     }
 
     .list-card {

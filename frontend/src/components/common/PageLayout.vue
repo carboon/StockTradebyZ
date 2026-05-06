@@ -620,6 +620,7 @@ $space-md: 24px;
   width: 100%;
   min-height: 100vh;
   min-height: 100dvh;
+  overflow-x: hidden;
 }
 
 .sidebar {
@@ -665,6 +666,7 @@ $space-md: 24px;
   min-width: 0;
   min-height: 100vh;
   min-height: 100dvh;
+  overflow: visible;
 }
 
 .app-header {
@@ -949,6 +951,7 @@ $space-md: 24px;
   padding: $space-md;
   overflow-y: auto;
   min-width: 0;
+  min-height: 0;
 
   .page-shell {
     width: 100%;
@@ -1002,7 +1005,11 @@ $space-md: 24px;
 
 @media (max-width: 767px) {
   .page-layout {
-    overflow-x: hidden;
+    min-height: auto;
+  }
+
+  .main-container {
+    min-height: auto;
   }
 
   .app-header {
@@ -1035,6 +1042,7 @@ $space-md: 24px;
 
   .app-main {
     padding: $space-sm 12px;
+    overflow: visible;
   }
 }
 </style>

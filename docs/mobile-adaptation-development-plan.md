@@ -80,6 +80,33 @@ P2：
 - API 地址不能写死 `127.0.0.1`，需通过环境变量配置
 - 在 `README.dev.md` 补充“移动端本地联调说明”
 
+### 本机启动 + 局域网验证方式
+
+推荐两种方式：
+
+1. Docker 统一入口：`http://<LAN-IP>:8080`
+2. Vite 直连前端：`http://<LAN-IP>:5173`
+
+建议流程：
+
+```bash
+# 方式一：完整联调
+./start.sh
+
+# 方式二：只启动前端，便于调样式
+cd frontend
+VITE_API_PROXY_TARGET=http://<LAN-IP>:8000 npm run dev:mobile
+```
+
+执行要求：
+
+- 电脑与手机连接同一 Wi-Fi
+- 本机防火墙放行 `5173`、`8000`、`8080`
+- 使用 `ipconfig getifaddr en0` 或等效命令获取本机局域网 IP
+- 手机优先访问 `http://<LAN-IP>:8080` 验证完整链路
+- 若只调前端样式，再访问 `http://<LAN-IP>:5173`
+- 联调时确认 API、静态资源、登录态与 WebSocket 在局域网地址下可用
+
 ## 开发阶段
 
 ### Phase 1：基础设施

@@ -32,6 +32,8 @@ ENV_KEY_MAP = {
     "gemini_api_key": "GEMINI_API_KEY",
     "default_reviewer": "DEFAULT_REVIEWER",
     "min_score_threshold": "MIN_SCORE_THRESHOLD",
+    "register_validation_question": "REGISTER_VALIDATION_QUESTION",
+    "register_validation_answer": "REGISTER_VALIDATION_ANSWER",
     "backend_host": "BACKEND_HOST",
     "backend_port": "BACKEND_PORT",
     "backend_cors_origins": "BACKEND_CORS_ORIGINS",
@@ -64,6 +66,8 @@ async def get_configs(db: Session = Depends(get_db), user=Depends(require_user))
         "gemini_api_key",
         "default_reviewer",
         "min_score_threshold",
+        "register_validation_question",
+        "register_validation_answer",
     ]
 
     # 从环境变量读取

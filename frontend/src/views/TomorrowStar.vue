@@ -106,6 +106,9 @@
         <el-empty v-else description="暂无历史信息" :image-size="90" />
 
         <div class="pagination-wrap mobile-pagination">
+          <div class="mobile-pagination__summary">
+            第 {{ historyPage }} / {{ historyPageCount }} 页
+          </div>
           <el-pagination
             v-model:current-page="historyPage"
             :page-size="historyPageSize"
@@ -350,6 +353,11 @@
               max-height="200"
             >
               <el-table-column prop="code" label="代码" width="80" />
+              <el-table-column label="名称" min-width="120" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ getAnalysisResultName(row) }}
+                </template>
+              </el-table-column>
               <el-table-column prop="total_score" label="评分" width="80" align="right">
                 <template #default="{ row }">
                   <el-tag :type="getScoreType(row.total_score)" size="small">
@@ -455,7 +463,7 @@ const freshnessVersion = ref<string>('')
 
 // 历史记录分页（左侧）
 const historyPage = ref(1)
-const historyPageSize = 10
+const historyPageSize = computed(() => (isMobile.value ? 5 : 12))
 
 // 最新数据（右侧显示）
 const latestCandidates = ref<Candidate[]>([])
@@ -499,9 +507,13 @@ const showInitializationEmpty = computed(() => showInitializationAlert.value && 
 
 // 历史记录分页数据
 const totalHistoryCount = computed(() => historyData.value.length)
+const historyPageCount = computed(() => Math.max(1, Math.ceil(totalHistoryCount.value / historyPageSize.value)))
 const displayHistoryData = computed(() => {
-  const start = (historyPage.value - 1) * historyPageSize
-  return historyData.value.slice(start, start + historyPageSize)
+  if (historyPage.value > historyPageCount.value) {
+    historyPage.value = historyPageCount.value
+  }
+  const start = (historyPage.value - 1) * historyPageSize.value
+  return historyData.value.slice(start, start + historyPageSize.value)
 })
 
 const totalLatestCandidates = computed(() => latestCandidates.value.length)
@@ -793,7 +805,7 @@ async function loadLatestCandidates() {
   const signal = beginRequest('latestCandidates')
   loadingLatest.value = true
   try {
-    const candidatesData = await apiAnalysis.getCandidates('', { signal })
+    const candidatesData = await apiAnalysis.getCandidates(undefined, { signal })
     if (requestId !== candidatesRequestId) return
     const candidates = candidatesData.candidates || []
     latestCandidates.value = candidates
@@ -812,7 +824,7 @@ async function loadLatestCandidates() {
         if (requestId !== candidatesRequestId) return
         // loadData 完成后，继续加载分析结果（因为上面 return 了，需要在这里加载）
         try {
-          const resultsData = await apiAnalysis.getResults('', { signal })
+          const resultsData = await apiAnalysis.getResults(undefined, { signal })
           if (requestId !== candidatesRequestId) return
           latestAnalysisResults.value = resultsData.results || []
           // 缓存最新数据
@@ -833,7 +845,7 @@ async function loadLatestCandidates() {
 
     // 加载最新分析结果
     try {
-      const resultsData = await apiAnalysis.getResults('', { signal })
+      const resultsData = await apiAnalysis.getResults(undefined, { signal })
       if (requestId !== candidatesRequestId) return
       latestAnalysisResults.value = resultsData.results || []
       // 缓存最新数据
@@ -1558,7 +1570,16 @@ $space-lg: 32px;
   }
 
   .mobile-pagination {
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
     justify-content: center;
+
+    .mobile-pagination__summary {
+      font-size: 12px;
+      color: #64748b;
+      line-height: 1;
+    }
   }
 
   // 统一提示框样式
@@ -1690,6 +1711,8 @@ $space-lg: 32px;
 
 @media (max-width: 767px) {
   .tomorrow-star-page {
+    min-height: auto;
+
     .update-progress-card {
       .progress-content {
         .progress-info {
@@ -1708,6 +1731,17 @@ $space-lg: 32px;
         display: block;
         margin-right: 0;
       }
+    }
+  }
+
+  .matched-height,
+  .history-card,
+  .candidates-card {
+    height: auto;
+    min-height: 0;
+
+    :deep(.el-card__body) {
+      overflow: visible;
     }
   }
 }

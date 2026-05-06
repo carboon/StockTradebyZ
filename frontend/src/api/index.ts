@@ -213,8 +213,17 @@ export const apiAnalysis = {
     api.post<null, { task_id: number }>('/v1/analysis/tomorrow-star/generate', null, { params: { reviewer } }),
 
   // 获取单股诊断历史
-  getDiagnosisHistory: (code: string, days: number = 180, options?: RequestOptions) =>
-    api.get<never, DiagnosisHistoryResponse>(`/v1/analysis/diagnosis/${code}/history`, { ...withRequestOptions(options, TIMEOUTS.long), params: { days } }),
+  getDiagnosisHistory: (
+    code: string,
+    days: number = 180,
+    page: number = 1,
+    pageSize: number = 10,
+    options?: RequestOptions,
+  ) =>
+    api.get<never, DiagnosisHistoryResponse>(`/v1/analysis/diagnosis/${code}/history`, {
+      ...withRequestOptions(options, TIMEOUTS.long),
+      params: { days, page, page_size: pageSize },
+    }),
 
   // 获取历史数据生成状态
   getHistoryStatus: (code: string, options?: RequestOptions) =>
@@ -326,11 +335,15 @@ export const apiTasks = {
 }
 
 export const apiAuth = {
+  // 获取注册验证问题
+  getRegisterValidationPrompt: () =>
+    api.get<never, { question: string }>('/v1/auth/register-validation'),
+
   // 用户注册
-  register: (username: string, password: string, display_name?: string) =>
-    api.post<{ username: string; password: string; display_name?: string }, LoginResponse>(
+  register: (username: string, password: string, admin_wechat: string, display_name?: string) =>
+    api.post<{ username: string; password: string; admin_wechat: string; display_name?: string }, LoginResponse>(
       '/v1/auth/register',
-      { username, password, display_name },
+      { username, password, admin_wechat, display_name },
     ),
 
   // 用户登录

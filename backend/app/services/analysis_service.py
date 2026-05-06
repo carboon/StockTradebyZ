@@ -895,12 +895,21 @@ class AnalysisService:
             traceback.print_exc()
             return {"pick_date": pick_date, "results": [], "total": 0, "min_score_threshold": 4.0}
 
-    def get_stock_history_checks(self, code: str, days: int = 180) -> list:
+    def get_stock_history_checks(
+        self,
+        code: str,
+        days: int = 180,
+        page: int = 1,
+        page_size: int | None = None,
+    ) -> tuple[list, int]:
         """获取股票历史检查记录（数据库持久化）。"""
         days = max(1, min(int(days), self.HISTORY_WINDOW_DAYS))
+        page = max(1, int(page))
+        if page_size is not None:
+            page_size = max(1, min(int(page_size), days))
         code = code.zfill(6)
         with SessionLocal() as db:
-            rows = (
+            base_query = (
                 db.query(DailyB1Check, DailyB1CheckDetail)
                 .outerjoin(
                     DailyB1CheckDetail,
@@ -911,9 +920,13 @@ class AnalysisService:
                 )
                 .filter(DailyB1Check.code == code)
                 .order_by(DailyB1Check.check_date.desc(), DailyB1Check.id.desc())
-                .limit(days)
-                .all()
             )
+            total = min(base_query.count(), days)
+            query = base_query.limit(days)
+            if page_size is not None:
+                offset = (page - 1) * page_size
+                query = query.offset(offset).limit(page_size)
+            rows = query.all()
             history = []
             for item, detail in rows:
                 score_details = detail.score_details_json if detail else {}
@@ -940,7 +953,7 @@ class AnalysisService:
                     "detail_version": detail.detail_version if detail else None,
                     "detail_updated_at": detail.updated_at if detail else None,
                 }))
-            return history
+            return history, total
 
     def generate_stock_history_checks(self, code: str, days: int = 180, clean: bool = True) -> dict:
         """

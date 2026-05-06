@@ -23,8 +23,8 @@
           </template>
 
           <div class="hero-content">
-            <h2>先筛候选，再做复核，再给结论。</h2>
-            <p>系统默认围绕“低位启动 + 趋势健康度”工作，不直接做全市场盲打分。</p>
+            <h2>筛候选，做复核，给结论。</h2>
+            <p>系统默认围绕 <span class="hero-highlight">低位启动 + 趋势健康度</span> 工作，不直接做全市场盲打分。</p>
           </div>
         </el-card>
 
@@ -42,6 +42,12 @@
           </el-card>
 
           <el-card class="overview-card">
+            <div class="overview-label">四维复核</div>
+            <div class="overview-value">4 个维度</div>
+            <p>趋势结构、价格位置、量价行为、历史异动，逐项复核后再给结论。</p>
+          </el-card>
+
+          <el-card class="overview-card">
             <div class="overview-label">最终结论</div>
             <div class="overview-value">3 档</div>
             <p>输出 PASS / WATCH / FAIL，不只看总分。</p>
@@ -50,11 +56,11 @@
           <el-card class="overview-card coming-soon">
             <template #default>
               <div class="coming-soon-content">
-                <el-tooltip content="待开发" placement="top">
-                  <div class="overview-label">LLM 评分</div>
+                <el-tooltip content="待完善：当前不纳入正式流程，仅保留概念位。" placement="top">
+                  <div class="overview-label">LLM 评分（待完善）</div>
                 </el-tooltip>
                 <div class="overview-value">
-                  <el-tooltip content="待开发" placement="top">
+                  <el-tooltip content="待完善：当前不纳入正式流程，仅保留概念位。" placement="top">
                     <span>—</span>
                   </el-tooltip>
                 </div>
@@ -165,6 +171,88 @@
               </div>
             </el-tab-pane>
 
+            <el-tab-pane label="详细名词解释" name="glossary">
+              <div class="panel-section">
+                <h3>数据与来源</h3>
+                <div class="definition-list">
+                  <div class="definition-item">
+                    <el-tag effect="plain">Tushare</el-tag>
+                    <p>本系统主要的数据源，用于拉取 A 股行情、行业分类、指数、解禁与基础资料。系统中的候选筛选、前置过滤和部分状态检查依赖这些数据。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel-section">
+                <h3>B1 候选条件</h3>
+                <div class="definition-list">
+                  <div class="definition-item">
+                    <el-tag effect="plain">KDJ 低位</el-tag>
+                    <p>当前默认看 KDJ 的 J 值，满足以下任一条件即可：J 小于 15，或 J 落在该股票自身历史较低分位（默认前 10%）附近。目的不是找最强，而是优先找相对偏低、可能刚启动的位置。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">知行线结构</el-tag>
+                    <p>当前默认使用 14、28、57、114 日四条均线构成长期结构线，并配合 10 日双重平滑得到短线。默认要求收盘价高于长期结构线，且短线高于长期结构线，也就是“价格不在长期线下方，短线也已站回长期结构之上”。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">周线多头</el-tag>
+                    <p>当前默认把日线聚合成周线后，检查 10 周、20 周、30 周均线是否满足短期线 &gt; 中期线 &gt; 长期线。只有周线结构仍偏多，系统才认为这不是单纯的日线级别弱反弹。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">最大量日非阴线</el-tag>
+                    <p>当前默认回看最近 20 个交易日，找出成交量最大的一天，并检查那一天是否满足收盘价不低于开盘价。这样做是为了避免把“巨量长阴、放量派发”也当成健康启动信号。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel-section">
+                <h3>前置过滤项</h3>
+                <div class="definition-list">
+                  <div class="definition-item">
+                    <el-tag effect="plain">ST</el-tag>
+                    <p>股票名称带 ST 或 *ST，通常意味着经营、财务或合规风险更高，系统默认直接过滤。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">次新</el-tag>
+                    <p>上市时间较短、历史样本不足的股票。当前默认要求至少积累一定交易日数据后才允许进入复核。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">解禁</el-tag>
+                    <p>未来一段时间若有较大比例限售股解禁，可能带来额外抛压，因此系统会按解禁占自由流通比例做过滤。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">行业强度</el-tag>
+                    <p>当前默认看近 20 个交易日表现：先计算股票所属申万一级行业的阶段收益，再与中证 500 做对比，并在全部申万一级行业里按相对强弱排序。默认只保留前 30% 的行业，落在后面的股票会被前置过滤拦截。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">市场环境</el-tag>
+                    <p>当前默认检查中证 500 和创业板指：至少有 1 个指数同时满足“收盘价在 20 日 EMA 之上、20 日 EMA 在 60 日 EMA 之上、近 20 日收益为正”，才认为市场环境基本达标。若两个代表性指数都偏弱，系统会减少在弱市中硬做趋势启动的情况。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel-section">
+                <h3>四维复核</h3>
+                <div class="definition-list">
+                  <div class="definition-item">
+                    <el-tag type="success" effect="plain">趋势结构</el-tag>
+                    <p>看中短期趋势是否顺畅，均线、价格重心和节奏是否支持“趋势启动”而不是脉冲反弹。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag type="warning" effect="plain">价格位置</el-tag>
+                    <p>看当前价格是不是已经太高、离支撑太远，避免在位置不划算时给出过高评价。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag type="danger" effect="plain">量价行为</el-tag>
+                    <p>看上涨是否有量能配合、放量是否健康、是否存在明显派发或冲高回落等不良行为。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag type="info" effect="plain">历史异动</el-tag>
+                    <p>看过去是否有异常拉升、巨震、长上影或剧烈回撤等痕迹，避免把高波动风险误判成趋势机会。</p>
+                  </div>
+                </div>
+              </div>
+            </el-tab-pane>
+
             <el-tab-pane label="选股流程" name="flow">
               <div class="flow-grid">
                 <div class="flow-item">
@@ -195,7 +283,7 @@
                   <div class="flow-step">04</div>
                   <div>
                     <h3>前置过滤</h3>
-                    <p>进一步过滤 ST、次新、解禁、行业强度和市场环境不匹配的股票。</p>
+                    <p>进一步过滤 ST、次新、解禁、行业强度和市场环境不匹配（例如板块强度不足、指数环境偏弱、风格不共振）的股票。</p>
                   </div>
                 </div>
 
@@ -210,8 +298,8 @@
                 <div class="flow-item">
                   <div class="flow-step">06</div>
                   <div>
-                    <h3>先定信号，再定结论</h3>
-                    <p>系统先判断 signal_type，再结合总分和关键子项给出 PASS / WATCH / FAIL。</p>
+                    <h3>先定信号类型，再定结论</h3>
+                    <p>系统先判断“信号类型”，再结合总分和关键子项给出 PASS / WATCH / FAIL。</p>
                   </div>
                 </div>
               </div>
@@ -283,6 +371,15 @@ const activeTab = ref('usage')
       margin: 0;
       color: var(--color-text-secondary);
       line-height: 1.8;
+    }
+
+    .hero-highlight {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, rgba(0, 180, 216, 0.14), rgba(34, 197, 94, 0.14));
+      color: #0f766e;
+      font-weight: 700;
     }
   }
 

@@ -18,7 +18,9 @@ from app.auth import (
     hash_password,
     verify_password,
 )
+from app.config import settings
 from app.database import get_db
+from app.models import Config
 from app.models import ApiKey, UsageLog, User
 from app.schemas import (
     AdminUserUpdate,
@@ -26,6 +28,7 @@ from app.schemas import (
     ApiKeyCreateResponse,
     ApiKeyResponse,
     ChangePasswordRequest,
+    RegisterValidationPromptResponse,
     TokenResponse,
     UsageStatsItem,
     UsageStatsResponse,
@@ -45,9 +48,39 @@ router = APIRouter()
 # --- 公开接口 ---
 
 
+@router.get("/register-validation", response_model=RegisterValidationPromptResponse)
+def get_register_validation_prompt(db: Session = Depends(get_db)):
+    """获取注册验证问题"""
+    register_question = (
+        db.query(Config).filter(Config.key == "register_validation_question").first()
+    )
+    question = (
+        register_question.value.strip()
+        if register_question and register_question.value
+        else settings.register_validation_question.strip()
+    )
+    return RegisterValidationPromptResponse(question=question)
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(body: UserRegister, request: Request, db: Session = Depends(get_db)):
     """用户注册"""
+    register_answer = (
+        db.query(Config).filter(Config.key == "register_validation_answer").first()
+    )
+    expected_answer = (
+        register_answer.value.strip()
+        if register_answer and register_answer.value
+        else settings.register_validation_answer.strip()
+    )
+    submitted_answer = body.admin_wechat.strip()
+
+    if not expected_answer or submitted_answer != expected_answer:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="管理员微信名验证失败",
+        )
+
     # 检查用户名是否已存在
     existing = db.query(User).filter(User.username == body.username).first()
     if existing:

@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440  # 24 hours
     admin_default_username: str = "admin"
     admin_default_password: str = "admin123"
+    register_validation_question: str = "系统管理员的微信名是什么"
+    register_validation_answer: str = "船长"
 
     # Redis 缓存配置
     redis_url: str = Field(default="", alias="REDIS_URL")

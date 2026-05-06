@@ -4,7 +4,12 @@
       <div class="login-header">
         <el-icon :size="36" color="#00B4D8"><TrendCharts /></el-icon>
         <h1>StockTrader</h1>
-        <p>A股量化选股系统</p>
+        <p class="login-subtitle">
+          面向A股的简化分析系统（内测）
+          <el-tooltip content="本系统为学习分析使用，并不对分析结果负责。" placement="top">
+            <el-icon class="subtitle-tip"><InfoFilled /></el-icon>
+          </el-tooltip>
+        </p>
       </div>
 
       <!-- 后端状态提示（不阻塞输入） -->
@@ -79,7 +84,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { TrendCharts, User, Lock } from '@element-plus/icons-vue'
+import { TrendCharts, User, Lock, InfoFilled } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
 import { checkHealth } from '@/api'
@@ -191,6 +196,17 @@ onMounted(async () => {
   p {
     color: #64748b;
     font-size: 14px;
+  }
+
+  .login-subtitle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .subtitle-tip {
+    color: #94a3b8;
+    cursor: help;
   }
 }
 
