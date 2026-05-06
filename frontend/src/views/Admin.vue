@@ -2,18 +2,79 @@
   <div class="admin-page">
     <el-card>
       <template #header>
-        <div class="card-header">
+        <div class="card-header" :class="{ 'card-header--mobile': isMobile }">
           <span>用户管理</span>
           <el-input
             v-model="searchQuery"
-            placeholder="搜索用户名..."
-            style="width: 200px"
+            placeholder="搜索用户名或显示名称..."
+            class="search-input"
             clearable
           />
         </div>
       </template>
 
-      <el-table :data="filteredUsers" stripe>
+      <template v-if="isMobile">
+        <div v-if="filteredUsers.length" class="user-card-list">
+          <el-card
+            v-for="user in filteredUsers"
+            :key="user.id"
+            shadow="hover"
+            class="user-card"
+          >
+            <div class="user-card__header">
+              <div>
+                <div class="user-card__title">{{ user.username }}</div>
+                <div class="user-card__subtitle">{{ user.display_name || '未设置显示名称' }}</div>
+              </div>
+              <div class="user-card__tags">
+                <el-tag :type="user.role === 'admin' ? 'danger' : 'info'" size="small">
+                  {{ user.role === 'admin' ? '管理员' : '用户' }}
+                </el-tag>
+                <el-tag :type="user.is_active ? 'success' : 'danger'" size="small">
+                  {{ user.is_active ? '活跃' : '禁用' }}
+                </el-tag>
+              </div>
+            </div>
+
+            <div class="user-card__meta">
+              <div class="meta-item">
+                <span class="meta-label">日配额</span>
+                <span class="meta-value">{{ user.daily_quota }}</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">注册时间</span>
+                <span class="meta-value">{{ formatDate(user.created_at) }}</span>
+              </div>
+            </div>
+
+            <div class="user-card__actions">
+              <el-button size="small" @click="openEditDialog(user)">编辑</el-button>
+              <el-button size="small" @click="showUsage(user)">用量</el-button>
+              <el-button
+                v-if="user.is_active"
+                size="small"
+                type="danger"
+                plain
+                @click="handleDisable(user)"
+              >
+                禁用
+              </el-button>
+              <el-button
+                v-else
+                size="small"
+                type="success"
+                plain
+                @click="handleEnable(user)"
+              >
+                启用
+              </el-button>
+            </div>
+          </el-card>
+        </div>
+        <el-empty v-else description="未找到匹配用户" />
+      </template>
+
+      <el-table v-else :data="filteredUsers" stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="username" label="用户名" width="120" />
         <el-table-column prop="display_name" label="显示名称" width="120">
@@ -65,8 +126,13 @@
     </el-card>
 
     <!-- 编辑用户对话框 -->
-    <el-dialog v-model="editDialogVisible" title="编辑用户" width="400px">
-      <el-form label-width="80px">
+    <el-dialog
+      v-model="editDialogVisible"
+      title="编辑用户"
+      :width="isMobile ? '100%' : '400px'"
+      :fullscreen="isMobile"
+    >
+      <el-form :label-width="isMobile ? undefined : '80px'" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="用户名">
           <el-input :model-value="editingUser?.username" disabled />
         </el-form-item>
@@ -87,11 +153,42 @@
     </el-dialog>
 
     <!-- 用量统计对话框 -->
-    <el-dialog v-model="usageDialogVisible" title="用户用量统计" width="500px">
+    <el-dialog
+      v-model="usageDialogVisible"
+      title="用户用量统计"
+      :width="isMobile ? '100%' : '500px'"
+      :fullscreen="isMobile"
+    >
       <div v-if="usageLoading">加载中...</div>
       <div v-else>
-        <el-tag style="margin-bottom: 12px">近7日总计 {{ userUsage.total_calls }} 次</el-tag>
-        <el-table :data="userUsage.stats" stripe size="small">
+        <el-tag class="usage-total-tag">近7日总计 {{ userUsage.total_calls }} 次</el-tag>
+        <template v-if="isMobile">
+          <div v-if="userUsage.stats.length" class="usage-summary-list">
+            <el-card
+              v-for="stat in userUsage.stats"
+              :key="stat.date"
+              shadow="never"
+              class="usage-summary-card"
+            >
+              <div class="usage-summary-card__header">
+                <span>{{ stat.date }}</span>
+                <el-tag size="small" type="info">{{ stat.total_calls }} 次</el-tag>
+              </div>
+              <div class="usage-summary-card__body">
+                <div
+                  v-for="(count, endpoint) in stat.endpoints"
+                  :key="endpoint"
+                  class="usage-endpoint-item"
+                >
+                  <span class="usage-endpoint-name">{{ endpoint }}</span>
+                  <span class="usage-endpoint-count">{{ count }}</span>
+                </div>
+              </div>
+            </el-card>
+          </div>
+          <el-empty v-else description="暂无用量数据" />
+        </template>
+        <el-table v-else :data="userUsage.stats" stripe size="small">
           <el-table-column prop="date" label="日期" width="120" />
           <el-table-column prop="total_calls" label="调用次数" width="80" />
           <el-table-column label="端点明细">
@@ -111,15 +208,20 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiAuth } from '@/api'
+import { useResponsive } from '@/composables/useResponsive'
 import type { UserListItem, UsageStatsResponse } from '@/types'
 
 const users = ref<UserListItem[]>([])
 const searchQuery = ref('')
+const { isMobile } = useResponsive()
 
 const filteredUsers = computed(() => {
   if (!searchQuery.value) return users.value
   const q = searchQuery.value.toLowerCase()
-  return users.value.filter(u => u.username.toLowerCase().includes(q))
+  return users.value.filter(u =>
+    u.username.toLowerCase().includes(q) ||
+    (u.display_name ?? '').toLowerCase().includes(q)
+  )
 })
 
 async function loadUsers() {
@@ -210,5 +312,152 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
+  gap: 16px;
+}
+
+.search-input {
+  width: 200px;
+}
+
+.user-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.user-card {
+  border-radius: 14px;
+}
+
+.user-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.user-card__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.user-card__subtitle {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.user-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.user-card__meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.meta-value {
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  word-break: break-word;
+}
+
+.user-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.usage-total-tag {
+  margin-bottom: 12px;
+}
+
+.usage-summary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.usage-summary-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.usage-summary-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usage-endpoint-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.usage-endpoint-name {
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
+}
+
+.usage-endpoint-count {
+  flex-shrink: 0;
+  color: var(--el-text-color-primary);
+}
+
+@media (max-width: 767px) {
+  .admin-page {
+    gap: 12px;
+  }
+
+  .card-header--mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-input {
+    width: 100%;
+  }
+
+  .user-card__header,
+  .usage-summary-card__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .user-card__tags {
+    justify-content: flex-start;
+  }
+
+  .user-card__meta {
+    grid-template-columns: 1fr;
+  }
+
+  .user-card__actions :deep(.el-button) {
+    min-width: 72px;
+  }
 }
 </style>

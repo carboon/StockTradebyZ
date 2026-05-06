@@ -51,7 +51,133 @@
       :description="incrementalUpdate.last_error || incrementalUpdate.message || '可前往任务中心重新发起，系统会尽量从已完成位置继续。'"
     />
 
-    <el-row :gutter="20" class="top-row">
+    <div v-if="isMobile" class="mobile-layout">
+      <el-card class="mobile-section-card">
+        <template #header>
+          <div class="card-header">
+            <div class="title-section">
+              <span>历史信息</span>
+              <el-tag v-if="selectedDate" size="small" type="info" effect="plain">
+                已选 {{ viewingDateDisplay }}
+              </el-tag>
+            </div>
+          </div>
+        </template>
+
+        <div class="table-header-tip mobile-tip">
+          <span class="tip-item">· 点击日期刷新对应 Top 5</span>
+        </div>
+
+        <div v-if="displayHistoryData.length > 0" class="mobile-history-list">
+          <button
+            v-for="row in displayHistoryData"
+            :key="row.rawDate"
+            type="button"
+            class="mobile-history-item"
+            :class="{ active: selectedDate === row.rawDate }"
+            @click="selectDate(row)"
+          >
+            <div class="mobile-history-item__header">
+              <span class="mobile-history-item__date">{{ row.date }}</span>
+              <div class="mobile-history-item__status">
+                <el-tag
+                  v-if="row.rawDate === latestDate"
+                  type="success"
+                  size="small"
+                  class="status-tag"
+                >
+                  最新
+                </el-tag>
+                <el-tag
+                  :type="getHistoryStatusTagType(row.status)"
+                  size="small"
+                  class="status-tag"
+                >
+                  {{ getHistoryStatusLabel(row.status) }}
+                </el-tag>
+              </div>
+            </div>
+            <div class="mobile-history-item__meta">
+              <span>候选数 {{ row.count === '-' ? '-' : row.count }}</span>
+              <span>趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
+            </div>
+          </button>
+        </div>
+        <el-empty v-else description="暂无历史信息" :image-size="90" />
+
+        <div class="pagination-wrap mobile-pagination">
+          <el-pagination
+            v-model:current-page="historyPage"
+            :page-size="historyPageSize"
+            layout="prev, pager, next"
+            :total="totalHistoryCount"
+            :hide-on-single-page="false"
+            background
+            size="small"
+          />
+        </div>
+      </el-card>
+
+      <el-card class="mobile-section-card">
+        <template #header>
+          <div class="card-header">
+            <div class="title-section">
+              <span>分析结果 Top 5</span>
+              <el-tag size="small" type="success" class="date-tag">
+                {{ viewingDateDisplay }}
+              </el-tag>
+            </div>
+            <div class="header-actions">
+              <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
+                已展示缓存结果
+              </el-tag>
+              <el-button
+                type="primary"
+                size="small"
+                :icon="Refresh"
+                :loading="loadingLatest"
+                @click="refreshCurrentCandidates"
+              >
+                刷新
+              </el-button>
+            </div>
+          </div>
+        </template>
+
+        <div class="table-header-tip mobile-tip">
+          <span class="tip-item">· 仅展示评分最高的 5 只股票</span>
+        </div>
+
+        <div v-if="topAnalysisResults.length > 0" class="mobile-analysis-list">
+          <button
+            v-for="row in topAnalysisResults"
+            :key="row.code"
+            type="button"
+            class="mobile-analysis-item"
+            @click="viewStock(row.code)"
+          >
+            <div class="mobile-analysis-item__header">
+              <div>
+                <div class="mobile-analysis-item__code">{{ row.code }}</div>
+                <div class="mobile-analysis-item__name">{{ getAnalysisResultName(row) }}</div>
+              </div>
+              <el-tag :type="getScoreType(row.total_score)" size="small">
+                {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
+              </el-tag>
+            </div>
+            <div class="mobile-analysis-item__meta">
+              <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                {{ getSignalTypeLabel(row.signal_type) }}
+              </el-tag>
+              <span class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
+            </div>
+          </button>
+        </div>
+        <el-empty v-else description="暂无 Top 5 分析结果" :image-size="90" />
+      </el-card>
+    </div>
+
+    <el-row v-else :gutter="20" class="top-row">
       <!-- 左侧：历史记录 -->
       <el-col :span="8">
         <el-card class="history-card matched-height">
@@ -271,10 +397,12 @@ import type {
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
+import { useResponsive } from '@/composables/useResponsive'
 
 const router = useRouter()
 const authStore = useAuthStore()
 const configStore = useConfigStore()
+const { isMobile } = useResponsive()
 
 let loadDataRequestId = 0
 let candidatesRequestId = 0
@@ -1033,7 +1161,22 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
 }
 
 function viewStock(code: string) {
-  router.push({ path: '/diagnosis', query: { code } })
+  router.push({ path: '/diagnosis', query: { code, source: 'tomorrow-star', days: '30' } })
+}
+
+function getAnalysisResultName(result: AnalysisResult): string {
+  const matchedCandidate = latestCandidates.value.find((candidate) => candidate.code === result.code)
+  if (typeof matchedCandidate?.name === 'string' && matchedCandidate.name.trim()) {
+    return matchedCandidate.name.trim()
+  }
+  return result.code
+}
+
+function getAnalysisResultComment(result: AnalysisResult): string {
+  if (typeof result.comment === 'string' && result.comment.trim()) {
+    return result.comment.trim()
+  }
+  return '点击查看单股诊断'
 }
 
 function formatDate(date: string | Date): string {
@@ -1333,6 +1476,91 @@ $space-lg: 32px;
     }
   }
 
+  .mobile-layout {
+    display: flex;
+    flex-direction: column;
+    gap: $space-sm;
+  }
+
+  .mobile-section-card {
+    .mobile-tip {
+      margin-bottom: $space-sm;
+    }
+  }
+
+  .mobile-history-list,
+  .mobile-analysis-list {
+    display: flex;
+    flex-direction: column;
+    gap: $space-xs;
+  }
+
+  .mobile-history-item,
+  .mobile-analysis-item {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    background: #fff;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .mobile-history-item.active {
+    border-color: #409eff;
+    box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.12);
+    background: #f7fbff;
+  }
+
+  .mobile-history-item__header,
+  .mobile-analysis-item__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: $space-xs;
+  }
+
+  .mobile-history-item__date,
+  .mobile-analysis-item__code {
+    font-size: 14px;
+    font-weight: 600;
+    color: #1f2937;
+  }
+
+  .mobile-history-item__status {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .mobile-history-item__meta,
+  .mobile-analysis-item__meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: #606266;
+  }
+
+  .mobile-analysis-item__name {
+    margin-top: 4px;
+    font-size: 13px;
+    color: #606266;
+  }
+
+  .mobile-analysis-item__comment {
+    line-height: 1.5;
+    color: #374151;
+    word-break: break-word;
+  }
+
+  .mobile-pagination {
+    justify-content: center;
+  }
+
   // 统一提示框样式
   .table-header-tip {
     margin-bottom: $space-xs;
@@ -1457,6 +1685,30 @@ $space-lg: 32px;
   // 统一按钮样式
   .el-button {
     border-radius: 4px;
+  }
+}
+
+@media (max-width: 767px) {
+  .tomorrow-star-page {
+    .update-progress-card {
+      .progress-content {
+        .progress-info {
+          flex-wrap: wrap;
+
+          .current-code {
+            margin-left: 0;
+            width: 100%;
+          }
+        }
+      }
+    }
+
+    .table-header-tip {
+      .tip-item {
+        display: block;
+        margin-right: 0;
+      }
+    }
   }
 }
 

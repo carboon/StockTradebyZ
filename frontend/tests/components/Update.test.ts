@@ -6,9 +6,13 @@ import ElementPlus from 'element-plus'
 import Update from '@/views/Update.vue'
 
 const mockPush = vi.fn()
+const mockRoute = {
+  query: {},
+}
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mockPush }),
+  useRoute: () => mockRoute,
 }))
 
 vi.mock('element-plus', async () => {
@@ -32,6 +36,7 @@ vi.mock('@/api', () => ({
     getRunning: vi.fn(),
     getAll: vi.fn(),
     getStatus: vi.fn(),
+    getAdminSummary: vi.fn(),
     getEnvironment: vi.fn(),
     getDiagnostics: vi.fn(),
     getIncrementalStatus: vi.fn(),
@@ -188,6 +193,28 @@ describe('Update.vue', () => {
     mockPush.mockReset()
     vi.mocked(apiTasks.getRunning).mockResolvedValue({ tasks: [], total: 0 } as any)
     vi.mocked(apiTasks.getAll).mockResolvedValue({ tasks: [], total: 0 } as any)
+    vi.mocked(apiTasks.getAdminSummary).mockResolvedValue({
+      system_ready: true,
+      latest_trade_date: '2025-04-25',
+      latest_db_date: '2025-04-25',
+      latest_candidate_date: '2025-04-25',
+      latest_analysis_date: '2025-04-25',
+      gap_days: 0,
+      data_gap: { has_gap: false },
+      data_production: {
+        raw_ready_count: 3200,
+        raw_missing_count: 0,
+        raw_suspended_count: 0,
+        raw_long_stale_count: 0,
+        raw_invalid_count: 0,
+        raw_calendar_latest_trade_date: '2025-04-25',
+      },
+      pipeline_status: [],
+      pending_actions: [],
+      current_task: null,
+      latest_task: null,
+      latest_task_summary: '',
+    } as any)
     vi.mocked(apiTasks.getEnvironment).mockResolvedValue({ sections: [] } as any)
     vi.mocked(apiTasks.getDiagnostics).mockResolvedValue({
       generated_at: '2025-04-25T10:00:00',

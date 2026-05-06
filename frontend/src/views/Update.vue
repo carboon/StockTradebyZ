@@ -37,6 +37,26 @@
               </div>
             </el-card>
 
+            <el-card v-if="isMobile" class="mobile-summary-card">
+              <template #header>
+                <span>移动端摘要</span>
+              </template>
+              <div class="mobile-summary-list">
+                <div
+                  v-for="card in dashboardStatusCards"
+                  :key="card.label"
+                  class="mobile-summary-item"
+                  :class="card.type ? `mobile-summary-item--${card.type}` : ''"
+                >
+                  <div class="mobile-summary-item__top">
+                    <span class="mobile-summary-item__label">{{ card.label }}</span>
+                    <span class="mobile-summary-item__value">{{ card.value }}</span>
+                  </div>
+                  <div class="mobile-summary-item__meta">{{ card.meta || '-' }}</div>
+                </div>
+              </div>
+            </el-card>
+
             <!-- 三段式状态总览 -->
             <el-card class="dashboard-cards">
               <div class="dashboard-cards__grid">
@@ -524,7 +544,26 @@
               </div>
             </template>
 
-            <el-table :data="historyTasks" max-height="300" @row-click="viewTaskDetail">
+            <div v-if="isMobile" class="history-task-cards">
+              <el-empty v-if="recentHistoryTasks.length === 0" description="暂无历史任务" :image-size="60" />
+              <div
+                v-for="task in recentHistoryTasks"
+                :key="task.id"
+                class="history-task-card"
+                @click="viewTaskDetail(task)"
+              >
+                <div class="history-task-card__header">
+                  <div class="history-task-card__title">
+                    <span>#{{ task.id }}</span>
+                    <span>{{ getTaskTypeLabel(task.task_type) }}</span>
+                  </div>
+                  <el-tag :type="getStatusType(task.status)" size="small">{{ task.status }}</el-tag>
+                </div>
+                <div class="history-task-card__summary">{{ task.summary || '暂无摘要' }}</div>
+                <div class="history-task-card__meta">{{ formatDateTime(task.created_at) }}</div>
+              </div>
+            </div>
+            <el-table v-else :data="historyTasks" max-height="300" @row-click="viewTaskDetail">
               <el-table-column prop="id" label="ID" width="60" />
               <el-table-column label="类型" width="100">
                 <template #default="{ row }">{{ getTaskTypeLabel(row.task_type) }}</template>
@@ -568,7 +607,25 @@
               </div>
             </template>
 
-            <div ref="logRef" class="log-container" @scroll="handleLogScroll">
+            <div v-if="isMobile" class="mobile-log-summary">
+              <div class="mobile-log-summary__hint">
+                移动端仅展示最近告警/错误摘要，完整长日志请切换桌面端查看。
+              </div>
+              <el-empty v-if="recentFailedLogs.length === 0" description="暂无最近告警或错误日志" :image-size="60" />
+              <div
+                v-for="(log, index) in recentFailedLogs"
+                :key="log.id || `${log.task_id}-${index}`"
+                class="mobile-log-item"
+                :class="`mobile-log-item--${String(log.level || '').toLowerCase()}`"
+              >
+                <div class="mobile-log-item__header">
+                  <span>{{ formatLogTime(log.log_time) }}</span>
+                  <span>{{ log.level?.toUpperCase() }}</span>
+                </div>
+                <div class="mobile-log-item__message">{{ log.message }}</div>
+              </div>
+            </div>
+            <div v-else ref="logRef" class="log-container" @scroll="handleLogScroll">
               <div v-if="filteredLogs.length === 0" class="log-empty">
                 <el-icon><Document /></el-icon>
                 <p>{{ selectedTask ? '当前仅展示 WARN / ERROR，暂无可显示日志' : '当前仅展示 WARN / ERROR，请选择任务或切换到"全部日志"' }}</p>
@@ -615,6 +672,34 @@
                   <div class="health-title">任务状态</div>
                   <div class="health-desc">{{ runningTasksCount > 0 ? `${runningTasksCount}个运行中` : '无运行任务' }}</div>
                 </div>
+              </div>
+            </div>
+          </el-card>
+
+          <el-card v-if="isMobile" class="mobile-status-card">
+            <template #header>
+              <span>关键系统状态</span>
+            </template>
+            <div class="mobile-status-list">
+              <div class="mobile-status-row">
+                <span>有效最新交易日</span>
+                <strong>{{ adminSummary?.latest_trade_date || '-' }}</strong>
+              </div>
+              <div class="mobile-status-row">
+                <span>数据库最新</span>
+                <strong>{{ adminSummary?.latest_db_date || '-' }}</strong>
+              </div>
+              <div class="mobile-status-row">
+                <span>候选最新</span>
+                <strong>{{ adminSummary?.latest_candidate_date || '-' }}</strong>
+              </div>
+              <div class="mobile-status-row">
+                <span>分析最新</span>
+                <strong>{{ adminSummary?.latest_analysis_date || '-' }}</strong>
+              </div>
+              <div class="mobile-status-row">
+                <span>数据缺口</span>
+                <strong>{{ adminSummary?.data_gap?.has_gap ? `${adminSummary.gap_days} 天` : '无缺口' }}</strong>
               </div>
             </div>
           </el-card>
@@ -758,6 +843,7 @@ import {
 import { apiTasks } from '@/api'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
+import { useResponsive } from '@/composables/useResponsive'
 import type { AdminSummaryResponse, IncrementalUpdateStatus, Task, TaskDiagnosticCheck, TaskDiagnosticsResponse, TaskLogItem, TaskProgressMeta } from '@/types'
 import { loadInitTaskViewState, saveInitTaskViewState, clearInitTaskViewState } from '@/utils/initTaskViewState'
 import { formatDuration } from '@/utils'
@@ -767,6 +853,7 @@ const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
 const route = useRoute()
 const router = useRouter()
+const { isMobile } = useResponsive()
 
 // Tab状态
 const activeTab = ref<'dashboard' | 'tasks' | 'logs' | 'status'>('dashboard')
@@ -1267,6 +1354,44 @@ const filteredLogs = computed(() => {
 
   const visibleLevels = new Set(['warn', 'warning', 'error'])
   return sourceLogs.filter((log) => visibleLevels.has(String(log.level || '').toLowerCase()))
+})
+
+const recentHistoryTasks = computed(() => historyTasks.value.slice(0, 5))
+const recentFailedLogs = computed(() => filteredLogs.value.slice(-8).reverse())
+const dashboardStatusCards = computed(() => {
+  const cards: Array<{ label: string; value: string; meta?: string; type?: string }> = []
+
+  cards.push({
+    label: '系统状态',
+    value: adminSummary.value?.system_ready ? '就绪' : '未就绪',
+    meta: adminSummary.value?.latest_trade_date ? `有效最新交易日 ${adminSummary.value.latest_trade_date}` : '等待状态同步',
+    type: adminSummary.value?.system_ready ? 'success' : 'warning',
+  })
+
+  if (adminSummary.value?.current_task) {
+    cards.push({
+      label: '当前任务',
+      value: `${currentTaskProgressPercent.value}%`,
+      meta: adminSummary.value.current_task.stage_label || adminSummary.value.current_task.summary || '-',
+      type: getTaskStatusType(adminSummary.value.current_task.status),
+    })
+  }
+
+  cards.push({
+    label: '任务推送',
+    value: socketStatusLabel.value,
+    meta: socketStatusDescription.value,
+    type: socketStatusTagType.value,
+  })
+
+  cards.push({
+    label: '最近失败',
+    value: hasFailedIncrementalUpdate.value ? '需要处理' : '无关键失败',
+    meta: incrementalStatus.value.last_error || incrementalStatus.value.message || '最近未发现增量更新失败摘要',
+    type: hasFailedIncrementalUpdate.value ? 'danger' : 'success',
+  })
+
+  return cards
 })
 
 watch(selectedTask, (newTask) => {
@@ -3194,13 +3319,222 @@ function buildWebSocketUrl(path: string) {
   }
 }
 
+.mobile-summary-card {
+  .mobile-summary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .mobile-summary-item {
+    padding: 14px;
+    border-radius: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+
+    &--success {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+    }
+
+    &--warning {
+      background: #fffbeb;
+      border-color: #fde68a;
+    }
+
+    &--danger {
+      background: #fef2f2;
+      border-color: #fecaca;
+    }
+  }
+
+  .mobile-summary-item__top {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .mobile-summary-item__label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #475569;
+  }
+
+  .mobile-summary-item__value {
+    font-size: 14px;
+    font-weight: 700;
+    color: #0f172a;
+    text-align: right;
+  }
+
+  .mobile-summary-item__meta {
+    font-size: 12px;
+    line-height: 1.6;
+    color: #64748b;
+  }
+}
+
 .loading-card {
   padding: 40px;
+}
+
+.history-task-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+}
+
+.history-task-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-task-card__title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.history-task-card__summary {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.history-task-card__meta {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.mobile-log-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mobile-log-summary__hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #64748b;
+}
+
+.mobile-log-item {
+  padding: 12px;
+  border-radius: 10px;
+  background: #111827;
+  border: 1px solid #1f2937;
+  color: #e5e7eb;
+
+  &--error {
+    border-color: rgba(239, 68, 68, 0.45);
+  }
+
+  &--warn,
+  &--warning {
+    border-color: rgba(245, 158, 11, 0.45);
+  }
+}
+
+.mobile-log-item__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.mobile-log-item__message {
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.mobile-status-card {
+  .mobile-status-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mobile-status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    border-radius: 10px;
+    background: #f8fafc;
+    font-size: 13px;
+    color: #475569;
+
+    strong {
+      color: #0f172a;
+      text-align: right;
+    }
+  }
 }
 
 @media (max-width: 768px) {
   .ops-page {
     padding: 16px;
+
+    .ops-tabs {
+      :deep(.el-tabs__header) {
+        margin-bottom: 16px;
+      }
+
+      :deep(.el-tabs__nav) {
+        width: 100%;
+      }
+
+      :deep(.el-tabs__item) {
+        padding: 0 12px;
+        font-size: 13px;
+      }
+    }
+
+    .tab-content {
+      gap: 16px;
+    }
+
+    .card-header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .quick-actions-card {
+      .quick-actions-grid {
+        flex-direction: column;
+      }
+
+      :deep(.el-button) {
+        width: 100%;
+        min-height: 44px;
+        margin-left: 0;
+      }
+    }
+
+    .dashboard-cards__grid,
+    .system-status-grid {
+      grid-template-columns: 1fr;
+    }
 
     .progress-overview-grid {
       grid-template-columns: 1fr;
@@ -3209,6 +3543,24 @@ function buildWebSocketUrl(path: string) {
     .connectivity-card__row {
       flex-direction: column;
       align-items: flex-start;
+    }
+
+    .connectivity-card__actions,
+    .log-controls,
+    .log-actions,
+    .current-task-actions {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .connectivity-card__actions :deep(.el-button),
+    .current-task-actions :deep(.el-button) {
+      margin-left: 0;
+    }
+
+    .current-task-info,
+    .detail-grid {
+      grid-template-columns: 1fr;
     }
 
     .progress-summary-card__meta {
@@ -3238,10 +3590,6 @@ function buildWebSocketUrl(path: string) {
       grid-template-columns: 1fr;
     }
 
-    .detail-grid {
-      grid-template-columns: repeat(2, 1fr);
-    }
-
     .env-details-grid {
       grid-template-columns: 1fr;
     }
@@ -3265,6 +3613,16 @@ function buildWebSocketUrl(path: string) {
     .incremental-progress-card__counts {
       text-align: left;
       white-space: normal;
+    }
+
+    .log-line {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+
+    .system-status-item {
+      flex-direction: column;
+      align-items: flex-start;
     }
   }
 }

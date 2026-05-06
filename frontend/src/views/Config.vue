@@ -8,7 +8,13 @@
       <el-tabs v-model="activeTab">
         <!-- Tab 1: 参数配置 -->
         <el-tab-pane label="参数配置" name="config">
-          <el-form :model="configs" label-width="140px" class="config-form">
+          <el-form
+            :model="configs"
+            :label-width="isMobile ? 'auto' : '140px'"
+            :label-position="isMobile ? 'top' : 'right'"
+            class="config-form"
+            :class="{ 'is-mobile': isMobile }"
+          >
             <el-alert
               v-if="!configStore.apiAvailable"
               title="后端服务暂不可用"
@@ -23,22 +29,23 @@
             <el-divider content-position="left">Tushare 配置</el-divider>
 
             <el-form-item label="API Token">
-              <el-input
-                v-model="configs.tushare_token"
-                type="password"
-                show-password
-                placeholder="请输入 Tushare API Token"
-                style="width: 400px"
-              />
-              <el-button
-                type="primary"
-                class="verify-button"
-                style="margin-left: 12px"
-                :loading="verifying"
-                @click="verifyTushare"
-              >
-                验证
-              </el-button>
+              <div class="field-row field-row--inline">
+                <el-input
+                  v-model="configs.tushare_token"
+                  type="password"
+                  show-password
+                  placeholder="请输入 Tushare API Token"
+                  class="config-input"
+                />
+                <el-button
+                  type="primary"
+                  class="verify-button"
+                  :loading="verifying"
+                  @click="verifyTushare"
+                >
+                  验证
+                </el-button>
+              </div>
               <div class="form-tip">
                 获取地址: <a href="https://tushare.pro/user/token" target="_blank">https://tushare.pro/user/token</a>
               </div>
@@ -53,7 +60,7 @@
                 type="password"
                 show-password
                 placeholder="智谱 GLM-4V-Flash (免费)"
-                style="width: 400px"
+                class="config-input"
                 disabled
               />
               <div class="form-tip form-tip-disabled">
@@ -67,7 +74,7 @@
                 type="password"
                 show-password
                 placeholder="阿里云通义千问 VL"
-                style="width: 400px"
+                class="config-input"
                 disabled
               />
               <div class="form-tip form-tip-disabled">
@@ -81,7 +88,7 @@
                 type="password"
                 show-password
                 placeholder="Google Gemini"
-                style="width: 400px"
+                class="config-input"
                 disabled
               />
               <div class="form-tip form-tip-disabled">
@@ -102,25 +109,30 @@
             </el-form-item>
 
             <el-form-item label="推荐分数阈值">
-              <el-input-number
-                v-model="configs.min_score_threshold"
-                :min="0"
-                :max="5"
-                :step="0.1"
-                :precision="1"
-              />
-              <span class="form-tip">分数 >= 此值的股票将被推荐</span>
-              <el-tooltip
-                effect="dark"
-                placement="top"
-                content="来自对目标股票的趋势结构、价格位置、量价行为、历史异动，四个维度进行的经验评价，详见单股诊断。"
-              >
-                <el-icon class="question-icon"><InfoFilled /></el-icon>
-              </el-tooltip>
+              <div class="field-row threshold-row">
+                <el-input-number
+                  v-model="configs.min_score_threshold"
+                  :min="0"
+                  :max="5"
+                  :step="0.1"
+                  :precision="1"
+                  class="threshold-input"
+                />
+                <div class="threshold-help">
+                  <span class="form-tip form-tip--inline">分数 >= 此值的股票将被推荐</span>
+                  <el-tooltip
+                    effect="dark"
+                    placement="top"
+                    content="来自对目标股票的趋势结构、价格位置、量价行为、历史异动，四个维度进行的经验评价，详见单股诊断。"
+                  >
+                    <el-icon class="question-icon"><InfoFilled /></el-icon>
+                  </el-tooltip>
+                </div>
+              </div>
             </el-form-item>
 
             <!-- 保存按钮 -->
-            <el-form-item>
+            <el-form-item class="desktop-actions" v-show="!isMobile">
               <el-button type="primary" :loading="saving" @click="saveConfigs(false)">
                 保存配置
               </el-button>
@@ -130,6 +142,16 @@
               <el-button @click="loadConfigs">重置</el-button>
             </el-form-item>
           </el-form>
+
+          <div v-if="isMobile" class="mobile-action-bar">
+            <el-button type="primary" :loading="saving" @click="saveConfigs(false)">
+              保存配置
+            </el-button>
+            <el-button type="success" :loading="savingAndInitializing" @click="saveConfigs(true)">
+              保存并初始化
+            </el-button>
+            <el-button @click="loadConfigs">重置</el-button>
+          </div>
         </el-tab-pane>
 
         <!-- Tab 2: 系统自检 -->
@@ -229,6 +251,7 @@ import { ref, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
+import { useResponsive } from '@/composables/useResponsive'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
 import { apiTasks } from '@/api'
@@ -239,6 +262,7 @@ import type { TaskDiagnosticCheck, TaskDiagnosticsResponse } from '@/types'
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
 const router = useRouter()
+const { isMobile } = useResponsive()
 
 const activeTab = ref('config')
 
@@ -561,6 +585,10 @@ async function saveConfigs(startInitialization: boolean) {
 .config-page {
   max-width: 800px;
 
+  :deep(.el-card__body) {
+    position: relative;
+  }
+
   .startup-panel {
     display: flex;
     flex-direction: column;
@@ -727,10 +755,44 @@ async function saveConfigs(startInitialization: boolean) {
   }
 
   .config-form {
+    padding-bottom: 0;
+
+    .field-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      width: 100%;
+    }
+
+    .field-row--inline {
+      align-items: center;
+    }
+
+    .config-input {
+      width: 400px;
+      max-width: 100%;
+    }
+
+    .threshold-row {
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .threshold-input {
+      flex-shrink: 0;
+    }
+
+    .threshold-help {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
     .verify-button {
       border-color: #0284c7;
       background: #0284c7;
       color: #fff;
+      flex-shrink: 0;
 
       &:hover,
       &:focus {
@@ -741,7 +803,7 @@ async function saveConfigs(startInitialization: boolean) {
     }
 
     .form-tip {
-      margin-left: 12px;
+      margin-top: 8px;
       font-size: 12px;
       color: var(--color-text-light);
 
@@ -751,6 +813,27 @@ async function saveConfigs(startInitialization: boolean) {
           text-decoration: underline;
         }
       }
+    }
+
+    .form-tip--inline {
+      margin-top: 0;
+    }
+  }
+
+  .mobile-action-bar {
+    display: flex;
+    gap: 10px;
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    margin-top: 16px;
+    padding: 12px 0 calc(12px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, #fff 24px);
+
+    .el-button {
+      flex: 1;
+      min-height: 44px;
+      margin-left: 0;
     }
   }
 
@@ -789,6 +872,42 @@ async function saveConfigs(startInitialization: boolean) {
   }
 
   @media (max-width: 768px) {
+    max-width: none;
+
+    :deep(.el-card) {
+      overflow: visible;
+    }
+
+    :deep(.el-card__body) {
+      padding: 16px 14px 20px;
+    }
+
+    :deep(.el-tabs__header) {
+      margin-bottom: 16px;
+    }
+
+    :deep(.el-tabs__nav-wrap) {
+      padding-right: 8px;
+    }
+
+    :deep(.el-form-item) {
+      margin-bottom: 18px;
+    }
+
+    :deep(.el-form-item__label) {
+      padding-bottom: 6px;
+      line-height: 1.5;
+    }
+
+    :deep(.el-radio-group) {
+      display: grid;
+      gap: 10px;
+    }
+
+    :deep(.el-input-number) {
+      width: 100%;
+    }
+
     .startup-panel__header {
       flex-direction: column;
     }
@@ -796,6 +915,11 @@ async function saveConfigs(startInitialization: boolean) {
     .startup-panel__actions {
       width: 100%;
       flex-wrap: wrap;
+
+      .el-button {
+        flex: 1 1 160px;
+        margin-left: 0;
+      }
     }
 
     .init-guide-panel {
@@ -805,6 +929,32 @@ async function saveConfigs(startInitialization: boolean) {
 
     .next-steps-grid {
       grid-template-columns: 1fr;
+    }
+
+    .config-form {
+      padding-bottom: 96px;
+
+      .field-row,
+      .field-row--inline {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .config-input {
+        width: 100%;
+      }
+
+      .verify-button {
+        width: 100%;
+      }
+
+      .threshold-help {
+        width: 100%;
+      }
+
+      .form-tip {
+        margin-top: 10px;
+      }
     }
   }
 }

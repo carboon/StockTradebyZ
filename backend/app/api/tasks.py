@@ -459,17 +459,16 @@ async def start_incremental_update(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> dict:
-    """启动增量数据更新（数据库版本）
+    """启动增量数据更新
 
     Args:
         end_date: 结束日期 (YYYY-MM-DD)，默认为今天
 
     更新逻辑：
-    1. 获取所有股票列表
-    2. 对每只股票，检查数据库中最新日期
-    3. 从 Tushare 拉取新数据并存入数据库
+    1. 批量增量抓取最新交易日数据
+    2. 同步更新 data/raw CSV
+    3. 将新增交易日写入数据库
     """
-    from app.services.daily_data_service import get_daily_data_service
     from app.services.market_service import MarketService
 
     task_service = TaskService(db)
@@ -496,7 +495,11 @@ async def start_incremental_update(
             "running": False,
         }
 
-    daily_data_service = get_daily_data_service()
+    tushare_service = TushareService()
+
+    resolved_end_date = end_date
+    if not resolved_end_date:
+        resolved_end_date = tushare_service.get_effective_latest_trade_date(prefer_realtime=True)
 
     async def run_incremental_update():
         try:
@@ -522,14 +525,14 @@ async def start_incremental_update(
 
             # 使用 asyncio.to_thread 在线程池中运行同步函数，避免阻塞事件循环
             result = await asyncio.to_thread(
-                daily_data_service.incremental_update,
-                end_date=end_date,
+                MarketService().incremental_update,
+                end_date=resolved_end_date,
                 progress_callback=progress_cb,
             )
 
-            if result.get("success"):
-                latest_trade_date = TushareService().get_latest_trade_date()
-                if latest_trade_date and TushareService().is_trade_date_data_ready(latest_trade_date):
+            if result.get("ok"):
+                latest_trade_date = tushare_service.get_latest_trade_date()
+                if latest_trade_date and tushare_service.is_trade_date_data_ready(latest_trade_date):
                     try:
                         await asyncio.to_thread(
                             maintain_tomorrow_star_for_trade_date,
@@ -559,7 +562,7 @@ async def start_incremental_update(
 
     return {
         "success": True,
-        "message": "增量更新已启动",
+        "message": f"增量更新已启动，目标日期 {resolved_end_date or '自动判定'}",
         "running": False,
     }
 

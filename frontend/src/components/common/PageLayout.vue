@@ -1,7 +1,7 @@
 <template>
-  <el-container class="page-layout">
+  <el-container class="page-layout" :class="layoutClasses">
     <!-- 侧边栏 -->
-    <el-aside :width="sidebarWidth" class="sidebar">
+    <el-aside v-if="!isMobile" :width="sidebarWidth" class="sidebar">
       <div class="sidebar-header">
         <el-icon :size="28" color="#00B4D8">
           <TrendCharts />
@@ -25,8 +25,43 @@
           </el-icon>
           <template #title>{{ route.meta.title }}</template>
         </el-menu-item>
-      </el-menu>
-    </el-aside>
+        </el-menu>
+      </el-aside>
+
+    <el-drawer
+      v-model="drawerVisible"
+      :with-header="false"
+      direction="ltr"
+      size="260px"
+      class="mobile-nav-drawer"
+    >
+      <div class="drawer-sidebar">
+        <div class="sidebar-header">
+          <el-icon :size="28" color="#00B4D8">
+            <TrendCharts />
+          </el-icon>
+          <span class="app-title">StockTrader</span>
+        </div>
+
+        <el-menu
+          :default-active="activeMenu"
+          router
+          class="sidebar-menu"
+          @select="handleMobileMenuSelect"
+        >
+          <el-menu-item
+            v-for="route in menuRoutes"
+            :key="route.path"
+            :index="route.path"
+          >
+            <el-icon>
+              <component :is="route.icon" />
+            </el-icon>
+            <template #title>{{ route.meta.title }}</template>
+          </el-menu-item>
+        </el-menu>
+      </div>
+    </el-drawer>
 
     <!-- 主内容区 -->
     <el-container class="main-container">
@@ -34,14 +69,20 @@
       <el-header class="app-header">
         <div class="header-left">
           <el-button
-            :icon="isCollapsed ? Expand : Fold"
+            :icon="headerToggleIcon"
             text
             @click="toggleSidebar"
           />
+          <div class="header-title-group">
+            <div class="header-title">{{ currentPageTitle }}</div>
+            <div v-if="isMobile && compactStatusSummary" class="header-status-summary">
+              {{ compactStatusSummary }}
+            </div>
+          </div>
         </div>
         <div class="header-right">
           <button
-            v-if="authStore.isAdmin && headerProgress"
+            v-if="authStore.isAdmin && headerProgress && !isMobile"
             class="header-progress-card"
             type="button"
             @click="router.push('/update')"
@@ -65,8 +106,29 @@
               <span class="header-progress-card__bar-fill" :style="{ width: `${headerProgress.percent}%` }" />
             </div>
           </button>
+          <el-dropdown
+            v-if="authStore.isAdmin && isMobile && compactStatusItems.length > 0"
+            trigger="click"
+            @command="handleStatusCommand"
+          >
+            <el-button text class="mobile-status-button">
+              <el-icon><Document /></el-icon>
+              <span>状态</span>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="item in compactStatusItems"
+                  :key="item.label"
+                  :command="item.command"
+                >
+                  {{ item.label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <div
-            v-if="authStore.isAdmin"
+            v-if="authStore.isAdmin && !isMobile"
             class="tushare-badge"
             :class="configStore.tushareReady ? 'is-ready' : 'is-pending'"
             @click="router.push('/config')"
@@ -75,7 +137,7 @@
             <span>{{ configStore.tushareReady ? 'Tushare 已就绪' : 'Tushare 待配置' }}</span>
           </div>
           <div
-            v-if="authStore.isAdmin"
+            v-if="authStore.isAdmin && !isMobile"
             class="tushare-badge"
             :class="configStore.dataInitialized ? 'is-ready' : 'is-pending'"
             @click="router.push('/update')"
@@ -89,15 +151,15 @@
             text
             @click="handlePageRefresh"
           >
-            刷新
+            <span v-if="!isMobile">刷新</span>
           </el-button>
-          <el-button v-if="authStore.isAdmin" text @click="router.push('/config')">
+          <el-button v-if="authStore.isAdmin && !isMobile" text @click="router.push('/config')">
             <el-icon><Setting /></el-icon>
           </el-button>
           <el-dropdown trigger="click" @command="handleUserCommand">
             <el-button text>
               <el-icon><UserIcon /></el-icon>
-              <span style="margin-left: 4px">{{ authStore.user?.username || '用户' }}</span>
+              <span v-if="!isMobile" style="margin-left: 4px">{{ authStore.user?.username || '用户' }}</span>
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
@@ -191,17 +253,20 @@ import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
 import type { IncrementalUpdateStatus, Task } from '@/types'
 import { formatDuration } from '@/utils'
+import { useResponsive } from '@/composables/useResponsive'
 
 const router = useRouter()
 const route = useRoute()
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
 const authStore = useAuthStore()
+const { isMobile, isTablet, isDesktop } = useResponsive()
 
 // 注入页面提供的刷新函数
 const pageRefreshHandler = inject<(() => Promise<void>) | null>('pageRefresh', null)
 
 const isCollapsed = ref(false)
+const drawerVisible = ref(false)
 const refreshing = ref(false)
 const activeTasks = ref<Task[]>([])
 const incrementalStatus = ref<IncrementalUpdateStatus | null>(null)
@@ -209,9 +274,22 @@ let progressPoller: ReturnType<typeof setInterval> | null = null
 let progressPollIntervalMs = 30000
 
 const sidebarWidth = computed(() => isCollapsed.value ? '64px' : '200px')
-
 const activeMenu = computed(() => route.path)
 const isUpdateRoute = computed(() => route.path.startsWith('/update'))
+const currentPageTitle = computed(() => {
+  const matchedRoute = menuRoutes.value.find((menuRoute) => menuRoute.path === route.path)
+  return matchedRoute?.meta.title || (route.meta.title as string) || 'StockTrader'
+})
+const headerToggleIcon = computed(() => {
+  if (isMobile.value) return Expand
+  return isCollapsed.value ? Expand : Fold
+})
+const layoutClasses = computed(() => ({
+  'is-mobile': isMobile.value,
+  'is-tablet': isTablet.value,
+  'is-desktop': isDesktop.value,
+  'is-collapsed': isCollapsed.value,
+}))
 const activeFullTask = computed(() => {
   return activeTasks.value.find((task) => ['full_update', 'tomorrow_star'].includes(task.task_type)) || null
 })
@@ -287,6 +365,47 @@ const headerProgress = computed(() => {
 
   return null
 })
+const compactStatusItems = computed(() => {
+  if (!authStore.isAdmin) return []
+
+  const items: Array<{ label: string, command: string }> = []
+
+  if (headerProgress.value) {
+    items.push({
+      label: `${headerProgress.value.title} ${headerProgress.value.percent}%`,
+      command: '/update',
+    })
+  }
+
+  items.push({
+    label: configStore.tushareReady ? 'Tushare 已就绪' : 'Tushare 待配置',
+    command: '/config',
+  })
+  items.push({
+    label: configStore.dataInitialized ? '首次初始化已完成' : '数据状态待同步',
+    command: '/update',
+  })
+
+  if (!configStore.apiAvailable) {
+    items.unshift({
+      label: '后端服务暂不可用',
+      command: '/config',
+    })
+  } else if (configStore.tushareStatus && !configStore.tushareReady) {
+    items.unshift({
+      label: '行情数据源未就绪',
+      command: '/config',
+    })
+  } else if (configStore.tushareReady && !configStore.dataInitialized) {
+    items.unshift({
+      label: '数据库同步状态待确认',
+      command: '/update',
+    })
+  }
+
+  return items
+})
+const compactStatusSummary = computed(() => compactStatusItems.value[0]?.label || '')
 
 const menuRoutes = computed(() => {
   const routes = [
@@ -315,7 +434,19 @@ function handleUserCommand(command: string) {
 }
 
 function toggleSidebar() {
+  if (isMobile.value) {
+    drawerVisible.value = !drawerVisible.value
+    return
+  }
   isCollapsed.value = !isCollapsed.value
+}
+
+function handleMobileMenuSelect() {
+  drawerVisible.value = false
+}
+
+function handleStatusCommand(command: string) {
+  router.push(command)
 }
 
 async function handlePageRefresh() {
@@ -454,6 +585,29 @@ watch([() => activeTasks.value.length, () => incrementalStatus.value?.running, i
     startPoller()
   }
 })
+
+watch(isMobile, (mobile) => {
+  if (mobile) {
+    isCollapsed.value = true
+  } else {
+    drawerVisible.value = false
+    if (isDesktop.value) {
+      isCollapsed.value = false
+    }
+  }
+}, { immediate: true })
+
+watch(isTablet, (tablet) => {
+  if (tablet) {
+    isCollapsed.value = true
+  } else if (isDesktop.value) {
+    isCollapsed.value = false
+  }
+}, { immediate: true })
+
+watch(() => route.path, () => {
+  drawerVisible.value = false
+})
 </script>
 
 <style scoped lang="scss">
@@ -464,7 +618,8 @@ $space-md: 24px;
 
 .page-layout {
   width: 100%;
-  height: 100vh;
+  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .sidebar {
@@ -507,6 +662,9 @@ $space-md: 24px;
 .main-container {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .app-header {
@@ -518,6 +676,38 @@ $space-md: 24px;
   padding: 10px $space-sm;
   min-height: 72px;
 
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .header-title-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .header-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #0f172a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .header-status-summary {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #64748b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 40vw;
+  }
+
   .header-right {
     display: flex;
     align-items: center;
@@ -525,6 +715,25 @@ $space-md: 24px;
     justify-content: flex-end;
     flex-wrap: wrap;
   }
+}
+
+.mobile-nav-drawer {
+  :deep(.el-drawer) {
+    background: #1e293b;
+  }
+
+  :deep(.el-drawer__body) {
+    padding: 0;
+  }
+}
+
+.drawer-sidebar {
+  min-height: 100%;
+  background-color: #1e293b;
+}
+
+.mobile-status-button {
+  gap: 4px;
 }
 
 .header-progress-card {
@@ -739,6 +948,7 @@ $space-md: 24px;
   background-color: #f8fafb;
   padding: $space-md;
   overflow-y: auto;
+  min-width: 0;
 
   .page-shell {
     width: 100%;
@@ -749,6 +959,14 @@ $space-md: 24px;
   :deep(.page-shell > *) {
     width: 100%;
     box-sizing: border-box;
+  }
+}
+
+.page-layout.is-tablet {
+  .app-header {
+    .header-right {
+      gap: 6px;
+    }
   }
 }
 
@@ -779,6 +997,44 @@ $space-md: 24px;
     .page-shell {
       max-width: none;
     }
+  }
+}
+
+@media (max-width: 767px) {
+  .page-layout {
+    overflow-x: hidden;
+  }
+
+  .app-header {
+    min-height: 60px;
+    align-items: center;
+    padding: 8px 12px;
+
+    .header-right {
+      width: auto;
+      flex-wrap: nowrap;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+  }
+
+  .status-banner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .global-notice {
+    flex-direction: column;
+    align-items: flex-start;
+
+    .global-notice__actions {
+      width: 100%;
+      justify-content: flex-start;
+    }
+  }
+
+  .app-main {
+    padding: $space-sm 12px;
   }
 }
 </style>

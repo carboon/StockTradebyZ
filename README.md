@@ -66,7 +66,7 @@ cp .env.example deploy/.env
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [DEPLOYMENT.md](DEPLOYMENT.md)
-- [README.dev.md](README.dev.md)
+- [README.dev.md](README.dev.md) - 本地开发、容器调试、移动端联调入口
 - [docs/README.md](docs/README.md)
 
 ## 测试说明

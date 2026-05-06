@@ -288,10 +288,11 @@ class TushareService:
         self._latest_data_ready_cache[cache_key] = (now, ready)
         return ready
 
-    def get_effective_latest_trade_date(self) -> Optional[str]:
+    def get_effective_latest_trade_date(self, *, prefer_realtime: bool = False) -> Optional[str]:
         """获取用于判断“是否过期”的有效最新交易日。
 
         规则：
+        - prefer_realtime=True 时，只要当天数据在 Tushare 已可读，就直接使用当天；
         - 北京时间 17:00 前，不把当日直接视为应完成同步的目标日；
         - 17:00 后，如果当天数据在 Tushare 已可读，则目标日为当天；
         - 否则回退到上一个开市日。
@@ -305,6 +306,9 @@ class TushareService:
             latest_dt = datetime.fromisoformat(latest_trade_date).date()
 
             if latest_dt < bj_now.date():
+                return latest_trade_date
+
+            if prefer_realtime and self.is_trade_date_data_ready(latest_trade_date):
                 return latest_trade_date
 
             if bj_now.hour < 17:
@@ -423,11 +427,11 @@ class TushareService:
 
         return df.sort_values("date").reset_index(drop=True)
 
-    def check_data_status(self) -> dict:
+    def check_data_status(self, *, prefer_realtime_latest: bool = False) -> dict:
         """检查数据状态，优先数据库，失败时回退本地文件系统。"""
         # 检查缓存
         now = time.time()
-        cache_key = "data_status"
+        cache_key = f"data_status:{'realtime' if prefer_realtime_latest else 'default'}"
         if self._pro is None:
             self._data_status_cache.pop(cache_key, None)
         cached = self._data_status_cache.get(cache_key)
@@ -440,7 +444,7 @@ class TushareService:
         from sqlalchemy import func, select, distinct
         import json
 
-        latest_trade_date = self.get_effective_latest_trade_date()
+        latest_trade_date = self.get_effective_latest_trade_date(prefer_realtime=prefer_realtime_latest)
         calendar_latest_trade_date = self.get_latest_trade_date()
 
         # 获取预期的股票总数（从 stocklist.csv）

@@ -413,6 +413,8 @@ class MarketService:
             更新结果汇总
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from app.config import settings
+        from pipeline.fetch_kline import fetch_one_incremental
 
         # 解析结束日期
         end_date = self._normalize_end_date(end_date)
@@ -435,6 +437,8 @@ class MarketService:
         token = os.environ.get("TUSHARE_TOKEN") or self.token
         if not token:
             return {"success": False, "error": "Tushare Token 未设置"}
+
+        db_url = settings.database_url
 
         workers = 8
 
@@ -464,84 +468,22 @@ class MarketService:
             failed_codes=failed_codes,
         )
 
-        def _get_latest_date_from_csv(csv_path: Path) -> Optional[str]:
-            try:
-                df = pd.read_csv(csv_path)
-                if "date" in df.columns and not df.empty:
-                    df["date"] = pd.to_datetime(df["date"])
-                    latest = df["date"].max()
-                    return latest.strftime("%Y%m%d")
-            except Exception:
-                pass
-            return None
-
         def update_single_code(code: str) -> dict:
-            csv_path = raw_dir / f"{code}.csv"
-            result = {
-                "code": code,
-                "success": False,
-                "updated": False,
-                "new_count": 0,
-            }
-
-            latest_date = _get_latest_date_from_csv(csv_path)
-            if latest_date:
-                import datetime as dt
-                latest_dt = dt.datetime.strptime(latest_date, "%Y%m%d")
-                next_day = latest_dt + dt.timedelta(days=1)
-                start_date = next_day.strftime("%Y%m%d")
-            else:
-                start_date = "20190101"
-
-            if start_date > end_date:
-                result["success"] = True
-                result["updated"] = False
-                return result
-
             try:
-                import tushare as ts
-                pro = ts.pro_api(token)
-
-                ts_code = resolve_ts_code(code)
-                from app.utils.tushare_rate_limit import acquire_tushare_slot
-                acquire_tushare_slot("pro_bar")
-                df = ts.pro_bar(
-                    ts_code=ts_code,
-                    adj="qfq",
-                    start_date=start_date,
-                    end_date=end_date,
-                    freq="D",
+                result = fetch_one_incremental(
+                    code,
+                    end_date,
+                    raw_dir,
+                    db_url=db_url,
                 )
-
-                if df is None or df.empty:
-                    result["success"] = True
-                    result["updated"] = False
-                    return result
-
-                df = df.rename(columns={"trade_date": "date", "vol": "volume"})[
-                    ["date", "open", "close", "high", "low", "volume"]
-                ].copy()
-                df["date"] = pd.to_datetime(df["date"])
-                for c in ["open", "close", "high", "low", "volume"]:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-                df = df.sort_values("date").reset_index(drop=True)
-
-                if latest_date and csv_path.exists():
-                    old_df = pd.read_csv(csv_path)
-                    old_df["date"] = pd.to_datetime(old_df["date"])
-                    combined_df = pd.concat([old_df, df], ignore_index=True)
-                    combined_df = combined_df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
-                    result["new_count"] = len(df)
-                else:
-                    combined_df = df
-                    result["new_count"] = len(df)
-
-                combined_df.to_csv(csv_path, index=False)
-                result["success"] = True
-                result["updated"] = True
             except Exception as e:
-                result["error"] = str(e)
-
+                result = {
+                    "code": code,
+                    "success": False,
+                    "updated": False,
+                    "new_count": 0,
+                    "error": str(e),
+                }
             return result
 
         run_started_at = time.time()

@@ -162,12 +162,15 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: 100vh;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px 16px;
+  box-sizing: border-box;
   background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
 }
 
 .login-card {
-  width: 400px;
+  width: min(92vw, 400px);
   padding: 40px;
   background: white;
   border-radius: 16px;
@@ -210,5 +213,41 @@ onMounted(async () => {
   margin-top: 16px;
   font-size: 14px;
   color: #64748b;
+}
+
+@media (max-width: 767px) {
+  .login-page {
+    align-items: flex-start;
+    padding: 24px 12px 32px;
+  }
+
+  .login-card {
+    width: min(92vw, 400px);
+    margin: 0 auto;
+    padding: 28px 20px;
+    border-radius: 14px;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+  }
+
+  .login-header {
+    margin-bottom: 20px;
+
+    h1 {
+      font-size: 22px;
+    }
+  }
+
+  .backend-status-alert {
+    :deep(.el-alert__content) {
+      display: block;
+    }
+  }
+
+  .login-footer {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
 }
 </style>

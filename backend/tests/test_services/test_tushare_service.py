@@ -322,6 +322,22 @@ def test_check_local_data_status_empty(tushare_service, tmp_path):
             assert status["kline"]["exists"] is False
 
 
+@pytest.mark.service
+def test_get_effective_latest_trade_date_prefers_realtime_when_requested(tushare_service):
+    with patch.object(tushare_service, "get_latest_trade_date", return_value="2026-05-06"), \
+            patch.object(tushare_service, "is_trade_date_data_ready", return_value=True), \
+            patch("app.services.tushare_service.datetime") as mock_datetime:
+        mock_now = MagicMock()
+        mock_now.date.return_value = date(2026, 5, 6)
+        mock_now.hour = 8
+        mock_datetime.now.return_value = mock_now
+        mock_datetime.fromisoformat.side_effect = lambda value: __import__("datetime").datetime.fromisoformat(value)
+
+        result = tushare_service.get_effective_latest_trade_date(prefer_realtime=True)
+
+    assert result == "2026-05-06"
+
+
 # ============================================
 # 股票信息测试
 # ============================================

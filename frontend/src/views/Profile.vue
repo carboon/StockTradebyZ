@@ -7,7 +7,7 @@
         </div>
       </template>
 
-      <el-descriptions :column="2" border>
+      <el-descriptions :column="isMobile ? 1 : 2" border>
         <el-descriptions-item label="用户名">{{ authStore.user?.username }}</el-descriptions-item>
         <el-descriptions-item label="显示名称">{{ authStore.user?.display_name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="角色">
@@ -28,7 +28,14 @@
         </div>
       </template>
 
-      <el-form ref="pwdFormRef" :model="pwdForm" :rules="pwdRules" label-width="100px" style="max-width: 400px">
+      <el-form
+        ref="pwdFormRef"
+        :model="pwdForm"
+        :rules="pwdRules"
+        :label-width="isMobile ? undefined : '100px'"
+        :label-position="isMobile ? 'top' : 'right'"
+        class="password-form"
+      >
         <el-form-item label="旧密码" prop="old_password">
           <el-input v-model="pwdForm.old_password" type="password" show-password />
         </el-form-item>
@@ -50,7 +57,46 @@
         </div>
       </template>
 
-      <el-table :data="apiKeys" stripe>
+      <div v-if="isMobile" class="mobile-stack-list">
+        <el-empty v-if="apiKeys.length === 0" description="暂无 API Key" />
+        <el-card v-for="row in apiKeys" :key="row.id" class="mobile-data-card" shadow="never">
+          <div class="mobile-data-row">
+            <span class="mobile-label">前缀</span>
+            <span class="mobile-value">{{ row.key_prefix }}</span>
+          </div>
+          <div class="mobile-data-row">
+            <span class="mobile-label">名称</span>
+            <span class="mobile-value">{{ row.name || '-' }}</span>
+          </div>
+          <div class="mobile-data-row">
+            <span class="mobile-label">状态</span>
+            <el-tag :type="row.is_active ? 'success' : 'danger'" size="small">
+              {{ row.is_active ? '活跃' : '已吊销' }}
+            </el-tag>
+          </div>
+          <div class="mobile-data-row">
+            <span class="mobile-label">最后使用</span>
+            <span class="mobile-value">{{ row.last_used_at ? formatDate(row.last_used_at) : '未使用' }}</span>
+          </div>
+          <div class="mobile-data-row">
+            <span class="mobile-label">创建时间</span>
+            <span class="mobile-value">{{ formatDate(row.created_at) }}</span>
+          </div>
+          <div class="mobile-actions">
+            <el-button
+              v-if="row.is_active"
+              type="danger"
+              plain
+              size="small"
+              @click="handleRevokeKey(row.id)"
+            >
+              吊销
+            </el-button>
+          </div>
+        </el-card>
+      </div>
+
+      <el-table v-else :data="apiKeys" stripe>
         <el-table-column prop="key_prefix" label="前缀" width="100" />
         <el-table-column prop="name" label="名称" width="200">
           <template #default="{ row }">{{ row.name || '-' }}</template>
@@ -93,7 +139,31 @@
         </div>
       </template>
 
-      <el-table :data="usageStats.stats" stripe>
+      <div v-if="isMobile" class="mobile-stack-list">
+        <el-empty v-if="usageStats.stats.length === 0" description="暂无用量记录" />
+        <el-card v-for="row in usageStats.stats" :key="row.date" class="mobile-data-card" shadow="never">
+          <div class="mobile-data-row">
+            <span class="mobile-label">日期</span>
+            <span class="mobile-value">{{ row.date }}</span>
+          </div>
+          <div class="mobile-data-row">
+            <span class="mobile-label">调用次数</span>
+            <span class="mobile-value">{{ row.total_calls }} 次</span>
+          </div>
+          <div class="mobile-endpoints">
+            <div class="mobile-label">端点明细</div>
+            <div v-if="Object.keys(row.endpoints).length > 0" class="endpoint-stack">
+              <div v-for="(count, endpoint) in row.endpoints" :key="endpoint" class="endpoint-item">
+                <span class="endpoint-name">{{ endpoint }}</span>
+                <span class="endpoint-count">{{ count }} 次</span>
+              </div>
+            </div>
+            <span v-else class="text-muted">无调用</span>
+          </div>
+        </el-card>
+      </div>
+
+      <el-table v-else :data="usageStats.stats" stripe>
         <el-table-column prop="date" label="日期" width="120" />
         <el-table-column prop="total_calls" label="调用次数" width="100" />
         <el-table-column label="端点明细">
@@ -109,7 +179,12 @@
     </el-card>
 
     <!-- 创建 Key 对话框 -->
-    <el-dialog v-model="showCreateKeyDialog" title="创建 API Key" width="450px">
+    <el-dialog
+      v-model="showCreateKeyDialog"
+      title="创建 API Key"
+      :width="isMobile ? '94vw' : '450px'"
+      :fullscreen="isMobile"
+    >
       <el-form @submit.prevent="handleCreateKey">
         <el-form-item label="名称（可选）">
           <el-input v-model="newKeyName" placeholder="给 Key 取个名字方便识别" />
@@ -138,8 +213,10 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
 import { apiAuth } from '@/api'
 import type { ApiKeyInfo, UsageStatsResponse } from '@/types'
+import { useResponsive } from '@/composables/useResponsive'
 
 const authStore = useAuthStore()
+const { isMobile } = useResponsive()
 
 // --- 密码修改 ---
 const pwdFormRef = ref<FormInstance>()
@@ -243,11 +320,63 @@ onMounted(() => {
   gap: 16px;
 }
 
+.password-form {
+  max-width: 400px;
+}
+
 .card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mobile-stack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mobile-data-card {
+  border-radius: 12px;
+}
+
+.mobile-data-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+.mobile-label {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.mobile-value {
+  text-align: right;
+  word-break: break-word;
+}
+
+.mobile-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.mobile-endpoints {
+  margin-top: 8px;
+}
+
+.endpoint-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .key-display {
@@ -278,5 +407,24 @@ onMounted(() => {
 .text-muted {
   color: #94a3b8;
   font-size: 13px;
+}
+
+@media (max-width: 767px) {
+  .profile-page {
+    gap: 12px;
+  }
+
+  .password-form {
+    max-width: 100%;
+  }
+
+  .mobile-data-row {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .mobile-value {
+    text-align: left;
+  }
 }
 </style>

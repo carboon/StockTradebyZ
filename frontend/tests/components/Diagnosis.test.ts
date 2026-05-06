@@ -182,6 +182,8 @@ function mountComponent() {
         'el-input': { template: '<input />' },
         'el-autocomplete': { template: '<input />' },
         'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+        'el-select': { template: '<select><slot /></select>', props: ['modelValue'] },
+        'el-option': { template: '<option><slot /></option>', props: ['label', 'value'] },
         'el-radio-group': { template: '<div><slot /></div>' },
         'el-radio-button': { template: '<button><slot /></button>' },
         'el-tag': { template: '<span><slot /></span>' },
@@ -192,6 +194,9 @@ function mountComponent() {
         'el-alert': { template: '<div class="el-alert">{{ description }}</div>', props: ['description'] },
         'el-tooltip': { template: '<div><slot /></div>' },
         'el-icon': { template: '<i><slot /></i>' },
+        'el-collapse': { template: '<div><slot /></div>', props: ['modelValue'] },
+        'el-collapse-item': { template: '<div><slot name="title" /><slot /></div>' },
+        'el-dialog': { template: '<div><slot /></div>', props: ['modelValue', 'width', 'fullscreen'] },
       },
     },
   })
@@ -202,6 +207,7 @@ describe('Diagnosis.vue', () => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
     window.localStorage.clear()
+    Object.defineProperty(window, 'innerWidth', { value: 1280, writable: true, configurable: true })
     mockPush.mockReset()
     mockRoute.query = {}
     setActivePinia(createPinia())
@@ -255,8 +261,18 @@ describe('Diagnosis.vue', () => {
     expect(apiStock.getInfo).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiWatchlist.getAll).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
-    expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith('600000', 30, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith('600000', 180, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiAnalysis.analyze).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  })
+
+  it('defaults to 30 days on mobile when routed from tomorrow-star', async () => {
+    Object.defineProperty(window, 'innerWidth', { value: 390, writable: true, configurable: true })
+    mockRoute.query = { source: 'tomorrow-star' }
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.chartDays).toBe(30)
   })
 
   it('resolves stock names through the fuzzy search API before loading diagnosis data', async () => {
@@ -337,17 +353,16 @@ describe('Diagnosis.vue', () => {
     expect(option?.series?.[0]?.data).toHaveLength(30)
   })
 
-  it('maps analysis fields into the view model and emits success feedback', async () => {
+  it('submits an analysis task and starts polling', async () => {
     const wrapper = mountComponent()
     await flushPromises()
 
     wrapper.vm.stockCode = '600000'
     await wrapper.vm.analyzeStock()
 
-    expect(wrapper.vm.analysisResult.score).toBe(4.8)
-    expect(wrapper.vm.analysisResult.signal_type).toBe('trend_start')
-    expect(wrapper.vm.analysisResult.scores.trend_structure).toBe(4.5)
-    expect(ElMessage.success).toHaveBeenCalledWith('分析完成')
+    expect(apiAnalysis.analyze).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(ElMessage.info).toHaveBeenCalled()
+    expect(wrapper.vm.analyzing).toBe(true)
   })
 
   it('adds the current stock to watchlist with a diagnosis-based reason', async () => {

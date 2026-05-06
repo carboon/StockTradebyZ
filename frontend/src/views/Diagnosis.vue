@@ -51,7 +51,7 @@
     <template v-if="stockCode">
       <el-row :gutter="20" class="content-row">
         <!-- K线图 -->
-        <el-col :span="16">
+        <el-col :span="isMobileViewport ? 24 : 16">
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
@@ -69,7 +69,12 @@
                 </div>
                 <div class="chart-toolbar">
                   <span class="chart-toolbar-label">观察区间</span>
-                  <div class="chart-range-switcher" role="tablist" aria-label="K线区间选择">
+                  <div
+                    v-if="!isMobileViewport"
+                    class="chart-range-switcher"
+                    role="tablist"
+                    aria-label="K线区间选择"
+                  >
                     <button
                       v-for="days in chartDayOptions"
                       :key="days"
@@ -82,6 +87,25 @@
                       {{ days }}天
                     </button>
                   </div>
+                  <div v-else class="chart-range-mobile">
+                    <el-select
+                      :model-value="chartDays"
+                      size="small"
+                      class="chart-range-select"
+                      aria-label="K线区间选择"
+                      @change="selectChartDays"
+                    >
+                      <el-option
+                        v-for="days in chartDayOptions"
+                        :key="days"
+                        :label="`${days}天`"
+                        :value="days"
+                      />
+                    </el-select>
+                    <span v-if="isTomorrowStarMobileSource" class="chart-range-hint">
+                      来自明日之星，默认展示30天
+                    </span>
+                  </div>
                 </div>
               </div>
             </template>
@@ -90,118 +114,224 @@
         </el-col>
 
         <!-- 分析面板 -->
-        <el-col :span="8">
+        <el-col :span="isMobileViewport ? 24 : 8">
           <el-card class="analysis-card">
             <div v-if="analysisResult" class="analysis-content">
-              <div class="analysis-item">
-                <span class="label">当前评分</span>
-                <el-tag :type="getScoreType(analysisResult.score)" size="large">
-                  {{ analysisResult.score != null ? analysisResult.score.toFixed(1) : '-' }}
-                </el-tag>
+              <div v-if="isMobileViewport" class="analysis-summary-grid">
+                <div class="summary-tile">
+                  <span class="summary-label">当前评分</span>
+                  <el-tag :type="getScoreType(analysisResult.score)" size="large">
+                    {{ analysisResult.score != null ? analysisResult.score.toFixed(1) : '-' }}
+                  </el-tag>
+                </div>
+                <div class="summary-tile">
+                  <span class="summary-label">B1检查</span>
+                  <el-tag :type="analysisResult.b1_passed ? 'success' : 'danger'">
+                    {{ analysisResult.b1_passed ? '通过' : '未通过' }}
+                  </el-tag>
+                </div>
+                <div class="summary-tile verdict-tile">
+                  <span class="summary-label">
+                    趋势判断
+                    <el-tooltip raw-content content="PASS: 趋势启动，建议关注<br/>WATCH: 结构偏多，继续观察<br/>FAIL: 条件不足，暂不关注" placement="top">
+                      <el-icon class="info-icon"><InfoFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                  <span class="value">{{ analysisResult.verdict || '-' }}</span>
+                </div>
               </div>
 
-              <div class="analysis-item">
-                <span class="label">B1检查</span>
-                <el-tag :type="analysisResult.b1_passed ? 'success' : 'danger'">
-                  {{ analysisResult.b1_passed ? '通过' : '未通过' }}
-                </el-tag>
-              </div>
+              <template v-else>
+                <div class="analysis-item">
+                  <span class="label">当前评分</span>
+                  <el-tag :type="getScoreType(analysisResult.score)" size="large">
+                    {{ analysisResult.score != null ? analysisResult.score.toFixed(1) : '-' }}
+                  </el-tag>
+                </div>
 
-              <div class="analysis-item">
-                <span class="label">
-                        趋势判断
-                        <el-tooltip raw-content content="PASS: 趋势启动，建议关注<br/>WATCH: 结构偏多，继续观察<br/>FAIL: 条件不足，暂不关注" placement="top">
-                          <el-icon class="info-icon"><InfoFilled /></el-icon>
-                        </el-tooltip>
-                      </span>
-                <span class="value">{{ analysisResult.verdict || '-' }}</span>
-              </div>
+                <div class="analysis-item">
+                  <span class="label">B1检查</span>
+                  <el-tag :type="analysisResult.b1_passed ? 'success' : 'danger'">
+                    {{ analysisResult.b1_passed ? '通过' : '未通过' }}
+                  </el-tag>
+                </div>
+
+                <div class="analysis-item">
+                  <span class="label">
+                    趋势判断
+                    <el-tooltip raw-content content="PASS: 趋势启动，建议关注<br/>WATCH: 结构偏多，继续观察<br/>FAIL: 条件不足，暂不关注" placement="top">
+                      <el-icon class="info-icon"><InfoFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                  <span class="value">{{ analysisResult.verdict || '-' }}</span>
+                </div>
+              </template>
 
               <el-divider />
 
-              <div class="b1-details">
-                <div class="section-header">
-                  <h5>B1检查详情</h5>
-                </div>
-                <div class="detail-item">
-                  <span class="detail-label">
-                        KDJ-J
-                        <el-tooltip raw-content content="KDJ指标中的J值<br/>反映价格超买超卖状态<br/>J值低于0表示超卖<br/>高于100表示超买<br/>B1策略寻找J值处于低位的股票" placement="top">
-                          <el-icon class="info-icon"><InfoFilled /></el-icon>
-                        </el-tooltip>
-                      </span>
-                  <span class="detail-value">{{ analysisResult.kdj_j != null ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
-                </div>
-                <div class="detail-item">
-                  <span class="detail-label">
-                        知行线多头
-                        <el-tooltip raw-content content="知行线是特殊均线系统<br/>当短期线上穿长期线时<br/>表示趋势转多<br/>股价处于上升通道" placement="top">
-                          <el-icon class="info-icon"><InfoFilled /></el-icon>
-                        </el-tooltip>
-                      </span>
-                  <el-tag :type="analysisResult.zx_long_pos ? 'success' : 'info'" size="small">
-                    {{ analysisResult.zx_long_pos ? '是' : '否' }}
-                  </el-tag>
-                </div>
-                <div class="detail-item">
-                  <span class="detail-label">
-                        周线多头
-                        <el-tooltip raw-content content="周线级别均线呈多头排列<br/>短期均线>中期均线>长期均线<br/>表示中期趋势向上<br/>股票处于稳健上涨阶段" placement="top">
-                          <el-icon class="info-icon"><InfoFilled /></el-icon>
-                        </el-tooltip>
-                      </span>
-                  <el-tag :type="analysisResult.weekly_ma_aligned ? 'success' : 'info'" size="small">
-                    {{ analysisResult.weekly_ma_aligned ? '是' : '否' }}
-                  </el-tag>
-                </div>
-                <div class="detail-item">
-                  <span class="detail-label">
-                        量能健康
-                        <el-tooltip raw-content content="成交量处于合理水平<br/>既不过度萎缩(缺乏人气)<br/>也不过度放大(可能透支)<br/>健康的量能配合价格上涨<br/>是持续上涨的基础" placement="top">
-                          <el-icon class="info-icon"><InfoFilled /></el-icon>
-                        </el-tooltip>
-                      </span>
-                  <el-tag :type="analysisResult.volume_healthy ? 'success' : 'info'" size="small">
-                    {{ analysisResult.volume_healthy ? '是' : '否' }}
-                  </el-tag>
-                </div>
-	              </div>
+              <div v-if="isMobileViewport" class="mobile-analysis-panels">
+                <p class="mobile-analysis-summary">{{ analysisResult.comment || '暂无补充说明' }}</p>
+                <el-collapse v-model="mobileAnalysisSections">
+                  <el-collapse-item name="b1">
+                    <template #title>
+                      <span class="collapse-title">B1检查详情</span>
+                    </template>
+                    <div class="b1-details">
+                      <div class="detail-item">
+                        <span class="detail-label">
+                          KDJ-J
+                          <el-tooltip raw-content content="KDJ指标中的J值<br/>反映价格超买超卖状态<br/>J值低于0表示超卖<br/>高于100表示超买<br/>B1策略寻找J值处于低位的股票" placement="top">
+                            <el-icon class="info-icon"><InfoFilled /></el-icon>
+                          </el-tooltip>
+                        </span>
+                        <span class="detail-value">{{ analysisResult.kdj_j != null ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">
+                          知行线多头
+                          <el-tooltip raw-content content="知行线是特殊均线系统<br/>当短期线上穿长期线时<br/>表示趋势转多<br/>股价处于上升通道" placement="top">
+                            <el-icon class="info-icon"><InfoFilled /></el-icon>
+                          </el-tooltip>
+                        </span>
+                        <el-tag :type="analysisResult.zx_long_pos ? 'success' : 'info'" size="small">
+                          {{ analysisResult.zx_long_pos ? '是' : '否' }}
+                        </el-tag>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">
+                          周线多头
+                          <el-tooltip raw-content content="周线级别均线呈多头排列<br/>短期均线>中期均线>长期均线<br/>表示中期趋势向上<br/>股票处于稳健上涨阶段" placement="top">
+                            <el-icon class="info-icon"><InfoFilled /></el-icon>
+                          </el-tooltip>
+                        </span>
+                        <el-tag :type="analysisResult.weekly_ma_aligned ? 'success' : 'info'" size="small">
+                          {{ analysisResult.weekly_ma_aligned ? '是' : '否' }}
+                        </el-tag>
+                      </div>
+                      <div class="detail-item">
+                        <span class="detail-label">
+                          量能健康
+                          <el-tooltip raw-content content="成交量处于合理水平<br/>既不过度萎缩(缺乏人气)<br/>也不过度放大(可能透支)<br/>健康的量能配合价格上涨<br/>是持续上涨的基础" placement="top">
+                            <el-icon class="info-icon"><InfoFilled /></el-icon>
+                          </el-tooltip>
+                        </span>
+                        <el-tag :type="analysisResult.volume_healthy ? 'success' : 'info'" size="small">
+                          {{ analysisResult.volume_healthy ? '是' : '否' }}
+                        </el-tag>
+                      </div>
+                    </div>
+                  </el-collapse-item>
 
-	              <!-- 评分明细 -->
-	              <template v-if="analysisResult.scores && Object.keys(analysisResult.scores).length > 0">
-	                <el-divider />
-
-	                <div class="score-details">
-	                <div class="section-header">
-	                  <h5>评分明细</h5>
-	                </div>
-	                  <p class="score-summary">{{ analysisResult.comment || '-' }}</p>
-
-	                  <div class="score-grid">
-	                    <div class="score-item" v-for="item in scoreItems" :key="item.key">
-	                      <div class="score-header">
-	                        <span class="score-label">{{ item.label }}</span>
-	                        <el-tag :type="getScoreType(item.value)" size="small">
-	                          {{ item.value || 0 }}/5
-	                        </el-tag>
-	                      </div>
-	                      <el-tooltip :content="item.reason || '-'" placement="top" :disabled="!item.reason">
-                        <div class="score-reason">{{ item.reason || '-' }}</div>
+                  <el-collapse-item v-if="analysisResult.scores && Object.keys(analysisResult.scores).length > 0" name="scores">
+                    <template #title>
+                      <span class="collapse-title">评分明细</span>
+                    </template>
+                    <div class="score-details">
+                      <div class="score-grid">
+                        <div class="score-item" v-for="item in scoreItems" :key="item.key">
+                          <div class="score-header">
+                            <span class="score-label">{{ item.label }}</span>
+                            <el-tag :type="getScoreType(item.value)" size="small">
+                              {{ item.value || 0 }}/5
+                            </el-tag>
+                          </div>
+                          <div class="score-reason">{{ item.reason || '-' }}</div>
+                        </div>
+                      </div>
+                      <div v-if="analysisResult.signal_type" class="signal-type-box">
+                        <span class="signal-label">信号类型:</span>
+                        <el-tag :type="getSignalTagType(analysisResult.signal_type)" size="small">
+                          {{ getSignalLabel(analysisResult.signal_type) }}
+                        </el-tag>
+                        <span class="signal-reason">{{ analysisResult.signal_reasoning || '' }}</span>
+                      </div>
+                    </div>
+                  </el-collapse-item>
+                </el-collapse>
+              </div>
+              <template v-else>
+                <div class="b1-details">
+                  <div class="section-header">
+                    <h5>B1检查详情</h5>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">
+                      KDJ-J
+                      <el-tooltip raw-content content="KDJ指标中的J值<br/>反映价格超买超卖状态<br/>J值低于0表示超卖<br/>高于100表示超买<br/>B1策略寻找J值处于低位的股票" placement="top">
+                        <el-icon class="info-icon"><InfoFilled /></el-icon>
                       </el-tooltip>
-	                    </div>
-	                  </div>
+                    </span>
+                    <span class="detail-value">{{ analysisResult.kdj_j != null ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">
+                      知行线多头
+                      <el-tooltip raw-content content="知行线是特殊均线系统<br/>当短期线上穿长期线时<br/>表示趋势转多<br/>股价处于上升通道" placement="top">
+                        <el-icon class="info-icon"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                    <el-tag :type="analysisResult.zx_long_pos ? 'success' : 'info'" size="small">
+                      {{ analysisResult.zx_long_pos ? '是' : '否' }}
+                    </el-tag>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">
+                      周线多头
+                      <el-tooltip raw-content content="周线级别均线呈多头排列<br/>短期均线>中期均线>长期均线<br/>表示中期趋势向上<br/>股票处于稳健上涨阶段" placement="top">
+                        <el-icon class="info-icon"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                    <el-tag :type="analysisResult.weekly_ma_aligned ? 'success' : 'info'" size="small">
+                      {{ analysisResult.weekly_ma_aligned ? '是' : '否' }}
+                    </el-tag>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">
+                      量能健康
+                      <el-tooltip raw-content content="成交量处于合理水平<br/>既不过度萎缩(缺乏人气)<br/>也不过度放大(可能透支)<br/>健康的量能配合价格上涨<br/>是持续上涨的基础" placement="top">
+                        <el-icon class="info-icon"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                    <el-tag :type="analysisResult.volume_healthy ? 'success' : 'info'" size="small">
+                      {{ analysisResult.volume_healthy ? '是' : '否' }}
+                    </el-tag>
+                  </div>
+                </div>
 
-	                  <!-- 信号类型说明 -->
-	                  <div v-if="analysisResult.signal_type" class="signal-type-box">
-	                    <span class="signal-label">信号类型:</span>
-	                    <el-tag :type="getSignalTagType(analysisResult.signal_type)" size="small">
-	                      {{ getSignalLabel(analysisResult.signal_type) }}
-	                    </el-tag>
-	                    <span class="signal-reason">{{ analysisResult.signal_reasoning || '' }}</span>
-	                  </div>
-	                </div>
-	              </template>
-	            </div>
+                <template v-if="analysisResult.scores && Object.keys(analysisResult.scores).length > 0">
+                  <el-divider />
+
+                  <div class="score-details">
+                    <div class="section-header">
+                      <h5>评分明细</h5>
+                    </div>
+                    <p class="score-summary">{{ analysisResult.comment || '-' }}</p>
+
+                    <div class="score-grid">
+                      <div class="score-item" v-for="item in scoreItems" :key="item.key">
+                        <div class="score-header">
+                          <span class="score-label">{{ item.label }}</span>
+                          <el-tag :type="getScoreType(item.value)" size="small">
+                            {{ item.value || 0 }}/5
+                          </el-tag>
+                        </div>
+                        <el-tooltip :content="item.reason || '-'" placement="top" :disabled="!item.reason">
+                          <div class="score-reason">{{ item.reason || '-' }}</div>
+                        </el-tooltip>
+                      </div>
+                    </div>
+
+                    <div v-if="analysisResult.signal_type" class="signal-type-box">
+                      <span class="signal-label">信号类型:</span>
+                      <el-tag :type="getSignalTagType(analysisResult.signal_type)" size="small">
+                        {{ getSignalLabel(analysisResult.signal_type) }}
+                      </el-tag>
+                      <span class="signal-reason">{{ analysisResult.signal_reasoning || '' }}</span>
+                    </div>
+                  </div>
+                </template>
+              </template>
+            </div>
 
             <el-empty v-else description="暂无分析数据" :image-size="80" />
           </el-card>
@@ -229,7 +359,49 @@
             </div>
           </div>
         </template>
-        <div class="history-table-wrap">
+        <div v-if="isMobileViewport" class="history-mobile-list">
+          <el-empty v-if="historyData.length === 0" description="暂无历史数据" :image-size="72" />
+          <div v-else class="history-card-list">
+            <article v-for="row in historyData" :key="row.check_date" class="history-summary-card">
+              <div class="history-card-head">
+                <div class="history-date-block">
+                  <span class="history-date">{{ formatDate(row.check_date) }}</span>
+                  <span class="history-price">
+                    收盘 {{ row.close_price != null ? row.close_price.toFixed(2) : '-' }}
+                  </span>
+                </div>
+                <span :class="['history-change', getChangeClass(row.change_pct)]">
+                  {{ formatChange(row.change_pct) }}
+                </span>
+              </div>
+              <div class="history-card-tags">
+                <el-tag :type="getGateTagType(row.in_active_pool)" size="small">活跃池 {{ getGateLabel(row.in_active_pool) }}</el-tag>
+                <el-tag :type="getGateTagType(row.b1_passed)" size="small">B1 {{ getGateLabel(row.b1_passed) }}</el-tag>
+                <el-tag :type="getPrefilterTagType(row.prefilter_passed)" size="small">前置过滤 {{ getGateLabel(row.prefilter_passed) }}</el-tag>
+                <el-tag v-if="row.verdict" :type="getVerdictType(row.verdict)" size="small">{{ row.verdict }}</el-tag>
+                <el-tag v-if="row.signal_type" :type="getSignalTagType(row.signal_type)" size="small">
+                  {{ getSignalLabel(row.signal_type) }}
+                </el-tag>
+                <el-tag :type="getTomorrowStarTagType(row.tomorrow_star_pass)" size="small">
+                  明日之星 {{ getGateLabel(row.tomorrow_star_pass) }}
+                </el-tag>
+              </div>
+              <div class="history-card-footer">
+                <div class="history-score-line">
+                  <span class="history-score-label">量化评分</span>
+                  <el-tag v-if="row.score != null" :type="getScoreType(row.score)" size="small">
+                    {{ row.score.toFixed(1) }}
+                  </el-tag>
+                  <span v-else>-</span>
+                </div>
+                <el-button size="small" @click="openHistoryDetail(row)">
+                  {{ row.detail_ready ? '查看详情' : '生成详情' }}
+                </el-button>
+              </div>
+            </article>
+          </div>
+        </div>
+        <div v-else class="history-table-wrap">
           <el-table
             :data="historyData"
             stripe
@@ -359,7 +531,7 @@
         </div>
       </el-card>
 
-      <el-dialog v-model="historyDetailVisible" title="每日检查详情" width="760px">
+      <el-dialog v-model="historyDetailVisible" title="每日检查详情" :width="isMobileViewport ? '94%' : '760px'" :fullscreen="isMobileViewport">
         <div v-loading="historyDetailLoading">
           <template v-if="historyDetailData">
             <div class="history-detail-section">
@@ -403,11 +575,13 @@ import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, StockSearchIte
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
+import { useResponsive } from '@/composables/useResponsive'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const configStore = useConfigStore()
+const { isMobile } = useResponsive()
 const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state'
 const DIAGNOSIS_CHART_CACHE_KEY = 'stocktrade:diagnosis:chart-cache'
 const DIAGNOSIS_CHART_CACHE_TTL_MS = 30 * 60 * 1000
@@ -453,6 +627,7 @@ const analysisResult = ref<DiagnosisViewResult | null>(null)
 const stockName = ref('')
 const currentDiagnosisChartData = ref<KLineData | null>(null)
 const lastAutoHistoryRefreshAt = ref<Record<string, number>>({})
+const mobileAnalysisSections = ref(['b1', 'scores'])
 
 // 轮询定时器
 let pollingTimer: ReturnType<typeof setInterval> | null = null
@@ -503,6 +678,11 @@ const emptyDescription = computed(() => {
   if (!configStore.dataInitialized) return '请先完成首次初始化，再进行单股诊断'
   return '请输入股票代码或名称进行诊断'
 })
+const isMobileViewport = computed(() => isMobile.value)
+const isTomorrowStarMobileSource = computed(() => {
+  const source = Array.isArray(route.query.source) ? route.query.source[0] : route.query.source
+  return isMobile.value && source === 'tomorrow-star'
+})
 
 let chartInstance: ECharts | null = null
 let chartRuntimePromise: Promise<{ init: (dom: HTMLElement, theme?: string | object, opts?: object) => ECharts }> | null = null
@@ -538,9 +718,16 @@ function cancelDiagnosisPageRequests() {
   requestControllers.clear()
 }
 
+function applyMobileRouteChartPreference() {
+  if (isTomorrowStarMobileSource.value) {
+    chartDays.value = 30
+  }
+}
+
 onMounted(() => {
   configStore.checkTushareStatus()
   restoreDiagnosisState()
+  applyMobileRouteChartPreference()
 
   // 从路由参数获取股票代码
   const routeCode = normalizeRouteCode(route.query.code)
@@ -554,6 +741,7 @@ onMounted(() => {
 
 onActivated(() => {
   configStore.checkTushareStatus()
+  applyMobileRouteChartPreference()
   nextTick(() => {
     chartInstance?.resize()
   })
@@ -901,6 +1089,20 @@ watch(
     void renderChart(getDiagnosisDisplayChartData(currentDiagnosisChartData.value, chartDays.value))
   },
   { deep: true },
+)
+
+watch(
+  () => [route.query.source, isMobile.value],
+  () => {
+    if (!isTomorrowStarMobileSource.value) return
+    if (chartDays.value !== 30) {
+      chartDays.value = 30
+      persistDiagnosisState()
+    }
+    if (stockCode.value) {
+      void loadKlineData()
+    }
+  },
 )
 
 async function loadKlineData() {
@@ -1521,6 +1723,7 @@ function restoreDiagnosisState() {
     analysisResult.value = state.analysisResult || null
     isInWatchlist.value = Boolean(state.isInWatchlist)
     lastAutoHistoryRefreshAt.value = state.lastAutoHistoryRefreshAt || {}
+    applyMobileRouteChartPreference()
 
     if (stockCode.value) {
       nextTick(() => {
@@ -1747,6 +1950,54 @@ function normalizeRouteCode(code: unknown): string {
     }
 
     .analysis-content {
+      .analysis-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 4px;
+
+        .summary-tile {
+          display: grid;
+          gap: 8px;
+          padding: 12px;
+          border: 1px solid #e5edf5;
+          border-radius: 12px;
+          background: #f8fbff;
+
+          &.verdict-tile {
+            grid-column: 1 / -1;
+          }
+        }
+
+        .summary-label {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          color: var(--color-text-secondary);
+          font-size: 13px;
+        }
+      }
+
+      .mobile-analysis-panels {
+        display: grid;
+        gap: 12px;
+      }
+
+      .mobile-analysis-summary {
+        margin: 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #f5f7fa;
+        color: #606266;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .collapse-title {
+        font-weight: 600;
+        color: #303133;
+      }
+
       :deep(.el-divider) {
         margin: 8px 0;
       }
@@ -1963,6 +2214,72 @@ function normalizeRouteCode(code: unknown): string {
     overflow-x: auto;
   }
 
+  .history-mobile-list {
+    .history-card-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .history-summary-card {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid #e5edf5;
+      border-radius: 14px;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    }
+
+    .history-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .history-date-block {
+      display: grid;
+      gap: 4px;
+    }
+
+    .history-date {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1f2937;
+    }
+
+    .history-price {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .history-change {
+      font-size: 14px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .history-card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .history-card-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .history-score-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #475569;
+    }
+  }
+
   .table-header-label {
     display: inline-flex;
     align-items: center;
@@ -1987,7 +2304,28 @@ function normalizeRouteCode(code: unknown): string {
 
 @media (max-width: 768px) {
   .diagnosis-page {
+    .search-form-row {
+      :deep(.el-form-item) {
+        width: 100%;
+        margin-right: 0;
+      }
+    }
+
+    .search-input {
+      width: 100%;
+    }
+
+    .content-row {
+      margin-bottom: 16px;
+    }
+
     .chart-card {
+      margin-bottom: 16px;
+
+      :deep(.el-card__header) {
+        padding: 14px 14px 10px;
+      }
+
       .card-header {
         grid-template-columns: 1fr;
         align-items: start;
@@ -2013,8 +2351,51 @@ function normalizeRouteCode(code: unknown): string {
         justify-items: start;
       }
 
-      .chart-range-switcher {
-        justify-self: start;
+      .chart-range-mobile {
+        display: grid;
+        justify-items: start;
+        gap: 8px;
+      }
+
+      .chart-range-select {
+        width: 120px;
+      }
+
+      .chart-range-hint {
+        font-size: 12px;
+        color: #6b7280;
+      }
+
+      .chart-container {
+        min-height: 300px;
+      }
+    }
+
+    .analysis-card {
+      :deep(.el-card__body) {
+        overflow: visible;
+      }
+
+      .analysis-content {
+        .analysis-item {
+          gap: 12px;
+        }
+
+        .score-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    }
+
+    .history-header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+
+      .history-actions {
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
       }
     }
   }

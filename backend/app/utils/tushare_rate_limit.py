@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,25 +20,46 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
 STATE_DIR = ROOT / "data" / "run"
-STATE_FILE = STATE_DIR / "tushare_rate_limit.json"
-LOCK_FILE = STATE_DIR / "tushare_rate_limit.lock"
+FALLBACK_STATE_DIR = Path(tempfile.gettempdir()) / "stocktrade_run"
 
 WINDOW_SECONDS = int(os.environ.get("TUSHARE_RATE_LIMIT_WINDOW_SECONDS", "60"))
 MAX_REQUESTS_PER_WINDOW = int(os.environ.get("TUSHARE_MAX_REQUESTS_PER_MINUTE", "800"))
 
 
+def _resolve_state_paths() -> tuple[Path, Path]:
+    """Resolve writable state paths for rate limiting.
+
+    Some container bind-mount setups can surface `/app/data/run` as an invalid
+    path at runtime. Fall back to a local temp directory so Tushare checks and
+    updates do not fail just because the rate-limit state file can't be created
+    under the shared data mount.
+    """
+    for base_dir in (STATE_DIR, FALLBACK_STATE_DIR):
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+            if not base_dir.is_dir():
+                raise NotADirectoryError(str(base_dir))
+            state_file = base_dir / "tushare_rate_limit.json"
+            lock_file = base_dir / "tushare_rate_limit.lock"
+            return state_file, lock_file
+        except OSError:
+            continue
+    raise NotADirectoryError(str(STATE_DIR))
+
+
 def _load_state() -> dict[str, Any]:
-    if not STATE_FILE.exists():
+    state_file, _ = _resolve_state_paths()
+    if not state_file.exists():
         return {"timestamps": []}
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return json.loads(state_file.read_text(encoding="utf-8"))
     except Exception:
         return {"timestamps": []}
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    state_file, _ = _resolve_state_paths()
+    state_file.write_text(json.dumps(state), encoding="utf-8")
 
 
 def acquire_tushare_slot(endpoint: str = "unknown") -> None:
@@ -46,12 +68,12 @@ def acquire_tushare_slot(endpoint: str = "unknown") -> None:
     if MAX_REQUESTS_PER_WINDOW <= 0 or WINDOW_SECONDS <= 0:
         return
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if not LOCK_FILE.exists():
-        LOCK_FILE.write_text("0", encoding="utf-8")
+    _, lock_file = _resolve_state_paths()
+    if not lock_file.exists():
+        lock_file.write_text("0", encoding="utf-8")
 
     while True:
-        with LOCK_FILE.open("r+", encoding="utf-8") as lock_handle:
+        with lock_file.open("r+", encoding="utf-8") as lock_handle:
             if fcntl is not None:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             elif msvcrt is not None:

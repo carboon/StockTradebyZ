@@ -27,7 +27,63 @@
             </div>
           </template>
 
+          <div v-if="isMobile" class="watchlist-mobile-list">
+            <el-empty v-if="watchlist.length === 0" description="暂无观察股票" :image-size="60" />
+            <button
+              v-for="item in watchlist"
+              v-else
+              :key="item.id"
+              type="button"
+              class="mobile-stock-card"
+              :class="{ active: selectedStock?.id === item.id }"
+              @click="selectStock(item)"
+            >
+              <div class="mobile-stock-card__header">
+                <div class="mobile-stock-card__identity">
+                  <span class="mobile-stock-card__code">{{ item.code }}</span>
+                  <span class="mobile-stock-card__name">{{ item.name || item.code }}</span>
+                </div>
+                <el-tag v-if="selectedStock?.id === item.id" type="primary" size="small">当前查看</el-tag>
+              </div>
+              <div class="mobile-stock-card__meta">
+                <div class="mobile-stock-card__meta-item">
+                  <span class="label">成本</span>
+                  <span class="value">{{ item.entry_price != null ? item.entry_price.toFixed(2) : '-' }}</span>
+                </div>
+                <div class="mobile-stock-card__meta-item">
+                  <span class="label">仓位</span>
+                  <span class="value">{{ formatPositionRatio(item.position_ratio) }}</span>
+                </div>
+              </div>
+              <div class="mobile-stock-card__footer">
+                <div class="mobile-stock-card__risk">
+                  <span class="label">最新结论</span>
+                  <el-tag
+                    v-if="getLatestAnalysisForStock(item.id)?.risk_level"
+                    :type="getRiskLevelType(getLatestAnalysisForStock(item.id)?.risk_level)"
+                    size="small"
+                  >
+                    风险{{ getRiskLevelLabel(getLatestAnalysisForStock(item.id)?.risk_level) }}
+                  </el-tag>
+                  <el-tag
+                    v-else-if="getLatestAnalysisForStock(item.id)?.verdict"
+                    :type="getVerdictType(getLatestAnalysisForStock(item.id)?.verdict)"
+                    size="small"
+                  >
+                    {{ getLatestAnalysisForStock(item.id)?.verdict }}
+                  </el-tag>
+                  <span v-else class="value">{{ item.add_reason || '待分析' }}</span>
+                </div>
+                <div class="mobile-stock-card__actions">
+                  <el-button text type="primary" size="small" @click.stop="openEditDialog(item)">编辑</el-button>
+                  <el-button text type="danger" size="small" @click.stop="removeStock(item)">删除</el-button>
+                </div>
+              </div>
+            </button>
+          </div>
+
           <el-table
+            v-else
             :data="watchlist"
             @row-click="selectStock"
             highlight-current-row
@@ -86,7 +142,7 @@
             <div class="trend-section">
               <h4>趋势分析 (基于技术指标)</h4>
               <el-row :gutter="20" class="position-row">
-                <el-col :span="12">
+                <el-col :span="summarySpan">
                   <div class="trend-box">
                     <div class="trend-label">买入成本</div>
                     <div class="price-range">
@@ -94,7 +150,7 @@
                     </div>
                   </div>
                 </el-col>
-                <el-col :span="12">
+                <el-col :span="summarySpan">
                   <div class="trend-box">
                     <div class="trend-label">当前仓位</div>
                     <div class="price-range">
@@ -104,7 +160,7 @@
                 </el-col>
               </el-row>
               <el-row :gutter="20" class="position-row" v-if="analysisHistory.length > 0">
-                <el-col :span="8">
+                <el-col :span="actionSpan">
                   <div class="trend-box compact">
                     <div class="trend-label">买入动作</div>
                     <el-tag :type="getBuyActionType(analysisHistory[0].buy_action)" size="small">
@@ -112,7 +168,7 @@
                     </el-tag>
                   </div>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="actionSpan">
                   <div class="trend-box compact">
                     <div class="trend-label">持仓动作</div>
                     <el-tag :type="getHoldActionType(analysisHistory[0].hold_action)" size="small">
@@ -120,7 +176,7 @@
                     </el-tag>
                   </div>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="actionSpan">
                   <div class="trend-box compact">
                     <div class="trend-label">风险等级</div>
                     <el-tooltip placement="top" effect="light">
@@ -157,7 +213,7 @@
                 </div>
               </div>
               <el-row :gutter="20">
-                <el-col :span="12">
+                <el-col :span="summarySpan">
                   <div class="trend-box">
                     <div class="trend-label">当前趋势</div>
                     <el-tag :type="trendData.outlook === 'bullish' ? 'success' : trendData.outlook === 'bearish' ? 'danger' : 'info'" size="large">
@@ -165,7 +221,7 @@
                     </el-tag>
                   </div>
                 </el-col>
-                <el-col :span="12">
+                <el-col :span="summarySpan">
                   <div class="trend-box">
                     <div class="trend-label">支撑位 / 压力位</div>
                     <div class="price-range">
@@ -191,6 +247,42 @@
           </template>
 
           <el-empty v-if="historyRows.length === 0" description="暂无分析记录" :image-size="60" />
+          <div v-else-if="isMobile" class="history-mobile-list">
+            <div
+              v-for="row in historyRows"
+              :key="`${row.id}-${row.analysis_date}`"
+              class="history-mobile-card"
+            >
+              <div class="history-mobile-card__header">
+                <span class="history-mobile-card__date">{{ formatTradeDate(row.analysis_date) }}</span>
+                <div class="history-mobile-card__tags">
+                  <el-tag :type="getVerdictType(row.verdict)" size="small">
+                    {{ row.verdict || '-' }}
+                  </el-tag>
+                  <el-tag v-if="row.risk_level" :type="getRiskLevelType(row.risk_level)" size="small">
+                    风险{{ getRiskLevelLabel(row.risk_level) }}
+                  </el-tag>
+                </div>
+              </div>
+              <div class="history-mobile-card__metrics">
+                <span>评分 {{ row.score != null ? row.score.toFixed(1) : '-' }}</span>
+                <span>买入 {{ getBuyActionLabel(row.buy_action) }}</span>
+                <span>持仓 {{ getHoldActionLabel(row.hold_action) }}</span>
+              </div>
+              <div class="history-mobile-card__section">
+                <span class="label">建仓建议</span>
+                <p>{{ row.buy_recommendation || row.recommendation || '-' }}</p>
+              </div>
+              <div class="history-mobile-card__section">
+                <span class="label">持仓建议</span>
+                <p>{{ row.hold_recommendation || row.recommendation || '-' }}</p>
+              </div>
+              <div class="history-mobile-card__section">
+                <span class="label">风控建议</span>
+                <p>{{ row.risk_recommendation || row.recommendation || '-' }}</p>
+              </div>
+            </div>
+          </div>
           <el-table v-else :data="historyRows" class="history-table">
             <el-table-column prop="analysis_date" label="交易日" min-width="130">
               <template #default="{ row }">
@@ -265,8 +357,14 @@
         </el-card>
 
     <!-- 添加对话框 -->
-    <el-dialog v-model="showAddDialog" title="添加到观察列表" width="400px">
-      <el-form :model="addForm" label-width="80px">
+    <el-dialog
+      v-model="showAddDialog"
+      title="添加到观察列表"
+      :width="isMobile ? '100%' : '400px'"
+      :fullscreen="isMobile"
+      :top="isMobile ? '0' : '15vh'"
+    >
+      <el-form :model="addForm" :label-width="isMobile ? 'auto' : '80px'" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="股票代码">
           <el-input
             v-model="addForm.code"
@@ -301,8 +399,14 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showEditDialog" title="编辑持仓信息" width="400px">
-      <el-form :model="editForm" label-width="80px">
+    <el-dialog
+      v-model="showEditDialog"
+      title="编辑持仓信息"
+      :width="isMobile ? '100%' : '400px'"
+      :fullscreen="isMobile"
+      :top="isMobile ? '0' : '15vh'"
+    >
+      <el-form :model="editForm" :label-width="isMobile ? 'auto' : '80px'" :label-position="isMobile ? 'top' : 'right'">
         <el-form-item label="股票代码">
           <el-input v-model="editForm.code" disabled />
         </el-form-item>
@@ -342,10 +446,12 @@ import { useRouter } from 'vue-router'
 import { Plus, Delete } from '@element-plus/icons-vue'
 import { apiWatchlist, apiStock, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
+import { useResponsive } from '@/composables/useResponsive'
 import type { KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
 import type { ECharts } from 'echarts/core'
 
 const router = useRouter()
+const { isMobile } = useResponsive()
 const WATCHLIST_STATE_KEY = 'stocktrade:watchlist:state'
 const WATCHLIST_CACHE_TTL_MS = 5 * 60 * 1000
 const WATCHLIST_CHART_CACHE_KEY = 'stocktrade:watchlist:chart-cache'
@@ -421,6 +527,8 @@ const trendText = computed(() => {
 })
 
 const latestAnalysis = computed(() => analysisHistory.value[0] || null)
+const summarySpan = computed(() => (isMobile.value ? 24 : 12))
+const actionSpan = computed(() => (isMobile.value ? 24 : 8))
 const historyRows = computed(() => {
   const deduped = new Map<string, WatchlistAnalysis>()
 
@@ -433,6 +541,15 @@ const historyRows = computed(() => {
 
   return Array.from(deduped.values())
 })
+
+function getLatestAnalysisForStock(id: number): WatchlistAnalysis | null {
+  if (selectedStock.value?.id === id && analysisHistory.value.length > 0) {
+    return analysisHistory.value[0] || null
+  }
+
+  const cached = analysisCache.get(id)
+  return cached?.[0] || null
+}
 
 function beginRequest(key: string): AbortSignal {
   requestControllers.get(key)?.abort()
@@ -1233,6 +1350,14 @@ async function refreshAnalysisInBackground(id: number) {
     .watchlist-table {
       height: 100%;
     }
+
+    .watchlist-mobile-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 12px;
+      overflow: auto;
+    }
   }
 
   .detail-card {
@@ -1360,6 +1485,141 @@ async function refreshAnalysisInBackground(id: number) {
     flex-shrink: 0;
   }
 
+  .mobile-stock-card {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--el-border-color-light);
+    border-radius: 12px;
+    background: #fff;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+
+    &.active {
+      border-color: var(--el-color-primary);
+      box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.12);
+    }
+
+    &__header,
+    &__footer,
+    &__meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    &__header,
+    &__footer {
+      align-items: center;
+    }
+
+    &__identity {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    &__code {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+
+    &__name {
+      color: var(--color-text-secondary);
+      font-size: 13px;
+      word-break: break-all;
+    }
+
+    &__meta-item,
+    &__risk {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .label {
+      color: var(--color-text-light);
+      font-size: 12px;
+    }
+
+    .value {
+      color: var(--color-text-primary);
+      font-size: 13px;
+      word-break: break-word;
+    }
+
+    &__actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+  }
+
+  .history-mobile-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow: auto;
+  }
+
+  .history-mobile-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--el-border-color-light);
+    border-radius: 12px;
+    background: var(--color-bg-light);
+
+    &__header,
+    &__metrics {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    &__date {
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+
+    &__tags {
+      display: inline-flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    &__metrics {
+      color: var(--color-text-secondary);
+      font-size: 13px;
+    }
+
+    &__section {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+
+      .label {
+        font-size: 12px;
+        color: var(--color-text-light);
+      }
+
+      p {
+        margin: 0;
+        color: var(--color-text-primary);
+        line-height: 1.6;
+        word-break: break-word;
+      }
+    }
+  }
+
   .trend-section {
     flex-shrink: 0;
 
@@ -1484,6 +1744,85 @@ async function refreshAnalysisInBackground(id: number) {
   .history-table {
     :deep(.el-table__cell) {
       vertical-align: top;
+    }
+  }
+}
+
+@media (max-width: 767px) {
+  .watchlist-page {
+    gap: 16px;
+
+    .top-section {
+      flex-direction: column;
+      height: auto;
+      min-height: 0;
+    }
+
+    .list-card,
+    .detail-card,
+    .detail-empty,
+    .history-card {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .list-card {
+      flex: none;
+    }
+
+    .detail-card {
+      :deep(.el-card__body) {
+        padding: 16px;
+      }
+    }
+
+    .history-card {
+      :deep(.el-card__body) {
+        max-height: none;
+        overflow: visible;
+      }
+    }
+
+    .card-header {
+      align-items: flex-start;
+      gap: 10px;
+
+      .stock-title {
+        min-width: 0;
+        word-break: break-word;
+      }
+
+      .header-actions {
+        width: 100%;
+        justify-content: space-between;
+        flex-wrap: wrap;
+      }
+    }
+
+    .chart-container {
+      height: 300px;
+    }
+
+    .trend-section {
+      .position-row {
+        margin-bottom: 12px;
+      }
+
+      .trend-box {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+
+      .decision-section {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    :deep(.el-dialog.is-fullscreen) {
+      .el-dialog__body {
+        padding-bottom: 24px;
+      }
     }
   }
 }

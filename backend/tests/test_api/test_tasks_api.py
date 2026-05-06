@@ -396,6 +396,28 @@ def test_start_incremental_update_blocked_by_running_full_update(test_client_wit
 
 
 @pytest.mark.api
+def test_start_incremental_update_prefers_realtime_latest_trade_date_when_available(test_client_with_db: Any) -> None:
+    with patch(
+        "app.services.market_service.MarketService.get_update_state",
+        return_value=_mock_incremental_state(status="idle", running=False),
+    ), \
+            patch("app.services.market_service.MarketService.start_update", return_value=True), \
+            patch("app.services.market_service.MarketService.incremental_update", return_value={"ok": True, "updated": 0, "skipped": 0, "failed": 0}), \
+            patch("app.api.tasks.TushareService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service.get_effective_latest_trade_date.return_value = "2026-05-06"
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.post("/api/v1/tasks/start-incremental")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert "2026-05-06" in data["message"]
+    mock_service.get_effective_latest_trade_date.assert_called_once_with(prefer_realtime=True)
+
+
+@pytest.mark.api
 def test_get_tasks_empty(test_client_with_db: Any) -> None:
     """
     测试获取任务列表 - 空列表

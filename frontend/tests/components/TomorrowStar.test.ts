@@ -205,7 +205,7 @@ describe('TomorrowStar.vue', () => {
     const wrapper = mountComponent()
     await flushPromises()
 
-    await wrapper.vm.selectDate({ date: '2024-01-14', count: 1, pass: 0 })
+    await wrapper.vm.selectDate({ rawDate: '2024-01-14', date: '2024-01-14', count: 1, pass: 0, status: 'success' })
     await flushPromises()
 
     expect(wrapper.vm.selectedDate).toBe('2024-01-14')
@@ -213,6 +213,18 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.latestCandidates[0].code).toBe('300001')
     expect(apiAnalysis.getCandidates).toHaveBeenLastCalledWith('2024-01-14', expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiAnalysis.getResults).toHaveBeenLastCalledWith('2024-01-14', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  })
+
+  it('passes tomorrow-star mobile query params when opening diagnosis', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.viewStock('600000')
+
+    expect(mockPush).toHaveBeenCalledWith({
+      path: '/diagnosis',
+      query: { code: '600000', source: 'tomorrow-star', days: '30' },
+    })
   })
 
   it('starts incremental update when freshness says data should refresh', async () => {
@@ -264,7 +276,7 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     expect(apiTasks.startIncrementalUpdate).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('任务中断，可恢复')
+    expect(wrapper.vm.incrementalUpdate.last_error).toBe('任务中断，可恢复')
   })
 
   it('does not auto-start incremental update outside the beijing post-close window', async () => {
@@ -430,6 +442,7 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.latestCandidates).toHaveLength(0)
 
     resolveStatus?.(statusPayload)
+    await flushPromises()
     await flushPromises()
 
     expect(wrapper.vm.latestDate).toBe('2024-01-15')

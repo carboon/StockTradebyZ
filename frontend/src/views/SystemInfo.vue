@@ -467,6 +467,80 @@ const activeTab = ref('usage')
   }
 }
 
+@media (max-width: 767px) {
+  .system-info-page {
+    gap: 16px;
+
+    .page-grid {
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    .summary-column,
+    .detail-column {
+      gap: 14px;
+    }
+
+    .section-header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .hero-content {
+      h2 {
+        font-size: 20px;
+      }
+    }
+
+    .tabs-card {
+      :deep(.el-card__body) {
+        padding: 14px;
+      }
+    }
+
+    .info-tabs {
+      :deep(.el-tabs__header) {
+        margin-bottom: 14px;
+      }
+
+      :deep(.el-tabs__nav-wrap) {
+        padding-bottom: 4px;
+      }
+
+      :deep(.el-tabs__item) {
+        padding: 0 12px;
+        font-size: 13px;
+      }
+    }
+
+    .usage-item,
+    .definition-item,
+    .verdict-item,
+    .flow-item,
+    .logic-card {
+      padding: 12px 14px;
+    }
+
+    .usage-item,
+    .flow-item {
+      gap: 12px;
+    }
+
+    .usage-step,
+    .flow-step {
+      width: 32px;
+      height: 32px;
+      font-size: 13px;
+    }
+
+    .risk-alert {
+      :deep(.el-alert__content) {
+        font-size: 13px;
+      }
+    }
+  }
+}
+
 @media (max-width: 960px) {
   .system-info-page {
     .page-grid {
