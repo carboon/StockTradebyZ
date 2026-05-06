@@ -60,6 +60,37 @@ def _safe_json_float(value: Optional[float]) -> Optional[float]:
     return result if math.isfinite(result) else None
 
 
+def _get_latest_history_summary(db: Session, code: str) -> dict | None:
+    latest_row = (
+        db.query(DailyB1Check, DailyB1CheckDetail)
+        .outerjoin(
+            DailyB1CheckDetail,
+            (DailyB1CheckDetail.code == DailyB1Check.code)
+            & (DailyB1CheckDetail.check_date == DailyB1Check.check_date),
+        )
+        .filter(DailyB1Check.code == code)
+        .order_by(DailyB1Check.check_date.desc(), DailyB1Check.id.desc())
+        .first()
+    )
+    if not latest_row:
+        return None
+
+    item, detail = latest_row
+    score_details = detail.score_details_json if detail else {}
+    return {
+        "check_date": item.check_date.isoformat() if item.check_date else None,
+        "close_price": item.close_price,
+        "b1_passed": item.b1_passed,
+        "score": item.score,
+        "verdict": score_details.get("verdict"),
+        "kdj_j": item.kdj_j,
+        "zx_long_pos": item.zx_long_pos,
+        "weekly_ma_aligned": item.weekly_ma_aligned,
+        "volume_healthy": item.volume_healthy,
+        "signal_type": score_details.get("signal_type"),
+    }
+
+
 def ensure_tushare_ready() -> None:
     service = TushareService()
     valid, message = service.verify_token()
@@ -657,6 +688,22 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
     # 任务已完成，返回结果
     # 只读模式：不触发实时计算补全缺失字段
     result_json = task.result_json or {}
+    latest_history = _get_latest_history_summary(db, code)
+    if latest_history:
+        result_json = {
+            **result_json,
+            "check_date": latest_history.get("check_date") or result_json.get("check_date"),
+            "analysis_date": latest_history.get("check_date") or result_json.get("analysis_date"),
+            "close_price": latest_history.get("close_price"),
+            "b1_passed": latest_history.get("b1_passed"),
+            "score": latest_history.get("score"),
+            "verdict": latest_history.get("verdict"),
+            "kdj_j": latest_history.get("kdj_j"),
+            "zx_long_pos": latest_history.get("zx_long_pos"),
+            "weekly_ma_aligned": latest_history.get("weekly_ma_aligned"),
+            "volume_healthy": latest_history.get("volume_healthy"),
+            "signal_type": latest_history.get("signal_type"),
+        }
 
     return {
         "code": code,

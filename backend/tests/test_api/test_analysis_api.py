@@ -26,8 +26,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import Task
-from app.models import Stock
+from app.models import DailyB1Check, DailyB1CheckDetail, Stock, Task
 
 
 @pytest.mark.api
@@ -641,6 +640,79 @@ def test_get_diagnosis_result_completed(test_client_with_db: Any) -> None:
     assert data["score"] == 4.5
     assert data["verdict"] == "PASS"
     assert data["analysis"]["kdj_j"] == 15.3
+
+
+@pytest.mark.api
+def test_get_diagnosis_result_completed_prefers_latest_history_summary(test_client_with_db: Any) -> None:
+    """
+    测试获取单股分析结果 - 已完成任务优先对齐最新历史摘要
+
+    验证当历史表存在更新日期时，主诊断面板返回最新历史日期对应的摘要字段。
+    """
+    from app.time_utils import utc_now
+
+    now = utc_now()
+    task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "002222", "reviewer": "quant"},
+        result_json={
+            "check_date": "2026-04-30",
+            "analysis_date": "2026-04-30",
+            "close_price": 10.5,
+            "b1_passed": False,
+            "score": 3.2,
+            "verdict": "WATCH",
+            "kdj_j": 18.0,
+            "zx_long_pos": False,
+            "weekly_ma_aligned": False,
+            "volume_healthy": False,
+            "signal_type": "rebound",
+            "comment": "旧任务结果",
+            "scores": {"trend_structure": 3.0},
+        },
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    stock = Stock(code="002222", name="福晶科技", market="SZ", industry="电子")
+    history = DailyB1Check(
+        code="002222",
+        check_date=date(2026, 5, 6),
+        close_price=11.8,
+        b1_passed=True,
+        score=4.7,
+        kdj_j=9.6,
+        zx_long_pos=True,
+        weekly_ma_aligned=True,
+        volume_healthy=True,
+    )
+    history_detail = DailyB1CheckDetail(
+        code="002222",
+        check_date=date(2026, 5, 6),
+        status="ready",
+        detail_version="v1",
+        score_details_json={"verdict": "PASS", "signal_type": "trend_start"},
+        rules_json={},
+        details_json={},
+    )
+    test_client_with_db.db.add_all([task, stock, history, history_detail])
+    test_client_with_db.db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/diagnosis/002222/result")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["code"] == "002222"
+    assert data["name"] == "福晶科技"
+    assert data["current_price"] == 11.8
+    assert data["b1_passed"] is True
+    assert data["score"] == 4.7
+    assert data["verdict"] == "PASS"
+    assert data["analysis"]["kdj_j"] == 9.6
+    assert data["analysis"]["signal_type"] == "trend_start"
 
 
 @pytest.mark.api
