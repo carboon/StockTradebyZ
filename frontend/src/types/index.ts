@@ -321,6 +321,11 @@ export interface DiagnosisHistoryStatusResponse {
   generating: boolean
   count: number
   total?: number
+  page?: number
+  page_size?: number
+  needs_refresh?: boolean
+  latest_trade_date?: string | null
+  latest_history_date?: string | null
   generated_at?: string
 }
 

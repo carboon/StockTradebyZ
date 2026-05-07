@@ -645,9 +645,6 @@ const currentDiagnosisChartData = ref<KLineData | null>(null)
 const lastAutoHistoryRefreshAt = ref<Record<string, number>>({})
 const mobileAnalysisSections = ref(['b1', 'scores'])
 
-// 轮询定时器
-let pollingTimer: ReturnType<typeof setInterval> | null = null
-
 // 评分项配置
 const scoreConfig = {
   trend_structure: { label: '趋势结构', weight: 0.2 },
@@ -776,10 +773,6 @@ onActivated(() => {
 
 onDeactivated(() => {
   searchSequence += 1
-  if (pollingTimer) {
-    clearInterval(pollingTimer)
-    pollingTimer = null
-  }
   stopAnalysisPolling()
   cancelDiagnosisPageRequests()
   refreshingHistory.value = false
@@ -792,10 +785,6 @@ onUnmounted(() => {
     chartInstance.dispose()
   }
   window.removeEventListener('resize', handleResize)
-  if (pollingTimer) {
-    clearInterval(pollingTimer)
-    pollingTimer = null
-  }
   stopAnalysisPolling()
   cancelDiagnosisPageRequests()
 })
@@ -979,45 +968,29 @@ async function loadWatchlistStatus() {
 }
 
 async function refreshHistory() {
-  await triggerHistoryRefresh()
+  historyPage.value = 1
+  await triggerHistoryRefresh(false, true)
 }
 
-async function triggerHistoryRefresh(silent: boolean = false) {
+async function triggerHistoryRefresh(silent: boolean = false, force: boolean = false) {
   if (!stockCode.value || refreshingHistory.value) return
 
   refreshingHistory.value = true
-
-  const statusSignal = beginRequest('historyStatus')
   try {
-    const status = await apiAnalysis.getHistoryStatus(stockCode.value, { signal: statusSignal })
-
-    if (status.generating) {
-      startPollingHistory(silent)
-      if (!silent) {
-        ElMessage.info('历史数据正在生成中，请稍候...')
-      }
-      return
-    }
-
-    if (status.exists && (status.count || 0) > 0) {
-      await loadHistoryData()
-      if (!silent) {
-        ElMessage.success(`已读取现有历史数据，共 ${status.count} 条`)
-      }
-      refreshingHistory.value = false
-      return
-    }
-
-    finishRequest('historyStatus', statusSignal)
-
     const refreshSignal = beginRequest('historyRefresh')
-    await apiAnalysis.refreshHistory(stockCode.value, 180, { signal: refreshSignal })
+    const result = await apiAnalysis.refreshHistory(
+      stockCode.value,
+      180,
+      historyPage.value,
+      historyPageSize,
+      force,
+      { signal: refreshSignal },
+    )
     lastAutoHistoryRefreshAt.value[stockCode.value] = Date.now()
+    await loadHistoryData(false)
     persistDiagnosisState()
-    startPollingHistory(silent)
-
     if (!silent) {
-      ElMessage.info('开始刷新历史数据，请稍候...')
+      ElMessage.success(result.message || '历史数据已刷新')
     }
   } catch (error: any) {
     if (isRequestCanceled(error)) return
@@ -1026,9 +999,8 @@ async function triggerHistoryRefresh(silent: boolean = false) {
       const message = getUserSafeErrorMessage(error, '刷新历史数据失败')
       ElMessage.error(isInitializationPendingError(error) ? message : `刷新历史数据失败: ${message}`)
     }
-    refreshingHistory.value = false
   } finally {
-    finishRequest('historyStatus', statusSignal)
+    refreshingHistory.value = false
   }
 }
 
@@ -1036,61 +1008,32 @@ async function maybeAutoRefreshHistory(force: boolean = false) {
   if (!stockCode.value) return
 
   const lastRefreshAt = lastAutoHistoryRefreshAt.value[stockCode.value] || 0
-  const latestHistory = historyData.value[0]
-  const hasScoredToday = Boolean(latestHistory && latestHistory.score != null && latestHistory.verdict)
-  const shouldRefresh = force
-    ? !refreshingHistory.value && Date.now() - lastRefreshAt >= AUTO_HISTORY_REFRESH_INTERVAL_MS
-    : !hasScoredToday || (Date.now() - lastRefreshAt >= AUTO_HISTORY_REFRESH_INTERVAL_MS)
+  const statusSignal = beginRequest('historyStatus')
+  let shouldRefresh = false
+
+  try {
+    const status = await apiAnalysis.getHistoryStatus(
+      stockCode.value,
+      180,
+      1,
+      historyPageSize,
+      { signal: statusSignal },
+    )
+    shouldRefresh = force
+      ? !refreshingHistory.value && Date.now() - lastRefreshAt >= AUTO_HISTORY_REFRESH_INTERVAL_MS
+      : Boolean(status.needs_refresh) || (Date.now() - lastRefreshAt >= AUTO_HISTORY_REFRESH_INTERVAL_MS)
+  } catch (error) {
+    if (!isRequestCanceled(error)) {
+      shouldRefresh = force
+    }
+  } finally {
+    finishRequest('historyStatus', statusSignal)
+  }
 
   if (shouldRefresh) {
+    historyPage.value = 1
     await triggerHistoryRefresh(true)
   }
-}
-
-function startPollingHistory(silent: boolean = false) {
-  if (pollingTimer) {
-    clearInterval(pollingTimer)
-  }
-
-  // 立即加载一次
-  loadHistoryData()
-
-  // 每2秒轮询一次
-  pollingTimer = setInterval(async () => {
-    const currentCode = stockCode.value
-    if (!currentCode) return
-
-    const signal = beginRequest('historyStatus')
-    try {
-      const status = await apiAnalysis.getHistoryStatus(currentCode, { signal })
-
-      // 加载最新数据
-      await loadHistoryData()
-
-      // 如果生成完成，停止轮询并刷新分析
-      if (!status.generating) {
-        stopPollingHistory()
-        // 刷新最新分析
-        await analyzeStock()
-        if (!silent) {
-          ElMessage.success(`历史数据刷新完成，共 ${historyData.value.length} 条`)
-        }
-      }
-    } catch (error) {
-      if (isRequestCanceled(error)) return
-      // 忽略轮询错误
-    } finally {
-      finishRequest('historyStatus', signal)
-    }
-  }, 2000)
-}
-
-function stopPollingHistory() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer)
-    pollingTimer = null
-  }
-  refreshingHistory.value = false
 }
 
 function selectChartDays(days: number) {
@@ -1368,7 +1311,7 @@ async function loadDiagnosisChartRuntime() {
   return chartRuntimePromise
 }
 
-async function loadHistoryData() {
+async function loadHistoryData(refresh: boolean = false) {
   if (!stockCode.value) return
 
   const signal = beginRequest('historyLoad')
@@ -1378,6 +1321,7 @@ async function loadHistoryData() {
       180,
       historyPage.value,
       historyPageSize,
+      refresh,
       { signal },
     )
     historyData.value = data.history || []
@@ -1393,7 +1337,7 @@ async function loadHistoryData() {
 
 async function handleHistoryPageChange(page: number) {
   historyPage.value = page
-  await loadHistoryData()
+  await triggerHistoryRefresh(true)
 }
 
 // 分析任务轮询定时器

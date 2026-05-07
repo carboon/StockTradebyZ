@@ -121,9 +121,9 @@ describe('api/index.ts', () => {
 
     await apiAnalysis.getCandidates('2024-01-15', { signal })
     await apiAnalysis.getResults('2024-01-15', { signal })
-    await apiAnalysis.getDiagnosisHistory('600000', 20, { signal })
+    await apiAnalysis.getDiagnosisHistory('600000', 20, 1, 10, false, { signal })
     await apiAnalysis.analyze('600000', { signal })
-    await apiAnalysis.refreshHistory('600000', 30, { signal })
+    await apiAnalysis.refreshHistory('600000', 30, 1, 10, false, { signal })
 
     expect(mockGet).toHaveBeenNthCalledWith(1, '/v1/analysis/tomorrow-star/candidates', {
       signal,
@@ -138,14 +138,14 @@ describe('api/index.ts', () => {
     expect(mockGet).toHaveBeenNthCalledWith(3, '/v1/analysis/diagnosis/600000/history', {
       signal,
       timeout: 45000,
-      params: { days: 20 },
+      params: { days: 20, page: 1, page_size: 10, refresh: false },
     })
     expect(mockPost).toHaveBeenNthCalledWith(1, '/v1/analysis/diagnosis/analyze', { code: '600000' }, { signal, timeout: 45000 })
     expect(mockPost).toHaveBeenNthCalledWith(
       2,
       '/v1/analysis/diagnosis/600000/generate-history',
       null,
-      { signal, timeout: 45000, params: { days: 30, clean: true } },
+      { signal, timeout: 45000, params: { days: 30, page: 1, page_size: 10, force: false } },
     )
   })
 

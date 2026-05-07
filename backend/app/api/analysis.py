@@ -418,6 +418,7 @@ async def get_diagnosis_history(
     days: int = 180,
     page: int = 1,
     page_size: int = 10,
+    refresh: bool = Query(default=False, description="是否同步补齐当前页历史数据"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> DiagnosisHistoryResponse:
@@ -429,6 +430,16 @@ async def get_diagnosis_history(
     code = code.zfill(6)
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), days, 50))
+    if refresh:
+        refresh_result = analysis_service.ensure_history_page(
+            code,
+            days=days,
+            page=page,
+            page_size=page_size,
+            force=True,
+        )
+        if not refresh_result.get("success"):
+            raise HTTPException(status_code=500, detail=refresh_result.get("error", "刷新历史数据失败"))
     history_result = analysis_service.get_stock_history_checks(code, days, page, page_size)
     if isinstance(history_result, tuple) and len(history_result) == 2:
         history, total = history_result
@@ -458,65 +469,57 @@ async def get_diagnosis_history(
 async def generate_diagnosis_history(
     code: str,
     days: int = Query(default=180, description="生成最近N个交易日的历史数据"),
-    clean: bool = Query(default=True, description="是否先清理旧数据"),
-    _rate_limit: None = Depends(history_generation_rate_limit),
+    page: int = Query(default=1, description="当前页码"),
+    page_size: int = Query(default=10, description="当前页大小"),
+    force: bool = Query(default=False, description="是否强制刷新当前页"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
-    """重新刷新单股诊断历史数据（后台任务模式）
-
-    阶段5改造：
-    - 通过任务系统统一管理长任务，不再使用 BackgroundTasks
-    - 添加限流约束（2次/小时）
-    - 返回任务信息，前端可通过任务ID追踪进度
-    """
-    from app.main import manager
-
-    ensure_tushare_ready()
+    """同步刷新当前页单股诊断历史数据。"""
     code = code.zfill(6)
-
-    # 创建历史生成任务（阶段5：统一通过任务系统）
-    task_service = TaskService(db, manager=manager)
-    active_full_task = task_service.get_active_full_task()
-    if active_full_task:
-        _raise_initialization_in_progress(active_full_task)
-    result = await task_service.create_task(
-        "generate_history",
-        {
-            "code": code,
-            "days": days,
-            "clean": clean,
-            "reviewer": "quant",
-            "trigger_source": "manual"
-        }
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), days, 50))
+    result = analysis_service.ensure_history_page(
+        code,
+        days=days,
+        page=page,
+        page_size=page_size,
+        force=force,
     )
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "刷新历史数据失败"))
 
     return {
-        "task_id": result["task_id"],
         "code": code,
-        "status": "pending" if not result.get("existing") else "existing",
-        "ws_url": result["ws_url"],
-        "message": "历史数据生成任务已创建" if not result.get("existing") else "正在初始化，请等待",
+        "status": "updated" if result.get("updated") else "ready",
+        "page": page,
+        "page_size": page_size,
+        "generated_count": result.get("generated_count", 0),
+        "generated_dates": result.get("generated_dates", []),
+        "latest_trade_date": result.get("latest_trade_date"),
+        "latest_history_date": result.get("latest_history_date"),
+        "message": "当前页历史数据已刷新" if result.get("updated") else "当前页历史数据已是最新",
     }
 
 
 @router.get("/diagnosis/{code}/history-status")
 async def get_history_status(
     code: str,
+    days: int = 180,
+    page: int = 1,
+    page_size: int = 10,
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
     """获取历史数据生成状态"""
     code = code.zfill(6)
-    running_task = (
-        db.query(Task)
-        .filter(
-            Task.task_type == "generate_history",
-            Task.filter_by_code(code),
-            Task.status.in_(["pending", "running"]),
-        )
-        .order_by(Task.created_at.desc(), Task.id.desc())
-        .first()
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), days, 50))
+    refresh_status = analysis_service.get_history_refresh_status(
+        code,
+        days=days,
+        page=page,
+        page_size=page_size,
     )
     count = db.query(DailyB1Check).filter(DailyB1Check.code == code).count()
     latest_detail = (
@@ -527,9 +530,14 @@ async def get_history_status(
     )
     return {
         "exists": count > 0,
-        "generating": running_task is not None,
+        "generating": False,
         "count": count,
-        "total": min(180, count) if count else 0,
+        "total": refresh_status.get("total", 0),
+        "page": page,
+        "page_size": page_size,
+        "needs_refresh": refresh_status.get("needs_refresh", False),
+        "latest_trade_date": refresh_status.get("latest_trade_date"),
+        "latest_history_date": refresh_status.get("latest_history_date"),
         "generated_at": latest_detail.updated_at.isoformat() if latest_detail and latest_detail.updated_at else None,
     }
 

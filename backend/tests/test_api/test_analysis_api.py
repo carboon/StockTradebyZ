@@ -348,7 +348,7 @@ def test_get_diagnosis_history_empty(test_client: TestClient) -> None:
     验证当股票没有历史检查记录时，API返回空列表，并标记 data_ready=False。
     """
     with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_service.get_stock_history_checks.return_value = []
+        mock_service.get_stock_history_checks.return_value = ([], 0)
 
         response = test_client.get("/api/v1/analysis/diagnosis/600000/history")
 
@@ -360,7 +360,7 @@ def test_get_diagnosis_history_empty(test_client: TestClient) -> None:
         assert data["code"] == "600000"  # 代码自动补零到6位
         assert data["data_ready"] is False  # 只读模式：标记数据未就绪
         assert "message" in data  # 应该有提示消息
-        mock_service.get_stock_history_checks.assert_called_once_with("600000", 30)
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 180, 1, 10)
 
 
 @pytest.mark.api
@@ -409,7 +409,7 @@ def test_get_diagnosis_history(test_client: TestClient) -> None:
                 "tomorrow_star_pass": False,
             },
         ]
-        mock_service.get_stock_history_checks.return_value = mock_history
+        mock_service.get_stock_history_checks.return_value = (mock_history, 2)
 
         response = test_client.get("/api/v1/analysis/diagnosis/600000/history")
 
@@ -441,7 +441,7 @@ def test_get_diagnosis_history_returns_stock_name(test_client_with_db) -> None:
     test_client_with_db.db.commit()
 
     with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_service.get_stock_history_checks.return_value = []
+        mock_service.get_stock_history_checks.return_value = ([], 0)
 
         response = test_client_with_db.get("/api/v1/analysis/diagnosis/600000/history")
 
@@ -459,7 +459,7 @@ def test_get_diagnosis_history_padded_code(test_client: TestClient) -> None:
     验证API能正确处理不足6位的股票代码，自动补零。
     """
     with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_service.get_stock_history_checks.return_value = []
+        mock_service.get_stock_history_checks.return_value = ([], 0)
 
         # 输入不足6位的代码
         response = test_client.get("/api/v1/analysis/diagnosis/1/history")
@@ -467,7 +467,7 @@ def test_get_diagnosis_history_padded_code(test_client: TestClient) -> None:
         assert response.status_code == 200
         data = response.json()
         assert data["code"] == "000001"  # 自动补零到6位
-        mock_service.get_stock_history_checks.assert_called_once_with("000001", 30)
+        mock_service.get_stock_history_checks.assert_called_once_with("000001", 180, 1, 10)
 
 
 @pytest.mark.api
@@ -478,12 +478,98 @@ def test_get_diagnosis_history_with_days_param(test_client: TestClient) -> None:
     验证API能正确处理days参数，返回指定天数的历史记录。
     """
     with patch("app.api.analysis.analysis_service") as mock_service:
-        mock_service.get_stock_history_checks.return_value = []
+        mock_service.get_stock_history_checks.return_value = ([], 0)
 
         response = test_client.get("/api/v1/analysis/diagnosis/600000/history?days=60")
 
         assert response.status_code == 200
-        mock_service.get_stock_history_checks.assert_called_once_with("600000", 60)
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 60, 1, 10)
+
+
+@pytest.mark.api
+def test_get_diagnosis_history_refreshes_current_page_when_requested(test_client: TestClient) -> None:
+    with patch("app.api.analysis.analysis_service") as mock_service:
+        mock_service.ensure_history_page.return_value = {
+            "success": True,
+            "updated": True,
+            "generated_count": 2,
+        }
+        mock_service.get_stock_history_checks.return_value = ([
+            {
+                "check_date": "2026-05-06",
+                "close_price": 10.8,
+                "b1_passed": True,
+            }
+        ], 180)
+
+        response = test_client.get("/api/v1/analysis/diagnosis/600000/history?refresh=true")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["history"][0]["check_date"] == "2026-05-06"
+        mock_service.ensure_history_page.assert_called_once_with(
+            "600000",
+            days=180,
+            page=1,
+            page_size=10,
+            force=True,
+        )
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 180, 1, 10)
+
+
+@pytest.mark.api
+def test_generate_diagnosis_history_refreshes_first_page_synchronously(test_client: TestClient) -> None:
+    with patch("app.api.analysis.analysis_service") as mock_service:
+        mock_service.ensure_history_page.return_value = {
+            "success": True,
+            "updated": True,
+            "generated_count": 3,
+            "generated_dates": ["2026-05-06", "2026-05-05", "2026-04-30"],
+            "latest_trade_date": "2026-05-06",
+            "latest_history_date": "2026-05-06",
+        }
+
+        response = test_client.post("/api/v1/analysis/diagnosis/600000/generate-history")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["code"] == "600000"
+        assert data["status"] == "updated"
+        assert data["generated_count"] == 3
+        assert data["latest_trade_date"] == "2026-05-06"
+        mock_service.ensure_history_page.assert_called_once_with(
+            "600000",
+            days=180,
+            page=1,
+            page_size=10,
+            force=False,
+        )
+
+
+@pytest.mark.api
+def test_get_history_status_reports_refresh_need(test_client: TestClient) -> None:
+    with patch("app.api.analysis.analysis_service") as mock_service:
+        mock_service.get_history_refresh_status.return_value = {
+            "total": 180,
+            "needs_refresh": True,
+            "latest_trade_date": "2026-05-06",
+            "latest_history_date": "2026-04-30",
+        }
+
+        response = test_client.get("/api/v1/analysis/diagnosis/600000/history-status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["needs_refresh"] is True
+        assert data["latest_trade_date"] == "2026-05-06"
+        assert data["latest_history_date"] == "2026-04-30"
+        assert data["generating"] is False
+        mock_service.get_history_refresh_status.assert_called_once_with(
+            "600000",
+            days=180,
+            page=1,
+            page_size=10,
+        )
 
 
 @pytest.mark.api

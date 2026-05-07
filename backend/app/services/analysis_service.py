@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import pandas as pd
 import yaml
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 
 # 添加项目根目录到 Python 路径
 ROOT = Path(__file__).parent.parent.parent.parent
@@ -21,7 +21,7 @@ from app.config import settings
 from app.services.analysis_cache import analysis_cache
 from app.services.kline_service import get_daily_data
 from app.database import SessionLocal
-from app.models import DailyB1Check, DailyB1CheckDetail
+from app.models import DailyB1Check, DailyB1CheckDetail, StockDaily
 
 
 class AnalysisService:
@@ -354,6 +354,372 @@ class AnalysisService:
                 "weekly_ma_aligned": record.get("weekly_ma_aligned"),
                 "volume_healthy": record.get("volume_healthy"),
             },
+        }
+
+    @staticmethod
+    def _prepare_history_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        prepared = df.copy()
+        prepared["date"] = pd.to_datetime(prepared["date"], errors="coerce")
+        prepared = prepared.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        if prepared.empty:
+            return prepared
+        if "change_pct" not in prepared.columns:
+            prepared["change_pct"] = prepared["close"].pct_change() * 100
+        return prepared
+
+    def get_recent_trade_dates(self, code: str, days: int = 180) -> list[str]:
+        days = max(1, min(int(days), self.HISTORY_WINDOW_DAYS))
+        code = code.zfill(6)
+
+        with SessionLocal() as db:
+            rows = (
+                db.query(StockDaily.trade_date)
+                .filter(StockDaily.code == code)
+                .order_by(StockDaily.trade_date.desc())
+                .limit(days)
+                .all()
+            )
+
+        dates = [row[0].isoformat() for row in rows if row and row[0]]
+        if dates:
+            return dates
+
+        df = self.load_stock_data(code, days=max(days, 365))
+        if df is None or df.empty:
+            return []
+        prepared = self._prepare_history_dataframe(df)
+        if prepared.empty:
+            return []
+        return [
+            pd.Timestamp(ts).date().isoformat()
+            for ts in prepared["date"].tail(days).tolist()[::-1]
+        ]
+
+    def get_history_page_dates(
+        self,
+        code: str,
+        *,
+        days: int = 180,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> tuple[list[str], int]:
+        dates = self.get_recent_trade_dates(code, days=days)
+        total = len(dates)
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), max(days, 1), 50))
+        start = (page - 1) * page_size
+        end = start + page_size
+        return dates[start:end], total
+
+    def get_latest_history_check_date(self, code: str) -> Optional[str]:
+        code = code.zfill(6)
+        with SessionLocal() as db:
+            latest = (
+                db.query(DailyB1Check.check_date)
+                .filter(DailyB1Check.code == code)
+                .order_by(DailyB1Check.check_date.desc(), DailyB1Check.id.desc())
+                .limit(1)
+                .scalar()
+            )
+        return latest.isoformat() if latest else None
+
+    def get_history_refresh_status(
+        self,
+        code: str,
+        *,
+        days: int = 180,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> dict[str, Any]:
+        code = code.zfill(6)
+        page_dates, total_trade_dates = self.get_history_page_dates(
+            code,
+            days=days,
+            page=page,
+            page_size=page_size,
+        )
+        latest_trade_date = page_dates[0] if page_dates else None
+        latest_history_date = self.get_latest_history_check_date(code)
+
+        with SessionLocal() as db:
+            total_generated = int(
+                db.query(func.count(DailyB1Check.id))
+                .filter(DailyB1Check.code == code)
+                .scalar()
+                or 0
+            )
+            existing_dates = set()
+            if page_dates:
+                page_date_objs = [date_class.fromisoformat(item) for item in page_dates]
+                existing_dates = {
+                    row[0].isoformat()
+                    for row in (
+                        db.query(DailyB1Check.check_date)
+                        .filter(
+                            DailyB1Check.code == code,
+                            DailyB1Check.check_date.in_(page_date_objs),
+                        )
+                        .all()
+                    )
+                    if row and row[0]
+                }
+
+        missing_dates = [item for item in page_dates if item not in existing_dates]
+        needs_refresh = bool(missing_dates)
+        if page == 1 and latest_trade_date and latest_history_date != latest_trade_date:
+            needs_refresh = True
+            if latest_trade_date not in missing_dates:
+                missing_dates.insert(0, latest_trade_date)
+
+        return {
+            "exists": total_generated > 0,
+            "count": total_generated,
+            "total": total_trade_dates,
+            "latest_trade_date": latest_trade_date,
+            "latest_history_date": latest_history_date,
+            "page": page,
+            "page_size": page_size,
+            "page_dates": page_dates,
+            "missing_dates": missing_dates,
+            "needs_refresh": needs_refresh,
+            "has_page_data": len(existing_dates) > 0,
+        }
+
+    def _generate_history_records_for_dates(
+        self,
+        *,
+        code: str,
+        df: pd.DataFrame,
+        target_dates: list[date_class],
+    ) -> dict[str, Any]:
+        if not target_dates:
+            return {
+                "success": True,
+                "code": code,
+                "generated_count": 0,
+                "requested_dates": [],
+                "generated_dates": [],
+            }
+
+        selector = self._build_b1_selector()
+        quant_config = self._load_quant_review_config()
+        prefilter = self._build_prefilter(quant_config)
+        preselect_cfg = self._load_preselect_config()
+
+        target_ts_map = {
+            pd.Timestamp(item).normalize(): item
+            for item in sorted(set(target_dates))
+        }
+        active_pool_sets = self._build_active_pool_sets(
+            start_ts=min(target_ts_map.keys()),
+            end_ts=max(target_ts_map.keys()),
+            preselect_cfg=preselect_cfg,
+        )
+
+        generated_count = 0
+        generated_dates: list[str] = []
+        target_ts_set = set(target_ts_map.keys())
+        with SessionLocal() as db:
+            for _, row in df.iterrows():
+                row_ts = pd.Timestamp(row["date"]).normalize()
+                if row_ts not in target_ts_set:
+                    continue
+
+                check_date = row_ts.date().isoformat()
+                check_date_obj = target_ts_map[row_ts]
+                df_before = df[df["date"] <= row["date"]].copy()
+                if len(df_before) < 60:
+                    continue
+
+                try:
+                    df_prepared = selector.prepare_df(df_before)
+                    last_row = df_prepared.iloc[-1]
+                    change_pct = row.get("change_pct")
+                    if pd.isna(change_pct):
+                        change_pct = None
+                    elif isinstance(change_pct, (int, float)):
+                        change_pct = float(change_pct)
+                    else:
+                        change_pct = None
+
+                    b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
+                    kdj_j = float(last_row["J"]) if pd.notna(last_row.get("J")) else None
+                    zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
+                    weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
+                    in_active_pool = code in active_pool_sets.get(row_ts, set())
+
+                    prefilter_passed: Optional[bool] = None
+                    prefilter_blocked_by: Optional[list[str]] = None
+                    try:
+                        prefilter_result = prefilter.evaluate(code=code, pick_date=check_date, price_df=df_before)
+                        prefilter_passed = bool(prefilter_result.get("passed", True))
+                        prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+
+                    score_result = self._quant_review_for_date(code, df_before, check_date, config=quant_config)
+                    tomorrow_star_pass = self._derive_tomorrow_star_pass(
+                        in_active_pool=in_active_pool,
+                        b1_passed=b1_passed,
+                        prefilter_passed=prefilter_passed,
+                        verdict=score_result.get("verdict"),
+                        signal_type=score_result.get("signal_type"),
+                    )
+                    fail_reason = self._derive_fail_reason(
+                        in_active_pool=in_active_pool,
+                        b1_passed=b1_passed,
+                        prefilter_passed=prefilter_passed,
+                        prefilter_blocked_by=prefilter_blocked_by,
+                        verdict=score_result.get("verdict"),
+                        signal_type=score_result.get("signal_type"),
+                    )
+                    record = {
+                        "check_date": check_date,
+                        "close_price": float(row["close"]) if pd.notna(row.get("close")) else None,
+                        "change_pct": change_pct,
+                        "kdj_j": kdj_j,
+                        "kdj_low_rank": None,
+                        "zx_long_pos": zx_long_pos,
+                        "weekly_ma_aligned": weekly_ma_aligned,
+                        "volume_healthy": self._calculate_volume_health(df_prepared),
+                        "in_active_pool": in_active_pool,
+                        "b1_passed": b1_passed,
+                        "prefilter_passed": prefilter_passed,
+                        "prefilter_blocked_by": prefilter_blocked_by,
+                        "score": score_result.get("score"),
+                        "verdict": score_result.get("verdict"),
+                        "signal_type": score_result.get("signal_type"),
+                        "tomorrow_star_pass": tomorrow_star_pass,
+                        "notes": fail_reason,
+                    }
+                    detail_payload = self._build_history_detail_payload(record=record, score_result=score_result)
+
+                    existing_check = (
+                        db.query(DailyB1Check)
+                        .filter(DailyB1Check.code == code, DailyB1Check.check_date == check_date_obj)
+                        .first()
+                    )
+                    if existing_check is None:
+                        existing_check = DailyB1Check(code=code, check_date=check_date_obj)
+                        db.add(existing_check)
+                    existing_check.close_price = record["close_price"]
+                    existing_check.change_pct = record["change_pct"]
+                    existing_check.kdj_j = record["kdj_j"]
+                    existing_check.kdj_low_rank = record["kdj_low_rank"]
+                    existing_check.zx_long_pos = record["zx_long_pos"]
+                    existing_check.weekly_ma_aligned = record["weekly_ma_aligned"]
+                    existing_check.volume_healthy = record["volume_healthy"]
+                    existing_check.b1_passed = record["b1_passed"]
+                    existing_check.score = record["score"]
+                    existing_check.notes = record["notes"]
+
+                    existing_detail = (
+                        db.query(DailyB1CheckDetail)
+                        .filter(DailyB1CheckDetail.code == code, DailyB1CheckDetail.check_date == check_date_obj)
+                        .first()
+                    )
+                    if existing_detail is None:
+                        existing_detail = DailyB1CheckDetail(code=code, check_date=check_date_obj)
+                        db.add(existing_detail)
+                    existing_detail.status = "ready"
+                    existing_detail.detail_version = self.DETAIL_VERSION
+                    existing_detail.strategy_version = self.STRATEGY_VERSION
+                    existing_detail.rule_version = self.DETAIL_VERSION
+                    existing_detail.score_details_json = detail_payload["score_details_json"]
+                    existing_detail.rules_json = detail_payload["rules_json"]
+                    existing_detail.details_json = detail_payload["details_json"]
+                    generated_count += 1
+                    generated_dates.append(check_date)
+                    if generated_count % 20 == 0:
+                        db.commit()
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    continue
+
+            db.commit()
+
+        return {
+            "success": True,
+            "code": code,
+            "generated_count": generated_count,
+            "requested_dates": [item.isoformat() for item in sorted(set(target_dates), reverse=True)],
+            "generated_dates": generated_dates,
+        }
+
+    def ensure_history_page(
+        self,
+        code: str,
+        *,
+        days: int = 180,
+        page: int = 1,
+        page_size: int = 10,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        code = code.zfill(6)
+        status = self.get_history_refresh_status(
+            code,
+            days=days,
+            page=page,
+            page_size=page_size,
+        )
+        target_dates = status["page_dates"]
+        if not force and not status["needs_refresh"]:
+            return {
+                "success": True,
+                "code": code,
+                "page": page,
+                "page_size": page_size,
+                "updated": False,
+                "requested_dates": target_dates,
+                "generated_dates": [],
+                "generated_count": 0,
+                "total": status["total"],
+                "latest_trade_date": status["latest_trade_date"],
+                "latest_history_date": status["latest_history_date"],
+            }
+
+        if not target_dates:
+            return {
+                "success": True,
+                "code": code,
+                "page": page,
+                "page_size": page_size,
+                "updated": False,
+                "requested_dates": [],
+                "generated_dates": [],
+                "generated_count": 0,
+                "total": 0,
+                "latest_trade_date": None,
+                "latest_history_date": status["latest_history_date"],
+            }
+
+        df = self.load_stock_data(code, days=max(days + 240, 365))
+        if df is None or df.empty:
+            return {"success": False, "error": "数据不存在"}
+        prepared_df = self._prepare_history_dataframe(df)
+        if prepared_df.empty:
+            return {"success": False, "error": "数据不存在"}
+
+        target_date_set = {date_class.fromisoformat(item) for item in target_dates}
+        result = self._generate_history_records_for_dates(
+            code=code,
+            df=prepared_df,
+            target_dates=list(target_date_set),
+        )
+        if not result.get("success"):
+            return result
+
+        latest_history_date = self.get_latest_history_check_date(code)
+        return {
+            **result,
+            "page": page,
+            "page_size": page_size,
+            "updated": result.get("generated_count", 0) > 0,
+            "total": status["total"],
+            "latest_trade_date": status["latest_trade_date"],
+            "latest_history_date": latest_history_date,
         }
 
     def get_latest_candidate_date(self) -> Optional[str]:
@@ -905,11 +1271,23 @@ class AnalysisService:
         """获取股票历史检查记录（数据库持久化）。"""
         days = max(1, min(int(days), self.HISTORY_WINDOW_DAYS))
         page = max(1, int(page))
-        if page_size is not None:
-            page_size = max(1, min(int(page_size), days))
+        if page_size is None:
+            page_size = days
+        page_size = max(1, min(int(page_size), days, 50))
         code = code.zfill(6)
+
+        page_dates, total = self.get_history_page_dates(
+            code,
+            days=days,
+            page=page,
+            page_size=page_size,
+        )
+        if not page_dates:
+            return [], total
+
+        target_date_objs = [date_class.fromisoformat(item) for item in page_dates]
         with SessionLocal() as db:
-            base_query = (
+            rows = (
                 db.query(DailyB1Check, DailyB1CheckDetail)
                 .outerjoin(
                     DailyB1CheckDetail,
@@ -918,42 +1296,50 @@ class AnalysisService:
                         DailyB1CheckDetail.check_date == DailyB1Check.check_date,
                     ),
                 )
-                .filter(DailyB1Check.code == code)
+                .filter(
+                    DailyB1Check.code == code,
+                    DailyB1Check.check_date.in_(target_date_objs),
+                )
                 .order_by(DailyB1Check.check_date.desc(), DailyB1Check.id.desc())
+                .all()
             )
-            total = min(base_query.count(), days)
-            query = base_query.limit(days)
-            if page_size is not None:
-                offset = (page - 1) * page_size
-                query = query.offset(offset).limit(page_size)
-            rows = query.all()
-            history = []
-            for item, detail in rows:
-                score_details = detail.score_details_json if detail else {}
-                rules = detail.rules_json if detail else {}
-                history.append(self._normalize_history_record({
-                    "check_date": item.check_date.isoformat(),
-                    "close_price": item.close_price,
-                    "change_pct": item.change_pct,
-                    "kdj_j": item.kdj_j,
-                    "kdj_low_rank": item.kdj_low_rank,
-                    "zx_long_pos": item.zx_long_pos,
-                    "weekly_ma_aligned": item.weekly_ma_aligned,
-                    "volume_healthy": item.volume_healthy,
-                    "in_active_pool": rules.get("in_active_pool"),
-                    "b1_passed": item.b1_passed,
-                    "prefilter_passed": rules.get("prefilter_passed"),
-                    "prefilter_blocked_by": rules.get("prefilter_blocked_by"),
-                    "score": item.score,
-                    "verdict": score_details.get("verdict"),
-                    "signal_type": score_details.get("signal_type"),
-                    "tomorrow_star_pass": rules.get("tomorrow_star_pass"),
-                    "notes": item.notes,
-                    "detail_ready": bool(detail and detail.status == "ready"),
-                    "detail_version": detail.detail_version if detail else None,
-                    "detail_updated_at": detail.updated_at if detail else None,
-                }))
-            return history, total
+
+        row_map = {
+            item.check_date.isoformat(): (item, detail)
+            for item, detail in rows
+            if item and item.check_date
+        }
+        history = []
+        for check_date in page_dates:
+            pair = row_map.get(check_date)
+            if not pair:
+                continue
+            item, detail = pair
+            score_details = detail.score_details_json if detail else {}
+            rules = detail.rules_json if detail else {}
+            history.append(self._normalize_history_record({
+                "check_date": item.check_date.isoformat(),
+                "close_price": item.close_price,
+                "change_pct": item.change_pct,
+                "kdj_j": item.kdj_j,
+                "kdj_low_rank": item.kdj_low_rank,
+                "zx_long_pos": item.zx_long_pos,
+                "weekly_ma_aligned": item.weekly_ma_aligned,
+                "volume_healthy": item.volume_healthy,
+                "in_active_pool": rules.get("in_active_pool"),
+                "b1_passed": item.b1_passed,
+                "prefilter_passed": rules.get("prefilter_passed"),
+                "prefilter_blocked_by": rules.get("prefilter_blocked_by"),
+                "score": item.score,
+                "verdict": score_details.get("verdict"),
+                "signal_type": score_details.get("signal_type"),
+                "tomorrow_star_pass": rules.get("tomorrow_star_pass"),
+                "notes": item.notes,
+                "detail_ready": bool(detail and detail.status == "ready"),
+                "detail_version": detail.detail_version if detail else None,
+                "detail_updated_at": detail.updated_at if detail else None,
+            }))
+        return history, total
 
     def generate_stock_history_checks(self, code: str, days: int = 180, clean: bool = True) -> dict:
         """
@@ -967,165 +1353,37 @@ class AnalysisService:
             days: 生成最近N个交易日的历史数据
             clean: 是否先清理旧数据
         """
-        df = self.load_stock_data(code)
+        code = code.zfill(6)
+        df = self.load_stock_data(code, days=max(days + 240, 365))
         if df is None or df.empty:
             return {"success": False, "error": "数据不存在"}
-
-        # 计算涨跌幅（如果不存在）
-        if "change_pct" not in df.columns:
-            df["change_pct"] = df["close"].pct_change() * 100
-
-        selector = self._build_b1_selector()
-        quant_config = self._load_quant_review_config()
-        prefilter = self._build_prefilter(quant_config)
-        preselect_cfg = self._load_preselect_config()
-
         days = max(1, min(int(days), self.HISTORY_WINDOW_DAYS))
-        recent_df = df.tail(days).copy()
-        target_dates = [pd.Timestamp(ts).normalize() for ts in recent_df["date"].tolist()]
-        active_pool_sets = self._build_active_pool_sets(
-            start_ts=min(target_dates),
-            end_ts=max(target_dates),
-            preselect_cfg=preselect_cfg,
-        ) if target_dates else {}
+        prepared_df = self._prepare_history_dataframe(df)
+        if prepared_df.empty:
+            return {"success": False, "error": "数据不存在"}
 
-        generated_count = 0
-        keep_dates: list[date_class] = []
+        recent_dates = [
+            pd.Timestamp(ts).date()
+            for ts in prepared_df["date"].tail(days).tolist()
+        ]
         with SessionLocal() as db:
             if clean:
                 db.query(DailyB1CheckDetail).filter(DailyB1CheckDetail.code == code).delete()
                 db.query(DailyB1Check).filter(DailyB1Check.code == code).delete()
                 db.commit()
 
-            for _, row in recent_df.iterrows():
-                check_date = row["date"].strftime("%Y-%m-%d")
-                check_date_obj = date_class.fromisoformat(check_date)
-                df_before = df[df["date"] <= row["date"]].copy()
-                if len(df_before) < 60:
-                    continue
-                try:
-                    df_prepared = selector.prepare_df(df_before)
-                    last_row = df_prepared.iloc[-1]
-                    change_pct = row.get("change_pct")
-                    if pd.isna(change_pct):
-                        change_pct = None
-                    elif isinstance(change_pct, (int, float)):
-                        change_pct = float(change_pct)
-                    else:
-                        change_pct = None
-
-                    b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
-                    kdj_j = float(last_row["J"]) if pd.notna(last_row.get("J")) else None
-                    zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
-                    weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
-                    in_active_pool = code in active_pool_sets.get(pd.Timestamp(row["date"]).normalize(), set())
-
-                    prefilter_passed: Optional[bool] = None
-                    prefilter_blocked_by: Optional[list[str]] = None
-                    try:
-                        prefilter_result = prefilter.evaluate(code=code, pick_date=check_date, price_df=df_before)
-                        prefilter_passed = bool(prefilter_result.get("passed", True))
-                        prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
-                    except Exception:
-                        import traceback
-                        traceback.print_exc()
-
-                    score_result = self._quant_review_for_date(code, df_before, check_date, config=quant_config)
-                    tomorrow_star_pass = self._derive_tomorrow_star_pass(
-                        in_active_pool=in_active_pool,
-                        b1_passed=b1_passed,
-                        prefilter_passed=prefilter_passed,
-                        verdict=score_result.get("verdict"),
-                        signal_type=score_result.get("signal_type"),
-                    )
-                    fail_reason = self._derive_fail_reason(
-                        in_active_pool=in_active_pool,
-                        b1_passed=b1_passed,
-                        prefilter_passed=prefilter_passed,
-                        prefilter_blocked_by=prefilter_blocked_by,
-                        verdict=score_result.get("verdict"),
-                        signal_type=score_result.get("signal_type"),
-                    )
-                    record = {
-                        "check_date": check_date,
-                        "close_price": float(row["close"]) if pd.notna(row.get("close")) else None,
-                        "change_pct": change_pct,
-                        "kdj_j": kdj_j,
-                        "kdj_low_rank": None,
-                        "zx_long_pos": zx_long_pos,
-                        "weekly_ma_aligned": weekly_ma_aligned,
-                        "volume_healthy": self._calculate_volume_health(df_prepared),
-                        "in_active_pool": in_active_pool,
-                        "b1_passed": b1_passed,
-                        "prefilter_passed": prefilter_passed,
-                        "prefilter_blocked_by": prefilter_blocked_by,
-                        "score": score_result.get("score"),
-                        "verdict": score_result.get("verdict"),
-                        "signal_type": score_result.get("signal_type"),
-                        "tomorrow_star_pass": tomorrow_star_pass,
-                        "notes": fail_reason,
-                    }
-                    detail_payload = self._build_history_detail_payload(record=record, score_result=score_result)
-                    existing_check = (
-                        db.query(DailyB1Check)
-                        .filter(DailyB1Check.code == code, DailyB1Check.check_date == check_date_obj)
-                        .first()
-                    )
-                    if existing_check is None:
-                        existing_check = DailyB1Check(code=code, check_date=check_date_obj)
-                        db.add(existing_check)
-                    existing_check.close_price = record["close_price"]
-                    existing_check.change_pct = record["change_pct"]
-                    existing_check.kdj_j = record["kdj_j"]
-                    existing_check.kdj_low_rank = record["kdj_low_rank"]
-                    existing_check.zx_long_pos = record["zx_long_pos"]
-                    existing_check.weekly_ma_aligned = record["weekly_ma_aligned"]
-                    existing_check.volume_healthy = record["volume_healthy"]
-                    existing_check.b1_passed = record["b1_passed"]
-                    existing_check.score = record["score"]
-                    existing_check.notes = record["notes"]
-
-                    existing_detail = (
-                        db.query(DailyB1CheckDetail)
-                        .filter(DailyB1CheckDetail.code == code, DailyB1CheckDetail.check_date == check_date_obj)
-                        .first()
-                    )
-                    if existing_detail is None:
-                        existing_detail = DailyB1CheckDetail(code=code, check_date=check_date_obj)
-                        db.add(existing_detail)
-                    existing_detail.status = "ready"
-                    existing_detail.detail_version = self.DETAIL_VERSION
-                    existing_detail.strategy_version = self.STRATEGY_VERSION
-                    existing_detail.rule_version = self.DETAIL_VERSION
-                    existing_detail.score_details_json = detail_payload["score_details_json"]
-                    existing_detail.rules_json = detail_payload["rules_json"]
-                    existing_detail.details_json = detail_payload["details_json"]
-                    keep_dates.append(check_date_obj)
-                    generated_count += 1
-                    if generated_count % 20 == 0:
-                        db.commit()
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    continue
-
-            db.commit()
-            if keep_dates:
-                db.query(DailyB1CheckDetail).filter(
-                    DailyB1CheckDetail.code == code,
-                    ~DailyB1CheckDetail.check_date.in_(keep_dates),
-                ).delete(synchronize_session=False)
-                db.query(DailyB1Check).filter(
-                    DailyB1Check.code == code,
-                    ~DailyB1Check.check_date.in_(keep_dates),
-                ).delete(synchronize_session=False)
-                db.commit()
+        result = self._generate_history_records_for_dates(
+            code=code,
+            df=prepared_df,
+            target_dates=recent_dates,
+        )
+        if not result.get("success"):
+            return result
 
         return {
-            "success": True,
-            "code": code,
-            "generated_count": generated_count,
+            **result,
             "days": days,
+            "updated": result.get("generated_count", 0) > 0,
         }
 
     def get_history_detail(self, code: str, check_date: Any) -> Optional[dict[str, Any]]:

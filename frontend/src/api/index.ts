@@ -218,23 +218,50 @@ export const apiAnalysis = {
     days: number = 180,
     page: number = 1,
     pageSize: number = 10,
+    refresh: boolean = false,
     options?: RequestOptions,
   ) =>
     api.get<never, DiagnosisHistoryResponse>(`/v1/analysis/diagnosis/${code}/history`, {
       ...withRequestOptions(options, TIMEOUTS.long),
-      params: { days, page, page_size: pageSize },
+      params: { days, page, page_size: pageSize, refresh },
     }),
 
   // 获取历史数据生成状态
-  getHistoryStatus: (code: string, options?: RequestOptions) =>
-    api.get<never, DiagnosisHistoryStatusResponse>(`/v1/analysis/diagnosis/${code}/history-status`, withRequestOptions(options, TIMEOUTS.short)),
+  getHistoryStatus: (
+    code: string,
+    days: number = 180,
+    page: number = 1,
+    pageSize: number = 10,
+    options?: RequestOptions,
+  ) =>
+    api.get<never, DiagnosisHistoryStatusResponse>(`/v1/analysis/diagnosis/${code}/history-status`, {
+      ...withRequestOptions(options, TIMEOUTS.short),
+      params: { days, page, page_size: pageSize },
+    }),
 
   // 重新刷新单股诊断历史数据
-  refreshHistory: (code: string, days: number = 180, options?: RequestOptions) =>
-    api.post<null, { task_id?: number; status: string; message: string; code: string; days: number; ws_url?: string }>(
+  refreshHistory: (
+    code: string,
+    days: number = 180,
+    page: number = 1,
+    pageSize: number = 10,
+    force: boolean = false,
+    options?: RequestOptions,
+  ) =>
+    api.post<null, {
+      status: string
+      message: string
+      code: string
+      page: number
+      page_size: number
+      generated_count: number
+      generated_dates: string[]
+      latest_trade_date?: string | null
+      latest_history_date?: string | null
+    }>(
       `/v1/analysis/diagnosis/${code}/generate-history`,
       null,
-      { ...withRequestOptions(options, TIMEOUTS.long), params: { days, clean: true } },
+      { ...withRequestOptions(options, TIMEOUTS.long), params: { days, page, page_size: pageSize, force } },
     ),
 
   getHistoryDetail: (code: string, checkDate: string, options?: RequestOptions) =>

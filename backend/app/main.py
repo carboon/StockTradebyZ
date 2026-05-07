@@ -52,6 +52,7 @@ from sqlalchemy import text
 
 from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
+from app.schema_migrations import apply_startup_sql_migrations
 from app.services.tomorrow_star_window_service import ensure_tomorrow_star_window
 from app.services.tushare_service import TushareService
 
@@ -67,6 +68,7 @@ _TEST_MODE = (
 # 创建数据库表（仅在非测试环境）
 if not _TEST_MODE:
     Base.metadata.create_all(bind=engine)
+    apply_startup_sql_migrations(engine, BACKEND / "migrations")
 
 
 def hydrate_runtime_env_from_db() -> None:

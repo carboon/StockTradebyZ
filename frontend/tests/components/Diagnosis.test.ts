@@ -222,9 +222,9 @@ describe('Diagnosis.vue', () => {
       .mockResolvedValue(mockFullKline as any)
     vi.mocked(apiWatchlist.getAll).mockResolvedValue({ items: [] } as any)
     vi.mocked(apiWatchlist.add).mockResolvedValue({} as any)
-    vi.mocked(apiAnalysis.getDiagnosisHistory).mockResolvedValue({ history: mockHistory } as any)
-    vi.mocked(apiAnalysis.getHistoryStatus).mockResolvedValue({ generating: false } as any)
-    vi.mocked(apiAnalysis.refreshHistory).mockResolvedValue({ status: 'ok' } as any)
+    vi.mocked(apiAnalysis.getDiagnosisHistory).mockResolvedValue({ history: mockHistory, total: mockHistory.length } as any)
+    vi.mocked(apiAnalysis.getHistoryStatus).mockResolvedValue({ generating: false, needs_refresh: false } as any)
+    vi.mocked(apiAnalysis.refreshHistory).mockResolvedValue({ status: 'ready', message: '当前页历史数据已是最新' } as any)
     vi.mocked(apiAnalysis.analyze).mockResolvedValue(mockAnalyzeResponse as any)
   })
 
@@ -261,7 +261,14 @@ describe('Diagnosis.vue', () => {
     expect(apiStock.getInfo).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiWatchlist.getAll).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
-    expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith('600000', 180, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith(
+      '600000',
+      180,
+      1,
+      10,
+      false,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
     expect(apiAnalysis.analyze).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
@@ -299,6 +306,32 @@ describe('Diagnosis.vue', () => {
     expect(wrapper.vm.historyData[0].prefilter_passed).toBe(true)
     expect(wrapper.vm.historyData[0].signal_type).toBe('trend_start')
     expect(wrapper.vm.historyData[0].tomorrow_star_pass).toBe(true)
+  })
+
+  it('refreshes only the requested page when history pagination changes', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.stockCode = '600000'
+    vi.mocked(apiAnalysis.refreshHistory).mockResolvedValueOnce({
+      status: 'updated',
+      message: '当前页历史数据已刷新',
+      page: 2,
+      page_size: 10,
+      generated_count: 2,
+      generated_dates: ['2024-01-05', '2024-01-04'],
+    } as any)
+
+    await wrapper.vm.handleHistoryPageChange(2)
+
+    expect(apiAnalysis.refreshHistory).toHaveBeenCalledWith(
+      '600000',
+      180,
+      2,
+      10,
+      false,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
   })
 
   it('uses persistent diagnosis chart cache before requesting the full 120-day chart', async () => {

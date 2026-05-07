@@ -5,6 +5,7 @@ Analysis Service Tests
 """
 import json
 import sys
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ import pandas as pd
 import pytest
 
 from app.config import settings
+from app.models import DailyB1Check, DailyB1CheckDetail, Stock, StockDaily
 from app.services.analysis_service import AnalysisService
 
 # 添加 pipeline 目录到 Python 路径（与主流程一致）
@@ -705,33 +707,52 @@ def test_load_stock_data_not_found(analysis_service, tmp_path):
 # ============================================
 
 @pytest.mark.service
-def test_get_stock_history_checks(analysis_service, sample_stock_df):
+def test_get_stock_history_checks(analysis_service, sample_stock_df, test_db):
     """
     测试获取股票历史检查记录
 
     get_stock_history_checks应返回指定天数内的历史检查记录。
     """
-    with patch.object(analysis_service, "load_stock_data", return_value=sample_stock_df):
-        with patch("Selector.B1Selector") as mock_b1:
-            selector_instance = MagicMock()
-            selector_instance.check.return_value = {
-                "passed": True,
-                "kdj_j": -3.5,
-                "kdj_low_rank": 0.08,
-                "zx_long_pos": True,
-                "weekly_ma_aligned": True,
-                "volume_healthy": True
-            }
-            mock_b1.return_value = selector_instance
+    stock = Stock(code="600000", name="浦发银行", market="SH", industry="银行")
+    test_db.add(stock)
+    trade_dates = []
+    for ts in sample_stock_df.tail(5)["date"].tolist():
+        trade_dates.append(pd.Timestamp(ts).date())
+    for trade_date in trade_dates:
+        test_db.add(StockDaily(
+            code="600000",
+            trade_date=trade_date,
+            open=10.0,
+            close=10.5,
+            high=10.8,
+            low=9.9,
+            volume=1000000,
+        ))
+        test_db.add(DailyB1Check(
+            code="600000",
+            check_date=trade_date,
+            close_price=10.5,
+            b1_passed=True,
+            score=4.2,
+        ))
+        test_db.add(DailyB1CheckDetail(
+            code="600000",
+            check_date=trade_date,
+            status="ready",
+            score_details_json={"verdict": "PASS", "signal_type": "trend_start"},
+            rules_json={"in_active_pool": True, "prefilter_passed": True, "tomorrow_star_pass": True},
+            details_json={},
+        ))
+    test_db.commit()
 
-            result = analysis_service.get_stock_history_checks("600000", days=30)
+    with patch("app.services.analysis_service.SessionLocal", return_value=nullcontext(test_db)):
+        history, total = analysis_service.get_stock_history_checks("600000", days=5, page=1, page_size=2)
 
-            assert isinstance(result, list)
-            # 验证结果结构
-            if result:
-                assert "check_date" in result[0]
-                assert "close_price" in result[0]
-                assert "b1_passed" in result[0]
+    assert total == 5
+    assert len(history) == 2
+    assert history[0]["check_date"] == trade_dates[-1].isoformat()
+    assert history[0]["signal_type"] == "trend_start"
+    assert history[0]["tomorrow_star_pass"] is True
 
 
 @pytest.mark.service
@@ -744,7 +765,7 @@ def test_get_stock_history_checks_no_data(analysis_service):
     with patch.object(analysis_service, "load_stock_data", return_value=None):
         result = analysis_service.get_stock_history_checks("999999")
 
-        assert result == []
+        assert result == ([], 0)
 
 
 # ============================================
@@ -1047,9 +1068,8 @@ def test_small_dataframe_handling(analysis_service):
 def test_generate_stock_history_checks_includes_extended_fields(
     analysis_service,
     sample_stock_df,
-    tmp_path,
+    test_db,
 ):
-    review_dir = tmp_path / "review"
     code = "600000"
     target_rows = sample_stock_df.tail(3).copy()
     target_dates = [pd.Timestamp(ts).normalize() for ts in target_rows["date"].tolist()]
@@ -1089,7 +1109,20 @@ def test_generate_stock_history_checks_includes_extended_fields(
             return {"score": 4.2, "verdict": "PASS", "signal_type": "trend_start"}
         return {"score": 3.6, "verdict": "WATCH", "signal_type": "rebound"}
 
-    with patch.object(settings, "review_dir", str(review_dir)), \
+    test_db.add(Stock(code=code, name="浦发银行", market="SH", industry="银行"))
+    for _, row in sample_stock_df.iterrows():
+        test_db.add(StockDaily(
+            code=code,
+            trade_date=pd.Timestamp(row["date"]).date(),
+            open=float(row["open"]),
+            close=float(row["close"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            volume=float(row["volume"]),
+        ))
+    test_db.commit()
+
+    with patch("app.services.analysis_service.SessionLocal", return_value=nullcontext(test_db)), \
          patch.object(analysis_service, "load_stock_data", return_value=sample_stock_df), \
          patch.object(analysis_service, "_build_b1_selector", return_value=selector), \
          patch.object(analysis_service, "_load_quant_review_config", return_value={"prefilter": {"enabled": True}}), \
@@ -1099,11 +1132,12 @@ def test_generate_stock_history_checks_includes_extended_fields(
         result = analysis_service.generate_stock_history_checks(code, days=3, clean=True)
 
     assert result["success"] is True
+    assert result["generated_count"] == 3
 
-    history_file = review_dir / "history" / f"{code}.json"
-    payload = json.loads(history_file.read_text(encoding="utf-8"))
-    history = payload["history"]
+    with patch("app.services.analysis_service.SessionLocal", return_value=nullcontext(test_db)):
+        history, total = analysis_service.get_stock_history_checks(code, days=3, page=1, page_size=3)
 
+    assert total == 3
     assert history[0]["check_date"] == pass_date
     assert history[0]["in_active_pool"] is True
     assert history[0]["prefilter_passed"] is True
@@ -1120,6 +1154,82 @@ def test_generate_stock_history_checks_includes_extended_fields(
 
     assert history[2]["in_active_pool"] is False
     assert history[2]["tomorrow_star_pass"] is False
+
+
+@pytest.mark.unit
+def test_ensure_history_page_fills_latest_trade_date_first_page(
+    analysis_service,
+    sample_stock_df,
+    test_db,
+):
+    code = "600000"
+    latest_dates = [pd.Timestamp(ts).date() for ts in sample_stock_df.tail(2)["date"].tolist()]
+    older_date = latest_dates[0]
+    latest_date = latest_dates[1]
+
+    test_db.add(Stock(code=code, name="浦发银行", market="SH", industry="银行"))
+    for _, row in sample_stock_df.iterrows():
+        test_db.add(StockDaily(
+            code=code,
+            trade_date=pd.Timestamp(row["date"]).date(),
+            open=float(row["open"]),
+            close=float(row["close"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            volume=float(row["volume"]),
+        ))
+    test_db.add(DailyB1Check(
+        code=code,
+        check_date=older_date,
+        close_price=10.2,
+        b1_passed=True,
+        score=4.0,
+    ))
+    test_db.add(DailyB1CheckDetail(
+        code=code,
+        check_date=older_date,
+        status="ready",
+        score_details_json={"verdict": "PASS", "signal_type": "trend_start"},
+        rules_json={"in_active_pool": True, "prefilter_passed": True, "tomorrow_star_pass": True},
+        details_json={},
+    ))
+    test_db.commit()
+
+    selector = MagicMock()
+
+    def prepare_df(df_before: pd.DataFrame) -> pd.DataFrame:
+        prepared = df_before.copy()
+        prepared["J"] = 12.0
+        prepared["zxdq"] = prepared["close"] * 1.02
+        prepared["zxdkx"] = prepared["close"] * 0.98
+        prepared["wma_bull"] = True
+        prepared["_vec_pick"] = True
+        return prepared
+
+    selector.prepare_df.side_effect = prepare_df
+
+    with patch("app.services.analysis_service.SessionLocal", return_value=nullcontext(test_db)), \
+         patch.object(analysis_service, "load_stock_data", return_value=sample_stock_df), \
+         patch.object(analysis_service, "_build_b1_selector", return_value=selector), \
+         patch.object(analysis_service, "_load_quant_review_config", return_value={"prefilter": {"enabled": True}}), \
+         patch.object(analysis_service, "_build_prefilter", return_value=MagicMock(evaluate=MagicMock(return_value={"passed": True, "blocked_by": []}))), \
+         patch.object(analysis_service, "_build_active_pool_sets", return_value={pd.Timestamp(latest_date).normalize(): {code}}), \
+         patch.object(analysis_service, "_quant_review_for_date", return_value={"score": 4.2, "verdict": "PASS", "signal_type": "trend_start"}):
+        status_before = analysis_service.get_history_refresh_status(code, days=30, page=1, page_size=10)
+        assert status_before["needs_refresh"] is True
+        assert status_before["latest_trade_date"] == latest_date.isoformat()
+        assert status_before["latest_history_date"] == older_date.isoformat()
+
+        result = analysis_service.ensure_history_page(code, days=30, page=1, page_size=10, force=False)
+
+    assert result["success"] is True
+    assert result["updated"] is True
+    assert latest_date.isoformat() in result["generated_dates"]
+
+    with patch("app.services.analysis_service.SessionLocal", return_value=nullcontext(test_db)):
+        history, total = analysis_service.get_stock_history_checks(code, days=30, page=1, page_size=10)
+    assert total >= 2
+    assert history[0]["check_date"] == latest_date.isoformat()
 
 
 # ============================================
