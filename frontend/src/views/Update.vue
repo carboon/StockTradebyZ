@@ -475,30 +475,33 @@
             </el-collapse>
           </el-card>
 
-          <el-card v-if="incrementalStatus.running" class="incremental-progress-card">
+          <el-card v-if="activeDailyUpdateTask || incrementalFallbackActive" class="incremental-progress-card">
             <div class="incremental-progress-card__header">
               <div>
-                <div class="incremental-progress-card__title">最新交易日增量更新进行中</div>
+                <div class="incremental-progress-card__title">{{ activeDailyUpdateTitle }}</div>
                 <div class="incremental-progress-card__meta">
-                  进度 {{ incrementalStatus.current }}/{{ incrementalStatus.total }}
-                  <span v-if="incrementalStatus.total > 0"> / {{ incrementalProgressLabel }}</span>
-                  <span v-if="incrementalStatus.eta_seconds != null"> / 预计剩余 {{ formatSeconds(incrementalStatus.eta_seconds) }}</span>
-                  <span v-if="incrementalStatus.current_code"> / 当前 {{ incrementalStatus.current_code }}</span>
+                  <span class="stage-indicator">{{ activeDailyUpdateStageIndicator }}</span>
+                  <span class="stage-divider">/</span>
+                  <span>{{ activeDailyUpdateMeta }}</span>
+                  <span v-if="activeDailyUpdateEtaText" class="eta-text"> / {{ activeDailyUpdateEtaText }}</span>
+                  <span v-if="activeDailyUpdateDetail" class="detail-text"> / {{ activeDailyUpdateDetail }}</span>
                 </div>
               </div>
               <div class="incremental-progress-card__counts">
-                {{ incrementalStatus.updated_count }} 更新 / {{ incrementalStatus.skipped_count }} 跳过 / {{ incrementalStatus.failed_count }} 失败
+                {{ activeDailyUpdateCounts }}
               </div>
             </div>
             <el-progress
-              :percentage="incrementalProgressBarValue"
+              :percentage="activeDailyUpdateProgressBarValue"
               :stroke-width="10"
+              :format="activeDailyUpdateProgressFormat"
+              :color="activeDailyUpdateProgressColor"
             />
           </el-card>
           <el-alert
-            v-else-if="hasFailedIncrementalUpdate"
+            v-else-if="hasFailedDailyUpdate"
             title="增量更新上次未完成"
-            :description="incrementalStatus.last_error || incrementalStatus.message || '可稍后重新发起，系统会尽量从已完成位置继续。'"
+            :description="latestDailyUpdateFailureText"
             type="warning"
             show-icon
             :closable="false"
@@ -509,17 +512,17 @@
             <template #header>
               <div class="card-header">
                 <span>运行中任务</span>
-                <el-tag v-if="runningTasksCount > 0" type="warning" size="small">
-                  {{ runningTasksCount }} 个
+                <el-tag v-if="runningTaskBadgeCount > 0" type="warning" size="small">
+                  {{ runningTaskBadgeCount }} 个
                 </el-tag>
                 <el-tag v-else type="info" size="small">无</el-tag>
               </div>
             </template>
 
-            <el-empty v-if="runningTasks.length === 0" description="当前没有运行中任务" :image-size="60" />
+            <el-empty v-if="taskCenterRunningTasks.length === 0" description="当前没有运行中任务" :image-size="60" />
             <div v-else class="running-tasks-list">
               <div
-                v-for="task in runningTasks"
+                v-for="task in taskCenterRunningTasks"
                 :key="task.id"
                 class="task-item"
                 :class="{ 'is-selected': selectedTask?.id === task.id }"
@@ -536,7 +539,7 @@
                   <div v-if="getTaskProgressSecondary(task)" class="task-progress-secondary">{{ getTaskProgressSecondary(task) }}</div>
                   <el-progress :percentage="task.progress_meta_json?.percent ?? task.progress" :stroke-width="6" :show-text="false" />
                 </div>
-                <el-button text type="danger" size="small" @click.stop="cancelTask(task)">取消</el-button>
+                <el-button v-if="task.id >= 0" text type="danger" size="small" @click.stop="cancelTask(task)">取消</el-button>
               </div>
             </div>
           </el-card>
@@ -883,6 +886,12 @@ function createEmptyIncrementalStatus(): IncrementalUpdateStatus {
   return {
     status: 'idle',
     running: false,
+    task_type: 'incremental_update',
+    mode: 'idle',
+    target_trade_date: null,
+    stage_label: null,
+    display_title: '',
+    display_detail: '',
     progress: 0,
     current: 0,
     total: 0,
@@ -945,8 +954,23 @@ let lastTaskSocketId: number | null = null
 
 // 计算属性
 const runningTasksCount = computed(() => runningTasks.value.length)
-const hasActiveBackgroundWork = computed(() => runningTasksCount.value > 0 || incrementalStatus.value.running)
-const hasFailedIncrementalUpdate = computed(() => incrementalStatus.value.status === 'failed')
+const isDailyBatchIncremental = computed(() => incrementalStatus.value.mode === 'daily_batch')
+const activeDailyUpdateTask = computed(() => runningTasks.value.find((task) => isDailyUpdateTask(task)) || null)
+const latestDailyUpdateTask = computed(() => {
+  return historyTasks.value.find((task) => isDailyUpdateTask(task)) || null
+})
+const incrementalFallbackActive = computed(() => !activeDailyUpdateTask.value && incrementalStatus.value.running)
+const incrementalFallbackFailed = computed(() => !latestDailyUpdateTask.value && incrementalStatus.value.status === 'failed')
+const taskCenterRunningTasks = computed(() => runningTasks.value)
+const runningTaskBadgeCount = computed(() => runningTasks.value.length)
+const hasActiveBackgroundWork = computed(() => runningTasksCount.value > 0 || incrementalFallbackActive.value)
+const hasFailedDailyUpdate = computed(() => {
+  return Boolean(
+    activeDailyUpdateTask.value?.status === 'failed'
+    || latestDailyUpdateTask.value?.status === 'failed'
+    || incrementalFallbackFailed.value,
+  )
+})
 const initializationRunningTask = computed(() => runningTasks.value.find((task) => isBootstrapTask(task)) || null)
 const latestFailedBootstrapTask = computed(() => {
   if (bootstrapFinished.value) return null
@@ -958,7 +982,13 @@ const activeWorkHint = computed(() => {
   if (initializationRunningTask.value) {
     return `当前有 ${runningTasksCount.value} 个全量任务正在运行`
   }
-  if (incrementalStatus.value.running) {
+  if (activeDailyUpdateTask.value) {
+    return `${getTaskTypeLabel(activeDailyUpdateTask.value.task_type)}：${activeDailyUpdateDetail.value || getTaskProgressPrimary(activeDailyUpdateTask.value)}`
+  }
+  if (incrementalFallbackActive.value) {
+    if (isDailyBatchIncremental.value) {
+      return `${incrementalStatus.value.display_title || '按交易日批量刷新进行中'}：${incrementalStatus.value.target_trade_date || incrementalStatus.value.current_code || '-'}`
+    }
     return `增量更新进行中：${incrementalStatus.value.current}/${incrementalStatus.value.total || '-'}${incrementalStatus.value.total > 0 ? ` (${incrementalProgressLabel.value})` : ''}`
   }
   if (runningTasksCount.value > 0) {
@@ -1047,6 +1077,128 @@ const incrementalProgressBarValue = computed(() => {
 })
 
 const incrementalProgressLabel = computed(() => `${incrementalProgressPrecise.value.toFixed(2)}%`)
+const incrementalDisplayProgressText = computed(() => {
+  if (isDailyBatchIncremental.value) {
+    const target = incrementalStatus.value.target_trade_date || incrementalStatus.value.current_code || '-'
+    return `目标交易日 ${target}`
+  }
+  return `进度 ${incrementalStatus.value.current}/${incrementalStatus.value.total || '-'}${incrementalStatus.value.total > 0 ? ` / ${incrementalProgressLabel.value}` : ''}`
+})
+const activeDailyUpdateTitle = computed(() => {
+  if (activeDailyUpdateTask.value) {
+    return getTaskTypeLabel(activeDailyUpdateTask.value.task_type)
+  }
+  return incrementalStatus.value.display_title || '最新交易日增量更新进行中'
+})
+const activeDailyUpdateProgressBarValue = computed(() => {
+  if (activeDailyUpdateTask.value) {
+    const value = activeDailyUpdateTask.value.progress_meta_json?.percent ?? activeDailyUpdateTask.value.progress ?? 0
+    if (value > 0 && value < 1) return 1
+    return Math.round(value)
+  }
+  return incrementalProgressBarValue.value
+})
+const activeDailyUpdateDetail = computed(() => {
+  if (activeDailyUpdateTask.value) {
+    return getTaskProgressSecondary(activeDailyUpdateTask.value)
+  }
+  if (incrementalStatus.value.display_detail) return incrementalStatus.value.display_detail
+  if (isDailyBatchIncremental.value) {
+    return `目标交易日 ${incrementalStatus.value.target_trade_date || incrementalStatus.value.current_code || '-'}`
+  }
+  return incrementalStatus.value.current_code ? `当前 ${incrementalStatus.value.current_code}` : ''
+})
+const activeDailyUpdateMeta = computed(() => {
+  if (activeDailyUpdateTask.value) {
+    return `${getTaskStageText(activeDailyUpdateTask.value)} / ${getTaskProgressPrimary(activeDailyUpdateTask.value)}`
+  }
+  return incrementalDisplayProgressText.value
+})
+const activeDailyUpdateEtaText = computed(() => {
+  if (activeDailyUpdateTask.value) {
+    const eta = activeDailyUpdateTask.value.progress_meta_json?.eta_seconds
+    return eta != null ? `预计剩余 ${formatSeconds(eta)}` : ''
+  }
+  return incrementalStatus.value.eta_seconds != null ? `预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}` : ''
+})
+const activeDailyUpdateCounts = computed(() => {
+  if (activeDailyUpdateTask.value) {
+    const meta = activeDailyUpdateTask.value.progress_meta_json
+    const ready = meta?.ready_count
+    const failed = meta?.failed_count ?? 0
+    if (ready != null) {
+      return `${ready} 已就绪 / ${failed} 失败`
+    }
+    if (meta?.current != null && meta?.total != null) {
+      return `${meta.current}/${meta.total}`
+    }
+    return `${activeDailyUpdateProgressBarValue.value}%`
+  }
+  if (isDailyBatchIncremental.value) {
+    return `${incrementalStatus.value.updated_count} 只股票写入 / ${incrementalStatus.value.failed_count} 失败`
+  }
+  return `${incrementalStatus.value.updated_count} 更新 / ${incrementalStatus.value.skipped_count} 跳过 / ${incrementalStatus.value.failed_count} 失败`
+})
+
+	// 新增：阶段指示器 - 显示当前阶段
+	const activeDailyUpdateStageIndicator = computed(() => {
+	  if (activeDailyUpdateTask.value) {
+	    const meta = activeDailyUpdateTask.value.progress_meta_json
+	    const stageLabel = getTaskStageText(activeDailyUpdateTask.value)
+	    const stageIndex = meta?.stage_index
+	    const stageTotal = meta?.stage_total
+	    if (stageIndex != null && stageTotal != null) {
+	      return `${stageLabel} (${stageIndex}/${stageTotal})`
+	    }
+	    return stageLabel
+	  }
+	  // 增量更新模式 - 使用 stage_label 判断阶段
+	  const stageLabel = incrementalStatus.value.stage_label || ''
+	  if (stageLabel.includes('数据准备') || stageLabel.includes('CSV')) return '数据准备 (1/6)'
+	  if (stageLabel.includes('量化初选') || stageLabel.includes('初选')) return '量化初选 (2/6)'
+	  if (stageLabel.includes('候选筛选') || stageLabel.includes('筛选')) return '候选筛选 (3/6)'
+	  if (stageLabel.includes('评分分析') || stageLabel.includes('评分')) return '评分分析 (4/6)'
+	  if (stageLabel.includes('结果导出') || stageLabel.includes('导出')) return '结果导出 (5/6)'
+	  if (stageLabel.includes('输出推荐') || stageLabel.includes('推荐')) return '输出推荐 (6/6)'
+	  return '准备中'
+	})
+
+	// 新增：进度条格式化函数
+	const activeDailyUpdateProgressFormat = (percentage: number) => {
+	  if (activeDailyUpdateTask.value) {
+	    const stageLabel = getTaskStageText(activeDailyUpdateTask.value)
+	    return `${stageLabel} ${percentage}%`
+	  }
+	  return `${percentage}%`
+	}
+
+	// 新增：进度条颜色（根据阶段变化）
+	const activeDailyUpdateProgressColor = computed(() => {
+	  if (activeDailyUpdateTask.value) {
+	    const stage = activeDailyUpdateTask.value.progress_meta_json?.stage ?? activeDailyUpdateTask.value.task_stage
+	    const stageColors: Record<string, string | undefined> = {
+	      queued: '#909399',
+	      starting: '#909399',
+	      preparing: '#409EFF',
+	      data_preparing: '#409EFF',
+	      fetch_data: '#409EFF',
+	      csv_import: '#409EFF',
+	      build_pool: '#67C23A',
+	      build_candidates: '#E6A23C',
+	      filter_candidates: '#E6A23C',
+	      pre_filter: '#F56C6C',
+	      score_analysis: '#F56C6C',
+	      score_review: '#909399',
+	      export_results: '#909399',
+	      finalize: '#67C23A',
+	      completed: '#67C23A',
+	      failed: '#F56C6C',
+	    }
+	    return stageColors[stage ?? ''] ?? '#409EFF'
+	  }
+	  return '#409EFF'
+	})
+
 const bootstrapProgressValue = computed(() => initializationRunningTask.value?.progress_meta_json?.percent ?? initializationRunningTask.value?.progress ?? 0)
 const bootstrapProgressBarValue = computed(() => {
   if (bootstrapFinished.value) return 100
@@ -1176,43 +1328,55 @@ const bootstrapButtonText = computed(() => {
   return '开始首次初始化'
 })
 const incrementalSummaryLabel = computed(() => {
-  if (incrementalStatus.value.running) return '进行中'
-  if (hasFailedIncrementalUpdate.value) return '失败'
-  if (incrementalStatus.value.completed_at) return '最近已完成'
+  if (activeDailyUpdateTask.value) return '进行中'
+  if (hasFailedDailyUpdate.value) return '失败'
+  if (latestDailyUpdateTask.value || incrementalStatus.value.completed_at) return '最近已完成'
   return '待执行'
 })
 const incrementalSummaryTagType = computed(() => {
-  if (incrementalStatus.value.running) return 'warning'
-  if (hasFailedIncrementalUpdate.value) return 'danger'
-  if (incrementalStatus.value.completed_at) return 'success'
+  if (activeDailyUpdateTask.value) return 'warning'
+  if (hasFailedDailyUpdate.value) return 'danger'
+  if (latestDailyUpdateTask.value || incrementalStatus.value.completed_at) return 'success'
   return 'info'
 })
 const incrementalSummaryProgressValue = computed(() => {
-  if (incrementalStatus.value.running) return incrementalProgressBarValue.value
-  if (hasFailedIncrementalUpdate.value) return Math.max(1, incrementalProgressBarValue.value)
-  if (incrementalStatus.value.completed_at) return 100
+  if (activeDailyUpdateTask.value) return activeDailyUpdateProgressBarValue.value
+  if (hasFailedDailyUpdate.value) return Math.max(1, activeDailyUpdateProgressBarValue.value)
+  if (latestDailyUpdateTask.value || incrementalStatus.value.completed_at) return 100
   return 0
 })
 const incrementalSummaryProgressStatus = computed(() => {
-  if (incrementalStatus.value.running) return 'warning'
-  if (hasFailedIncrementalUpdate.value) return 'exception'
-  if (incrementalStatus.value.completed_at) return 'success'
+  if (activeDailyUpdateTask.value) return 'warning'
+  if (hasFailedDailyUpdate.value) return 'exception'
+  if (latestDailyUpdateTask.value || incrementalStatus.value.completed_at) return 'success'
   return undefined
 })
 const incrementalOverviewTitle = computed(() => {
-  if (incrementalStatus.value.running) return '每日增量更新正在执行'
-  if (hasFailedIncrementalUpdate.value) return '每日增量更新失败'
-  if (incrementalStatus.value.completed_at) return '最近一次每日更新已完成'
+  if (activeDailyUpdateTask.value) return getTaskTypeLabel(activeDailyUpdateTask.value.task_type)
+  if (incrementalFallbackActive.value) return incrementalStatus.value.display_title || (isDailyBatchIncremental.value ? '按交易日批量刷新正在执行' : '每日增量更新正在执行')
+  if (hasFailedDailyUpdate.value) return '每日增量更新失败'
+  if (latestDailyUpdateTask.value || incrementalStatus.value.completed_at) return '最近一次每日更新已完成'
   return '尚未执行每日更新'
 })
 const incrementalOverviewDetail = computed(() => {
-  if (incrementalStatus.value.running) {
-    return incrementalStatus.value.current_code
-      ? `当前处理 ${incrementalStatus.value.current_code}`
-      : '正在刷新最新交易日数据'
+  if (activeDailyUpdateTask.value) {
+    return `${getTaskStageText(activeDailyUpdateTask.value)} / ${getTaskProgressPrimary(activeDailyUpdateTask.value)}`
   }
-  if (hasFailedIncrementalUpdate.value) {
+  if (incrementalFallbackActive.value) {
+    if (incrementalStatus.value.display_detail) return incrementalStatus.value.display_detail
+    if (isDailyBatchIncremental.value) {
+      return `目标交易日 ${incrementalStatus.value.target_trade_date || incrementalStatus.value.current_code || '-'}`
+    }
+    return incrementalStatus.value.current_code ? `当前处理 ${incrementalStatus.value.current_code}` : '正在刷新最新交易日数据'
+  }
+  if (latestDailyUpdateTask.value?.status === 'failed') {
+    return latestDailyUpdateTask.value.error_message || latestDailyUpdateTask.value.summary || '可重新发起更新'
+  }
+  if (incrementalFallbackFailed.value) {
     return incrementalStatus.value.last_error || incrementalStatus.value.message || '可重新发起更新'
+  }
+  if (latestDailyUpdateTask.value?.completed_at) {
+    return `完成时间 ${formatDateTime(latestDailyUpdateTask.value.completed_at)}`
   }
   if (incrementalStatus.value.completed_at) {
     return `完成时间 ${formatDateTime(incrementalStatus.value.completed_at)}`
@@ -1220,11 +1384,23 @@ const incrementalOverviewDetail = computed(() => {
   return '每日更新会补齐最新交易日数据与派生结果'
 })
 const incrementalProgressSummary = computed(() => {
-  if (incrementalStatus.value.running) {
+  if (activeDailyUpdateTask.value) {
+    return `${getTaskProgressPrimary(activeDailyUpdateTask.value)}${activeDailyUpdateDetail.value ? ` / ${activeDailyUpdateDetail.value}` : ''}`
+  }
+  if (incrementalFallbackActive.value) {
+    if (isDailyBatchIncremental.value) {
+      return `${incrementalDisplayProgressText.value} / ${incrementalStatus.value.updated_count} 只股票写入 / ${incrementalStatus.value.failed_count} 失败`
+    }
     return `${incrementalStatus.value.current}/${incrementalStatus.value.total || '-'} / ${incrementalProgressLabel.value} / ${incrementalStatus.value.updated_count} 更新 / ${incrementalStatus.value.failed_count} 失败`
   }
-  if (hasFailedIncrementalUpdate.value) {
+  if (latestDailyUpdateTask.value?.status === 'failed') {
+    return latestDailyUpdateTask.value.error_message || latestDailyUpdateTask.value.summary || '更新未完成'
+  }
+  if (incrementalFallbackFailed.value) {
     return incrementalStatus.value.message || '更新未完成'
+  }
+  if (latestDailyUpdateTask.value?.status === 'completed') {
+    return latestDailyUpdateTask.value.summary || `完成时间 ${formatDateTime(latestDailyUpdateTask.value.completed_at)}`
   }
   if (incrementalStatus.value.completed_at) {
     return `${incrementalStatus.value.updated_count} 更新 / ${incrementalStatus.value.skipped_count} 跳过 / ${incrementalStatus.value.failed_count} 失败`
@@ -1232,10 +1408,13 @@ const incrementalProgressSummary = computed(() => {
   return '等待触发'
 })
 const incrementalProgressEtaText = computed(() => {
-  if (incrementalStatus.value.running && incrementalStatus.value.eta_seconds != null) {
-    return `预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}`
+  return activeDailyUpdateEtaText.value
+})
+const latestDailyUpdateFailureText = computed(() => {
+  if (latestDailyUpdateTask.value?.status === 'failed') {
+    return latestDailyUpdateTask.value.error_message || latestDailyUpdateTask.value.summary || '可稍后重新发起，系统会尽量从已完成位置继续。'
   }
-  return ''
+  return incrementalStatus.value.last_error || incrementalStatus.value.message || '可稍后重新发起，系统会尽量从已完成位置继续。'
 })
 
 const diagnosticChecks = computed<TaskDiagnosticCheck[]>(() => diagnostics.value?.checks || [])
@@ -1393,9 +1572,9 @@ const dashboardStatusCards = computed(() => {
 
   cards.push({
     label: '最近失败',
-    value: hasFailedIncrementalUpdate.value ? '需要处理' : '无关键失败',
-    meta: incrementalStatus.value.last_error || incrementalStatus.value.message || '最近未发现增量更新失败摘要',
-    type: hasFailedIncrementalUpdate.value ? 'danger' : 'success',
+    value: hasFailedDailyUpdate.value ? '需要处理' : '无关键失败',
+    meta: latestDailyUpdateFailureText.value || incrementalStatus.value.display_detail || incrementalStatus.value.message || '最近未发现增量更新失败摘要',
+    type: hasFailedDailyUpdate.value ? 'danger' : 'success',
   })
 
   return cards
@@ -1470,24 +1649,40 @@ onUnmounted(() => {
 // 核心方法
 async function reloadAll() {
   try {
-    const [runningResp, statusResp, envResp, diagnosticsResp, incrementalResp] = await Promise.all([
+    const [runningResp, statusResp, incrementalResp] = await Promise.all([
       apiTasks.getRunning(),
       apiTasks.getStatus(),
-      apiTasks.getEnvironment(),
-      apiTasks.getDiagnostics(),
       apiTasks.getIncrementalStatus(),
     ])
 
     runningTasks.value = runningResp.tasks
-    diagnostics.value = diagnosticsResp
     incrementalStatus.value = incrementalResp
 
-    // 获取历史任务（已完成的）
-    try {
-      const historyResp = await apiTasks.getAll('completed,failed,cancelled', 20)
-      historyTasks.value = historyResp.tasks
-    } catch {
-      historyTasks.value = []
+    if (activeTab.value === 'tasks' || activeTab.value === 'logs') {
+      try {
+        const historyResp = await apiTasks.getAll('completed,failed,cancelled', 20)
+        historyTasks.value = historyResp.tasks
+      } catch {
+        historyTasks.value = []
+      }
+    }
+
+    if (activeTab.value === 'status') {
+      try {
+        diagnostics.value = await apiTasks.getDiagnostics()
+      } catch (error) {
+        console.error('Failed to refresh diagnostics:', error)
+      }
+    }
+
+    let environmentSections: any[] = []
+    if (activeTab.value === 'status') {
+      try {
+        const envResp = await apiTasks.getEnvironment()
+        environmentSections = envResp.sections || []
+      } catch (error) {
+        console.error('Failed to refresh environment:', error)
+      }
     }
 
     dataStatus.value = {
@@ -1513,7 +1708,7 @@ async function reloadAll() {
         count: statusResp.kline?.count || 0,
         latestDate: formatLatestDate(statusResp.kline?.latest_date),
       },
-      environment: envResp.sections || [],
+      environment: environmentSections,
     }
 
     dataLoaded.value = true
@@ -1656,17 +1851,16 @@ async function retryBootstrap() {
 async function startDataUpdate() {
   startingUpdate.value = true
   try {
-    const result = await apiTasks.startIncrementalUpdate()
+    const result = await apiTasks.startDailyBatchUpdate()
     if (!result.success) {
-      if (result.running || result.state?.running) {
-        ElMessage.warning(result.message || '检测到已有增量更新，已恢复当前进度')
-      } else {
-        ElMessage.error(result.message || '增量更新启动失败')
-      }
+      ElMessage.error(result.message || '按交易日批量更新启动失败')
       await reloadAll()
       return
     }
-    ElMessage.success(result.message || '最新交易日增量更新已启动')
+    ElMessage.success(result.message || '按交易日批量更新已启动')
+    if (result.task) {
+      await focusTask(result.task, 'logs')
+    }
     await reloadAll()
   } catch (error: any) {
     console.error('startDataUpdate failed:', error)
@@ -2003,6 +2197,9 @@ function startPoller() {
     if (opsWs?.readyState === WebSocket.OPEN && runningTasks.value.length > 0) return
 
     await reloadAll()
+    if (activeTab.value === 'dashboard') {
+      await loadAdminSummary()
+    }
   }, pollInterval)
 }
 
@@ -2056,6 +2253,10 @@ function isBootstrapTask(task: Task | null | undefined) {
   return Boolean(task && task.task_type === 'full_update')
 }
 
+function isDailyUpdateTask(task: Task | null | undefined) {
+  return Boolean(task && ['daily_batch_update', 'incremental_update'].includes(task.task_type))
+}
+
 function rememberBootstrapTask(task: Task | null | undefined) {
   if (!task) return
   saveInitTaskViewState({
@@ -2087,7 +2288,7 @@ async function restoreTaskSelection() {
     candidates.find((task) => task.id === targetId) ||
     initializationRunningTask.value ||
     latestFailedBootstrapTask.value ||
-    runningTasks.value[0] ||
+    taskCenterRunningTasks.value[0] ||
     null
   )
 
@@ -2124,6 +2325,8 @@ function getTaskTypeLabel(taskType: string | null | undefined): string {
   if (!taskType) return '-'
   const labels: Record<string, string> = {
     full_update: '全量更新',
+    daily_batch_update: '按交易日批量刷新',
+    incremental_update: '增量更新',
     single_analysis: '单股分析',
     tomorrow_star: '明日之星',
   }
@@ -2162,6 +2365,8 @@ function getStageLabel(stage?: string | null): string {
     export_results: '结果导出',     // 新名称
     score_review: '结果导出',       // 兼容旧名称
     finalize: '输出推荐',
+    daily_batch_refresh: '按交易日批量刷新',
+    incremental_update: '增量更新',
     completed: '已完成',
     failed: '执行失败',
     cancelled: '已取消',
@@ -2311,11 +2516,11 @@ function buildDiagnosticsSummary() {
   const lines = [
     `生成时间: ${diagnostics.value?.generated_at || new Date().toISOString()}`,
     `推送状态: ${socketStatusLabel.value}`,
-    `运行中任务: ${runningTasks.value.length}`,
+    `运行中任务: ${taskCenterRunningTasks.value.length}`,
   ]
   if (incrementalStatus.value.running) {
     lines.push(
-      `增量更新: ${incrementalStatus.value.current}/${incrementalStatus.value.total} / ${incrementalProgressLabel.value} / 预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}`
+      `${incrementalStatus.value.display_title || '增量更新'}: ${incrementalProgressSummary.value}${incrementalStatus.value.eta_seconds != null ? ` / 预计剩余 ${formatSeconds(incrementalStatus.value.eta_seconds)}` : ''}`
     )
   }
   for (const check of diagnosticChecks.value) {
@@ -2687,6 +2892,29 @@ function buildWebSocketUrl(path: string) {
       margin-top: 0;
       text-align: right;
       white-space: nowrap;
+    }
+
+    // 阶段指示器样式
+    .stage-indicator {
+      font-weight: 600;
+      color: #1d4ed8;
+      padding: 2px 8px;
+      background: rgba(59, 130, 246, 0.1);
+      border-radius: 4px;
+      margin-right: 4px;
+    }
+
+    .stage-divider {
+      margin: 0 4px;
+      color: #94a3b8;
+    }
+
+    .eta-text {
+      color: #059669;
+    }
+
+    .detail-text {
+      color: #64748b;
     }
   }
 

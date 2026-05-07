@@ -16,7 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, case, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -112,7 +112,170 @@ class CandidateService:
             self.db.commit()
             logger.info(f"保存候选数据: pick_date={pick_date}, count={len(rows)}")
 
+        if clean_existing or rows:
+            self.recalculate_consecutive_metrics(self.db)
+
         return len(rows)
+
+    @staticmethod
+    def recalculate_consecutive_metrics(db: Session, *, commit: bool = True) -> Dict[str, int]:
+        """重算所有候选的连续候选次数及每日连续候选数。"""
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            db.execute(
+                text(
+                    """
+                    WITH ordered_days AS (
+                        SELECT trade_date,
+                               LAG(trade_date) OVER (ORDER BY trade_date) AS prev_trade_date
+                        FROM (
+                            SELECT DISTINCT trade_date
+                            FROM stock_daily
+                        ) AS distinct_days
+                    ),
+                    candidate_prev AS (
+                        SELECT
+                            c.id,
+                            c.code,
+                            c.pick_date,
+                            od.prev_trade_date,
+                            LAG(c.pick_date) OVER (PARTITION BY c.code ORDER BY c.pick_date, c.id) AS prev_candidate_date
+                        FROM candidates c
+                        LEFT JOIN ordered_days od
+                          ON od.trade_date = c.pick_date
+                    ),
+                    candidate_groups AS (
+                        SELECT
+                            id,
+                            code,
+                            pick_date,
+                            SUM(
+                                CASE
+                                    WHEN prev_trade_date IS NOT NULL AND prev_candidate_date = prev_trade_date THEN 0
+                                    ELSE 1
+                                END
+                            ) OVER (PARTITION BY code ORDER BY pick_date, id ROWS UNBOUNDED PRECEDING) AS grp
+                        FROM candidate_prev
+                    ),
+                    candidate_streaks AS (
+                        SELECT
+                            id,
+                            ROW_NUMBER() OVER (PARTITION BY code, grp ORDER BY pick_date, id) AS consecutive_days
+                        FROM candidate_groups
+                    )
+                    UPDATE candidates AS c
+                    SET consecutive_days = s.consecutive_days
+                    FROM candidate_streaks AS s
+                    WHERE c.id = s.id
+                    """
+                )
+            )
+            db.execute(
+                text(
+                    """
+                    UPDATE tomorrow_star_runs AS r
+                    SET consecutive_candidate_count = COALESCE(stats.consecutive_candidate_count, 0)
+                    FROM (
+                        SELECT pick_date, COUNT(*) AS consecutive_candidate_count
+                        FROM candidates
+                        WHERE consecutive_days >= 2
+                        GROUP BY pick_date
+                    ) AS stats
+                    WHERE r.pick_date = stats.pick_date
+                    """
+                )
+            )
+            db.execute(
+                text(
+                    """
+                    UPDATE tomorrow_star_runs
+                    SET consecutive_candidate_count = 0
+                    WHERE pick_date NOT IN (
+                        SELECT DISTINCT pick_date
+                        FROM candidates
+                        WHERE consecutive_days >= 2
+                    )
+                    """
+                )
+            )
+
+            if commit:
+                db.commit()
+            else:
+                db.flush()
+
+            from app.models import TomorrowStarRun
+
+            candidate_rows = int(db.query(func.count(Candidate.id)).scalar() or 0)
+            run_rows = int(db.query(func.count(TomorrowStarRun.id)).scalar() or 0)
+            days_with_consecutive_candidates = int(
+                db.query(func.count(func.distinct(Candidate.pick_date)))
+                .filter(Candidate.consecutive_days >= 2)
+                .scalar()
+                or 0
+            )
+            return {
+                "candidate_rows": candidate_rows,
+                "run_rows": run_rows,
+                "days_with_consecutive_candidates": days_with_consecutive_candidates,
+            }
+
+        trade_dates = (
+            db.execute(
+                select(StockDaily.trade_date)
+                .distinct()
+                .order_by(StockDaily.trade_date.asc())
+            )
+            .scalars()
+            .all()
+        )
+        prev_trade_date_map = {
+            trade_dates[index]: trade_dates[index - 1]
+            for index in range(1, len(trade_dates))
+        }
+
+        rows = (
+            db.query(Candidate)
+            .order_by(Candidate.code.asc(), Candidate.pick_date.asc(), Candidate.id.asc())
+            .all()
+        )
+
+        last_seen_date_by_code: Dict[str, date] = {}
+        last_streak_by_code: Dict[str, int] = {}
+        consecutive_candidate_count_by_date: Dict[date, int] = {}
+
+        for row in rows:
+            expected_previous_trade_date = prev_trade_date_map.get(row.pick_date)
+            previous_candidate_date = last_seen_date_by_code.get(row.code)
+            previous_streak = last_streak_by_code.get(row.code, 0)
+
+            if expected_previous_trade_date and previous_candidate_date == expected_previous_trade_date:
+                streak = previous_streak + 1
+            else:
+                streak = 1
+
+            row.consecutive_days = streak
+            last_seen_date_by_code[row.code] = row.pick_date
+            last_streak_by_code[row.code] = streak
+
+            if streak >= 2:
+                consecutive_candidate_count_by_date[row.pick_date] = (
+                    consecutive_candidate_count_by_date.get(row.pick_date, 0) + 1
+                )
+
+        from app.models import TomorrowStarRun
+        run_rows = db.query(TomorrowStarRun).all()
+        for run in run_rows:
+            run.consecutive_candidate_count = int(consecutive_candidate_count_by_date.get(run.pick_date, 0) or 0)
+
+        if commit:
+            db.commit()
+        else:
+            db.flush()
+        return {
+            "candidate_rows": len(rows),
+            "run_rows": len(run_rows),
+            "days_with_consecutive_candidates": len(consecutive_candidate_count_by_date),
+        }
 
     def load_candidates(
         self,
@@ -149,6 +312,7 @@ class CandidateService:
                 Candidate.turnover,
                 Candidate.b1_passed,
                 Candidate.kdj_j,
+                Candidate.consecutive_days,
                 Stock.name,
                 StockDaily.open.label("open_price"),
                 StockDaily.close.label("daily_close_price"),
@@ -187,6 +351,7 @@ class CandidateService:
                 "turnover_n": float(row.turnover) if row.turnover is not None else None,
                 "b1_passed": row.b1_passed,
                 "kdj_j": float(row.kdj_j) if row.kdj_j is not None else None,
+                "consecutive_days": int(row.consecutive_days or 1),
             })
 
         return target_date.isoformat(), candidates
@@ -245,8 +410,13 @@ class CandidateService:
                 subquery.c.pick_date,
                 subquery.c.count,
                 pass_query.c.pass_count,
+                func.sum(
+                    case((Candidate.consecutive_days >= 2, 1), else_=0)
+                ).label("consecutive_candidate_count"),
             )
             .outerjoin(pass_query, subquery.c.pick_date == pass_query.c.pick_date)
+            .outerjoin(Candidate, Candidate.pick_date == subquery.c.pick_date)
+            .group_by(subquery.c.pick_date, subquery.c.count, pass_query.c.pass_count)
             .order_by(subquery.c.pick_date.desc())
         )
 
@@ -256,6 +426,7 @@ class CandidateService:
                 "date": row.pick_date.isoformat(),
                 "count": row.count or 0,
                 "pass": row.pass_count or 0,
+                "consecutive_candidate_count": int(row.consecutive_candidate_count or 0),
             })
 
         return history

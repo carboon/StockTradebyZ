@@ -7,6 +7,7 @@ import json
 import os
 import pickle
 import hashlib
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 
 import pandas as pd
+from app.services.daily_batch_update_service import DailyBatchUpdateService
 from app.utils.stock_metadata import resolve_ts_code
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
@@ -23,12 +25,17 @@ MARKET_CACHE_FILE = ROOT / "data" / ".market_cache.json"
 PREPARED_CACHE_PREFIX = "prepared_data"
 RUN_DIR = ROOT / "data" / "run"
 INCREMENTAL_CHECKPOINT_VERSION = 1
+logger = logging.getLogger(__name__)
 
 # 全局更新状态
 _update_state = {
     "status": "idle",
     "running": False,
     "task_id": None,
+    "task_type": "incremental_update",
+    "mode": "idle",
+    "target_trade_date": None,
+    "stage_label": None,
     "progress": 0,
     "current": 0,
     "total": 0,
@@ -73,6 +80,12 @@ class MarketService:
         if end_date:
             return end_date.replace("-", "")
         return datetime.now().strftime("%Y%m%d")
+
+    @staticmethod
+    def _display_trade_date(compact_trade_date: str) -> str:
+        if len(compact_trade_date) == 8 and compact_trade_date.isdigit():
+            return f"{compact_trade_date[:4]}-{compact_trade_date[4:6]}-{compact_trade_date[6:]}"
+        return compact_trade_date
 
     @staticmethod
     def _build_incremental_checkpoint_path(codes: list[str], end_date: str, raw_dir: Path) -> Path:
@@ -161,6 +174,10 @@ class MarketService:
             _update_state["status"] = "running"
             _update_state["running"] = True
             _update_state["task_id"] = task_id
+            _update_state["task_type"] = "incremental_update"
+            _update_state["mode"] = "pending"
+            _update_state["target_trade_date"] = None
+            _update_state["stage_label"] = None
             _update_state["progress"] = 0
             _update_state["current"] = 0
             _update_state["total"] = 0
@@ -221,6 +238,10 @@ class MarketService:
 
             _update_state["status"] = "running"
             _update_state["running"] = True
+            _update_state["task_type"] = str(payload.get("task_type") or _update_state["task_type"] or "incremental_update")
+            _update_state["mode"] = str(payload.get("mode") or _update_state["mode"] or "per_stock")
+            _update_state["target_trade_date"] = payload.get("target_trade_date", _update_state["target_trade_date"])
+            _update_state["stage_label"] = payload.get("stage_label", _update_state["stage_label"])
             _update_state["current"] = int(payload.get("current", _update_state["current"]) or 0)
             _update_state["total"] = int(payload.get("total", _update_state["total"]) or 0)
             _update_state["progress"] = int(payload.get("progress", _update_state["progress"]) or 0)
@@ -235,6 +256,72 @@ class MarketService:
             _update_state["completed_in_run"] = int(payload.get("completed_in_run", _update_state["completed_in_run"]) or 0)
             _update_state["checkpoint_path"] = payload.get("checkpoint_path", _update_state["checkpoint_path"])
             _update_state["message"] = str(payload.get("message") or _update_state["message"] or "增量更新进行中")
+
+    @staticmethod
+    def sync_update_state_from_task(task: Any) -> None:
+        """从正式 Task 同步兼容的增量更新状态。
+
+        供旧的 `/tasks/incremental-status` 和前端兼容视图使用。
+        """
+        if task is None:
+            return
+
+        params = dict(getattr(task, "params_json", None) or {})
+        progress_meta = dict(getattr(task, "progress_meta_json", None) or {})
+        result = dict(getattr(task, "result_json", None) or {})
+        status = str(getattr(task, "status", "") or "idle")
+        running = status in ("pending", "running")
+        mode = str(progress_meta.get("mode") or result.get("mode") or "daily_batch")
+        target_trade_date = (
+            params.get("trade_date")
+            or progress_meta.get("target_trade_date")
+            or result.get("trade_date")
+        )
+        current = int(progress_meta.get("current") or (1 if status == "completed" else 0) or 0)
+        total = int(progress_meta.get("total") or 1)
+        progress = int(getattr(task, "progress", 0) or 0)
+        updated_count = int(
+            result.get("stock_count")
+            or result.get("db_stock_count")
+            or progress_meta.get("updated_count")
+            or 0
+        )
+        failed_count = int(progress_meta.get("failed_count") or (1 if status == "failed" else 0) or 0)
+
+        payload = {
+            "status": status,
+            "running": running,
+            "task_id": getattr(task, "id", None),
+            "task_type": str(getattr(task, "task_type", None) or "incremental_update"),
+            "mode": mode,
+            "target_trade_date": target_trade_date,
+            "stage_label": progress_meta.get("stage_label") or "按交易日批量刷新",
+            "progress": progress,
+            "current": current,
+            "total": total,
+            "current_code": progress_meta.get("current_code") or target_trade_date,
+            "updated_count": updated_count,
+            "skipped_count": int(progress_meta.get("skipped_count") or 0),
+            "failed_count": failed_count,
+            "started_at": task.started_at.isoformat() if getattr(task, "started_at", None) else None,
+            "completed_at": task.completed_at.isoformat() if getattr(task, "completed_at", None) else None,
+            "eta_seconds": progress_meta.get("eta_seconds"),
+            "elapsed_seconds": int(progress_meta.get("elapsed_seconds") or 0),
+            "resume_supported": bool(progress_meta.get("resume_supported", False)),
+            "initial_completed": int(progress_meta.get("initial_completed") or 0),
+            "completed_in_run": int(progress_meta.get("completed_in_run") or current or 0),
+            "checkpoint_path": progress_meta.get("checkpoint_path"),
+            "last_error": getattr(task, "error_message", None),
+            "message": str(
+                progress_meta.get("message")
+                or result.get("message")
+                or getattr(task, "summary", "")
+                or "增量更新任务"
+            ),
+        }
+
+        with _update_lock:
+            _update_state.update(payload)
 
     @property
     def pro(self):
@@ -412,15 +499,146 @@ class MarketService:
         Returns:
             更新结果汇总
         """
+        end_date = self._normalize_end_date(end_date)
+
+        batch_result = self._incremental_update_by_trade_date(
+            end_date=end_date,
+            progress_callback=progress_callback,
+        )
+        if batch_result.get("ok"):
+            return batch_result
+
+        logger.warning(
+            "按交易日批量增量刷新失败，回退旧按股模式: %s",
+            batch_result.get("message") or batch_result.get("error") or "unknown error",
+        )
+        return self._incremental_update_by_stock(
+            end_date=end_date,
+            progress_callback=progress_callback,
+            fallback_reason=batch_result.get("message") or batch_result.get("error"),
+        )
+
+    def _incremental_update_by_trade_date(
+        self,
+        *,
+        end_date: str,
+        progress_callback: Optional[Callable] = None,
+    ) -> Dict[str, Any]:
+        trade_date = self._display_trade_date(end_date)
+
+        if progress_callback:
+            progress_callback(
+                {
+                    "current": 0,
+                    "total": 1,
+                    "progress": 0,
+                    "current_code": trade_date,
+                    "target_trade_date": trade_date,
+                    "task_type": "daily_batch_update",
+                    "mode": "daily_batch",
+                    "stage_label": "按交易日批量刷新",
+                    "updated_count": 0,
+                    "skipped_count": 0,
+                    "failed_count": 0,
+                    "eta_seconds": None,
+                    "elapsed_seconds": 0,
+                    "resume_supported": False,
+                    "initial_completed": 0,
+                    "completed_in_run": 0,
+                    "checkpoint_path": None,
+                    "message": f"按交易日批量刷新 {trade_date}",
+                    "status": "starting",
+                }
+            )
+
+        started_at = time.time()
+        try:
+            with DailyBatchUpdateService(token=self.token) as service:
+                result = service.update_trade_date(trade_date, source="incremental_update")
+        except Exception as exc:
+            return {
+                "ok": False,
+                "success": False,
+                "mode": "daily_batch",
+                "trade_date": trade_date,
+                "updated": 0,
+                "skipped": 0,
+                "failed": 1,
+                "message": f"按交易日批量刷新失败: {exc}",
+                "error": str(exc),
+            }
+
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "success": False,
+                "mode": "daily_batch",
+                "trade_date": trade_date,
+                "updated": 0,
+                "skipped": 0,
+                "failed": 1,
+                "message": str(result.get("message") or f"{trade_date} 按交易日批量刷新失败"),
+            }
+
+        updated_count = int(result.get("stock_count") or result.get("db_stock_count") or 0)
+        elapsed_seconds = max(0, int(time.time() - started_at))
+        latest_trade = self.get_latest_trade_date()
+        if latest_trade:
+            self.update_cache(latest_trade)
+
+        payload = {
+            "current": 1,
+            "total": 1,
+            "progress": 100,
+            "current_code": trade_date,
+            "target_trade_date": trade_date,
+            "task_type": "daily_batch_update",
+            "mode": "daily_batch",
+            "stage_label": "按交易日批量刷新",
+            "updated_count": updated_count,
+            "skipped_count": 0,
+            "failed_count": 0,
+            "eta_seconds": 0,
+            "elapsed_seconds": elapsed_seconds,
+            "resume_supported": False,
+            "initial_completed": 0,
+            "completed_in_run": 1,
+            "checkpoint_path": None,
+            "message": f"按交易日批量刷新完成 {trade_date}，写入 {updated_count} 只股票",
+            "status": "completed",
+        }
+        if progress_callback:
+            progress_callback(payload)
+
+        return {
+            "ok": True,
+            "success": True,
+            "mode": "daily_batch",
+            "trade_date": trade_date,
+            "total": 1,
+            "completed": 1,
+            "updated": updated_count,
+            "skipped": 0,
+            "failed": 0,
+            "success_count": updated_count,
+            "resume_supported": False,
+            "checkpoint_path": None,
+            "message": payload["message"],
+            "record_count": int(result.get("record_count") or 0),
+            "stock_count": updated_count,
+        }
+
+    def _incremental_update_by_stock(
+        self,
+        *,
+        end_date: str,
+        progress_callback: Optional[Callable] = None,
+        fallback_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from app.config import settings
         from pipeline.fetch_kline import fetch_one_incremental
 
-        # 解析结束日期
-        end_date = self._normalize_end_date(end_date)
-
-        # 获取股票列表
-        import pandas as pd
         stocklist_path = ROOT / "pipeline" / "stocklist.csv"
         if not stocklist_path.exists():
             return {"success": False, "error": "股票列表文件不存在"}
@@ -428,18 +646,14 @@ class MarketService:
         df = pd.read_csv(stocklist_path)
         codes = df["symbol"].astype(str).str.zfill(6).tolist()
 
-        # 输出目录
-        from app.config import settings
         raw_dir = ROOT / settings.raw_data_dir
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        # 获取 token
         token = os.environ.get("TUSHARE_TOKEN") or self.token
         if not token:
             return {"success": False, "error": "Tushare Token 未设置"}
 
         db_url = settings.database_url
-
         workers = 8
 
         results = {
@@ -450,6 +664,8 @@ class MarketService:
             "updated": 0,
             "skipped": 0,
             "resume_supported": True,
+            "mode": "per_stock_fallback",
+            "fallback_reason": fallback_reason,
         }
         checkpoint_path = self._build_incremental_checkpoint_path(codes, end_date, raw_dir)
         checkpoint = self._load_incremental_checkpoint(checkpoint_path)
@@ -503,6 +719,14 @@ class MarketService:
             elif remaining == 0:
                 eta_seconds = 0
 
+            message = (
+                f"增量更新 {current}/{total}"
+                + (f" | 当前 {current_code}" if current_code else "")
+                + (f" | 预计剩余 {eta_seconds} 秒" if eta_seconds is not None and eta_seconds > 0 else "")
+            )
+            if fallback_reason and status == "starting":
+                message += f" | 已回退按股模式: {fallback_reason}"
+
             payload = {
                 "current": current,
                 "total": total,
@@ -517,11 +741,7 @@ class MarketService:
                 "initial_completed": initial_completed,
                 "completed_in_run": completed_in_run,
                 "checkpoint_path": str(checkpoint_path),
-                "message": (
-                    f"增量更新 {current}/{total}"
-                    + (f" | 当前 {current_code}" if current_code else "")
-                    + (f" | 预计剩余 {eta_seconds} 秒" if eta_seconds is not None and eta_seconds > 0 else "")
-                ),
+                "message": message,
                 "status": status,
             }
             if progress_callback:
@@ -529,7 +749,6 @@ class MarketService:
 
         emit_progress(None, "starting")
 
-        # 多线程更新
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(update_single_code, code): code
@@ -576,7 +795,6 @@ class MarketService:
         results["failed"] = len(failed_codes)
         results["ok"] = len(failed_codes) == 0
 
-        # 更新缓存
         if results["ok"]:
             latest_trade = self.get_latest_trade_date()
             if latest_trade:

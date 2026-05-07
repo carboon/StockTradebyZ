@@ -100,6 +100,7 @@
             <div class="mobile-history-item__meta">
               <span>候选数 {{ row.count === '-' ? '-' : row.count }}</span>
               <span>趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
+              <span>连续候选数 {{ row.consecutiveCandidateCount === '-' ? '-' : row.consecutiveCandidateCount }}</span>
             </div>
           </button>
         </div>
@@ -218,6 +219,14 @@
                 <span v-else>-</span>
               </template>
             </el-table-column>
+            <el-table-column prop="consecutiveCandidateCount" label="连续候选数" width="120" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.consecutiveCandidateCount !== '-'" :type="row.consecutiveCandidateCount > 0 ? 'warning' : 'info'" size="small">
+                  {{ row.consecutiveCandidateCount }}
+                </el-tag>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" width="80" align="center">
               <template #default="{ row }">
                 <div class="history-status-cell">
@@ -317,6 +326,11 @@
             <el-table-column prop="kdj_j" label="KDJ-J" min-width="100" align="right">
               <template #default="{ row }">
                 {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="consecutive_days" label="连续候选" min-width="110" align="center">
+              <template #default="{ row }">
+                {{ (row.consecutive_days || 1) > 1 ? row.consecutive_days : '否' }}
               </template>
             </el-table-column>
             <el-table-column label="操作" width="80" align="center" fixed="right">
@@ -433,6 +447,7 @@ type HistoryRow = {
   rawDate: string
   count: number | '-'
   pass: number | '-'
+  consecutiveCandidateCount: number | '-'
   status: 'pending' | 'running' | 'success' | 'failed' | 'missing'
   analysisCount: number | '-'
   errorMessage?: string | null
@@ -447,6 +462,7 @@ type HistoryLikeItem = {
   candidate_count?: number
   analysis_count?: number
   trend_start_count?: number
+  consecutive_candidate_count?: number
   status?: string
   error_message?: string | null
   is_latest?: boolean
@@ -520,6 +536,8 @@ const totalLatestCandidates = computed(() => latestCandidates.value.length)
 const displayLatestCandidates = computed(() => {
   const start = (latestCandidatePage.value - 1) * candidatePageSize
   const sorted = [...latestCandidates.value].sort((a, b) => {
+    const consecutiveDiff = (b.consecutive_days || 1) - (a.consecutive_days || 1)
+    if (consecutiveDiff !== 0) return consecutiveDiff
     const aVal = typeof a.kdj_j === 'number' ? a.kdj_j : Number.POSITIVE_INFINITY
     const bVal = typeof b.kdj_j === 'number' ? b.kdj_j : Number.POSITIVE_INFINITY
     if (aVal !== bVal) return aVal - bVal
@@ -626,6 +644,7 @@ function normalizeHistoryRow(
 
   const count = getHistoryCount(item)
   const pass = getHistoryPassCount(item)
+  const consecutiveCandidateCount = typeof item.consecutive_candidate_count === 'number' ? item.consecutive_candidate_count : '-'
   const analysisCount = typeof item.analysis_count === 'number' ? item.analysis_count : '-'
   const inferredStatus =
     item.status
@@ -642,6 +661,7 @@ function normalizeHistoryRow(
     rawDate,
     count,
     pass,
+    consecutiveCandidateCount,
     status: normalizeHistoryStatus(inferredStatus),
     analysisCount,
     errorMessage: item.error_message || null,
@@ -689,6 +709,7 @@ function normalizeHistoryRows(
       rawDate,
       count: '-',
       pass: '-',
+      consecutiveCandidateCount: '-',
       status: 'missing',
       analysisCount: '-',
       errorMessage: null,
@@ -739,6 +760,7 @@ async function loadData(skipLatestLoad: boolean = false) {
             rawDate: formatDateString(date),
             count: candidates.length,
             pass: passCount,
+            consecutiveCandidateCount: candidates.filter((candidate) => (candidate.consecutive_days || 1) >= 2).length,
             status: 'success',
             analysisCount: results.length,
             errorMessage: null,
@@ -750,6 +772,7 @@ async function loadData(skipLatestLoad: boolean = false) {
             rawDate: formatDateString(date),
             count: '-',
             pass: '-',
+            consecutiveCandidateCount: '-',
             status: 'missing',
             analysisCount: '-',
             errorMessage: null,
@@ -1236,6 +1259,7 @@ function buildHistorySignature(dates: string[], history: Array<{ date: string; c
         date: formatDateString(('rawDate' in item ? item.rawDate : item.date) || ''),
         count: typeof item.count === 'number' ? item.count : '-',
         pass: typeof item.pass === 'number' ? item.pass : '-',
+        consecutiveCandidateCount: 'consecutiveCandidateCount' in item ? item.consecutiveCandidateCount : '-',
         status: 'status' in item ? item.status : undefined,
       }))
     )
@@ -1310,6 +1334,7 @@ function hydrateTomorrowStarCache() {
       rawDate: formatDateString(item.rawDate || item.date || ''),
       date: formatDateString(item.rawDate || item.date || ''),
       status: normalizeHistoryStatus(item.status),
+      consecutiveCandidateCount: typeof item.consecutiveCandidateCount === 'number' ? item.consecutiveCandidateCount : '-',
       analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
       errorMessage: item.errorMessage || null,
       isLatest: Boolean(item.isLatest),

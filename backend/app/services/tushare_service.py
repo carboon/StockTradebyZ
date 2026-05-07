@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.utils.tushare_rate_limit import acquire_tushare_slot
+from app.models import RawDataManifest
 
 ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -134,6 +135,81 @@ class TushareService:
         # 允许少量停牌/退市等自然缺失，但不接受明显零星数据。
         threshold = max(1, int(active_expected_count * cls._latest_trade_date_completion_threshold))
         return int(latest_date_stock_count or 0) >= threshold
+
+    @staticmethod
+    def _is_manifest_db_loaded(manifest: RawDataManifest) -> bool:
+        return bool(
+            manifest.loaded_to_db_at
+            or int(manifest.db_record_count or 0) > 0
+            or int(manifest.db_stock_count or 0) > 0
+            or str(manifest.status or "").lower() in {"loaded", "completed"}
+        )
+
+    @classmethod
+    def _apply_manifest_to_raw_status(
+        cls,
+        raw_status: dict,
+        *,
+        latest_manifest: RawDataManifest,
+        latest_trade_date: Optional[str],
+        expected_stock_count: int,
+    ) -> None:
+        manifest_trade_date = (
+            latest_manifest.trade_date.isoformat()
+            if hasattr(latest_manifest.trade_date, "isoformat")
+            else str(latest_manifest.trade_date)
+        )
+        manifest_db_loaded = cls._is_manifest_db_loaded(latest_manifest)
+        manifest_stock_count = int(latest_manifest.stock_count or 0)
+        manifest_record_count = int(latest_manifest.record_count or 0)
+        manifest_db_stock_count = int(latest_manifest.db_stock_count or 0)
+        manifest_db_record_count = int(latest_manifest.db_record_count or 0)
+
+        raw_status["manifest_latest_trade_date"] = manifest_trade_date
+        raw_status["manifest_status"] = latest_manifest.status
+        raw_status["manifest_record_count"] = manifest_record_count
+        raw_status["manifest_stock_count"] = manifest_stock_count
+        raw_status["manifest_db_record_count"] = manifest_db_record_count
+        raw_status["manifest_db_stock_count"] = manifest_db_stock_count
+        raw_status["manifest_loaded_to_db_at"] = (
+            latest_manifest.loaded_to_db_at.isoformat()
+            if latest_manifest.loaded_to_db_at
+            else None
+        )
+        raw_status["manifest_db_loaded"] = manifest_db_loaded
+        raw_status["manifest_preferred"] = True
+
+        raw_status["latest_db_date"] = raw_status.get("latest_date")
+        raw_status["latest_db_date_stock_count"] = int(raw_status.get("latest_date_stock_count") or 0)
+        raw_status["latest_available_date"] = manifest_trade_date
+        raw_status["latest_available_record_count"] = manifest_record_count
+        raw_status["latest_available_stock_count"] = manifest_stock_count
+        raw_status["latest_loaded_trade_date"] = manifest_trade_date if manifest_db_loaded else raw_status.get("latest_date")
+
+        raw_status["latest_date"] = manifest_trade_date
+        raw_status["latest_date_stock_count"] = manifest_stock_count
+        raw_status["raw_record_count"] = manifest_record_count
+        raw_status["stock_count"] = manifest_stock_count or raw_status.get("stock_count", 0)
+        raw_status["count"] = raw_status["stock_count"]
+        raw_status["exists"] = True
+
+        if manifest_db_loaded:
+            raw_status["db_record_count"] = manifest_db_record_count
+            raw_status["db_stock_count"] = manifest_db_stock_count
+
+        raw_status["is_latest"] = bool(
+            manifest_trade_date and latest_trade_date and manifest_trade_date == latest_trade_date
+        )
+        raw_status["is_latest_complete"] = bool(
+            cls._is_latest_date_complete(
+                latest_date=manifest_trade_date,
+                latest_trade_date=latest_trade_date,
+                latest_date_stock_count=manifest_stock_count,
+                expected_stock_count=expected_stock_count,
+                suspended_count=int(raw_status.get("suspended_count") or 0),
+                long_stale_count=int(raw_status.get("long_stale_count") or 0),
+            )
+        )
 
     def find_stock_by_code(self, code: str) -> Optional[dict]:
         """通过6位代码查找股票基础信息"""
@@ -507,7 +583,6 @@ class TushareService:
         from app.database import SessionLocal
         from app.models import StockDaily, Candidate, AnalysisResult
         from sqlalchemy import func, select, distinct
-        import json
 
         latest_trade_date = self.get_effective_latest_trade_date(prefer_realtime=prefer_realtime_latest)
         calendar_latest_trade_date = self.get_latest_trade_date()
@@ -524,6 +599,12 @@ class TushareService:
                 "stock_count": 0,
                 "raw_record_count": 0,
                 "latest_date": None,
+                "latest_db_date": None,
+                "latest_db_date_stock_count": 0,
+                "latest_available_date": None,
+                "latest_available_stock_count": 0,
+                "latest_available_record_count": 0,
+                "latest_loaded_trade_date": None,
                 "latest_trade_date": latest_trade_date,
                 "calendar_latest_trade_date": calendar_latest_trade_date,
                 "is_latest": False,
@@ -532,6 +613,10 @@ class TushareService:
                 "is_latest_complete": False,
                 "suspended_count": 0,
                 "long_stale_count": 0,
+                "manifest_preferred": False,
+                "manifest_db_loaded": False,
+                "db_record_count": 0,
+                "db_stock_count": 0,
             },
             "candidates": {"exists": False, "count": 0, "latest_date": None},
             "analysis": {"exists": False, "count": 0, "latest_date": None},
@@ -555,11 +640,13 @@ class TushareService:
                     if latest:
                         latest_local_date = latest[0].isoformat() if hasattr(latest[0], "isoformat") else str(latest[0])
                         status["raw_data"]["latest_date"] = latest_local_date
+                        status["raw_data"]["latest_db_date"] = latest_local_date
                         latest_day_stock_count = db.execute(
                             select(func.count(distinct(StockDaily.code)))
                             .where(StockDaily.trade_date == latest[0])
                         ).scalar() or 0
                         status["raw_data"]["latest_date_stock_count"] = latest_day_stock_count
+                        status["raw_data"]["latest_db_date_stock_count"] = latest_day_stock_count
 
                     # 获取有数据的股票数
                     stocks_with_data = db.execute(
@@ -568,8 +655,10 @@ class TushareService:
                     if stocks_with_data:
                         status["raw_data"]["stock_count"] = stocks_with_data
                         status["raw_data"]["count"] = stocks_with_data
+                        status["raw_data"]["db_stock_count"] = stocks_with_data
                         status["kline"]["exists"] = True
                         status["kline"]["count"] = stocks_with_data
+                    status["raw_data"]["db_record_count"] = int(kline_count or 0)
 
                     # 获取停牌股票信息（从预期总数中排除）
                     suspended_codes = self.get_suspended_stocks(latest_trade_date) if latest_trade_date else set()
@@ -613,6 +702,19 @@ class TushareService:
                             suspended_count=len(suspended_codes),
                             long_stale_count=len(long_stale_codes),
                         )
+                    )
+
+                latest_manifest = db.execute(
+                    select(RawDataManifest)
+                    .order_by(RawDataManifest.trade_date.desc(), RawDataManifest.id.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                if latest_manifest is not None:
+                    self._apply_manifest_to_raw_status(
+                        status["raw_data"],
+                        latest_manifest=latest_manifest,
+                        latest_trade_date=latest_trade_date,
+                        expected_stock_count=expected_total,
                     )
 
                 candidate_count = db.execute(select(func.count()).select_from(Candidate)).scalar() or 0

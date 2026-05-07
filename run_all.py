@@ -213,6 +213,10 @@ def _load_env_var(name: str) -> str:
 def _sync_candidates_to_db() -> None:
     """将候选数据同步到数据库（阶段7：结果数据库化）"""
     import json
+    import os
+    import sys
+    from datetime import date, datetime
+
     candidates_file = ROOT / "data" / "candidates" / "candidates_latest.json"
     if not candidates_file.exists():
         print("[INFO] 候选文件不存在，跳过数据库同步")
@@ -229,20 +233,62 @@ def _sync_candidates_to_db() -> None:
             print("[INFO] 候选数据为空，跳过数据库同步")
             return
 
-        # 调用候选服务保存到数据库
-        import sys
-        sys.path.insert(0, str(ROOT / "backend"))
-        from app.services.candidate_service import get_candidate_service
+        # 直接使用 psycopg2 连接数据库，绕过配置系统
+        import psycopg2
+        from psycopg2.extras import execute_values
 
-        candidate_service = get_candidate_service()
-        count = candidate_service.save_candidates(
-            pick_date=pick_date,
-            candidates=candidates,
-            strategy="b1",
-            clean_existing=True,
-        )
+        # 尝试 localhost 和 postgres 两个主机
+        conn = None
+        for host in ["localhost", "postgres"]:
+            try:
+                conn = psycopg2.connect(
+                    host=host,
+                    port=5432,
+                    user="stocktrade",
+                    password="stocktrade123",
+                    dbname="stocktrade"
+                )
+                break
+            except psycopg2.OperationalError:
+                continue
 
-        print(f"[INFO] 候选数据已同步到数据库: pick_date={pick_date}, count={count}")
+        if conn is None:
+            raise Exception("无法连接到数据库 (tried localhost and postgres)")
+
+        try:
+            with conn.cursor() as cur:
+                # 清理已有数据
+                cur.execute("DELETE FROM candidates WHERE pick_date = %s", (pick_date,))
+
+                # 插入新数据
+                values = []
+                for item in candidates:
+                    code = str(item.get("code", "")).zfill(6)
+                    if not code or code == "000000":
+                        continue
+                    extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+                    values.append((
+                        date.fromisoformat(pick_date),
+                        code,
+                        item.get("strategy", "b1"),
+                        float(item.get("close", 0)) if item.get("close") is not None else None,
+                        float(item.get("turnover_n", 0)) if item.get("turnover_n") is not None else None,
+                        item.get("strategy") == "b1" or item.get("b1_passed", False),
+                        float(extra.get("kdj_j", 0)) if extra.get("kdj_j") is not None else None,
+                        datetime.now(),  # created_at
+                    ))
+
+                if values:
+                    execute_values(
+                        cur,
+                        "INSERT INTO candidates (pick_date, code, strategy, close_price, turnover, b1_passed, kdj_j, created_at) VALUES %s",
+                        values
+                    )
+
+                conn.commit()
+                print(f"[INFO] 候选数据已同步到数据库: pick_date={pick_date}, count={len(values)}")
+        finally:
+            conn.close()
 
     except Exception as e:
         print(f"[WARNING] 候选数据同步到数据库失败: {e}")
@@ -717,7 +763,9 @@ def main() -> None:
     if start <= 2:
         preselect_cmd = [PYTHON, "-m", "pipeline.cli", "preselect"]
         if target_date:
-            preselect_cmd.extend(["--date", target_date, "--end-date", target_date])
+            # 只传递 --date 用于指定选股日期，不传递 --end-date
+            # 这样停牌股票也能参与计算，避免因数据截断导致的候选数量不足
+            preselect_cmd.extend(["--date", target_date])
         _run(
             "2  量化初选（cli preselect）",
             preselect_cmd,

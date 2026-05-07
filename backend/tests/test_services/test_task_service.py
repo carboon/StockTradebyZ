@@ -1221,3 +1221,32 @@ def test_task_timestamps(task_service):
 
     assert task.completed_at is not None
     assert task.completed_at >= task.started_at
+
+
+@pytest.mark.service
+def test_run_daily_batch_update_sync_uses_service_class(task_service):
+    """静态批量刷新辅助方法应能直接解析 DailyBatchUpdateService。"""
+    expected = {"ok": True, "stock_count": 3}
+
+    batch_service = MagicMock()
+    batch_service.update_trade_date.return_value = expected
+
+    batch_service_cls = MagicMock()
+    batch_service_cls.return_value.__enter__.return_value = batch_service
+    batch_service_cls.return_value.__exit__.return_value = None
+
+    with patch("app.services.task_service.DailyBatchUpdateService", batch_service_cls):
+        result = task_service._run_daily_batch_update_sync(
+            "2026-05-06",
+            "incremental_update",
+            "token-123",
+            None,
+        )
+
+    assert result == expected
+    batch_service_cls.assert_called_once_with(token="token-123")
+    batch_service.update_trade_date.assert_called_once_with(
+        "2026-05-06",
+        source="incremental_update",
+        progress_callback=None,
+    )

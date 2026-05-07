@@ -114,6 +114,7 @@ async def get_tomorrow_star_dates(
             candidate_count=int(item.get("candidate_count", 0) or 0),
             analysis_count=int(item.get("analysis_count", 0) or 0),
             trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
             status=item.get("status") or "missing",
             error_message=item.get("error_message"),
             is_latest=bool(item.get("is_latest")),
@@ -154,6 +155,7 @@ async def get_tomorrow_star_window_status(
             candidate_count=int(item.get("candidate_count", 0) or 0),
             analysis_count=int(item.get("analysis_count", 0) or 0),
             trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
             status=item.get("status") or "missing",
             error_message=item.get("error_message"),
             is_latest=bool(item.get("is_latest")),
@@ -199,6 +201,28 @@ async def get_tomorrow_star_freshness(
     local_latest_date = market_service.get_local_latest_date()
     latest_candidate_date = analysis_service.get_latest_candidate_date()
     latest_result_date = analysis_service.get_latest_result_date()
+    latest_candidate_count = 0
+    latest_result_count = 0
+
+    if latest_candidate_date:
+        try:
+            latest_candidate_count = int(
+                db.query(Candidate)
+                .filter(Candidate.pick_date == datetime.strptime(latest_candidate_date, "%Y-%m-%d").date())
+                .count()
+            )
+        except ValueError:
+            latest_candidate_count = 0
+
+    if latest_result_date:
+        try:
+            latest_result_count = int(
+                db.query(AnalysisResult)
+                .filter(AnalysisResult.pick_date == datetime.strptime(latest_result_date, "%Y-%m-%d").date())
+                .count()
+            )
+        except ValueError:
+            latest_result_count = 0
 
     running_task = (
         db.query(Task)
@@ -225,7 +249,9 @@ async def get_tomorrow_star_freshness(
         str(latest_trade_date or ""),
         str(local_latest_date or ""),
         str(latest_candidate_date or ""),
+        str(latest_candidate_count),
         str(latest_result_date or ""),
+        str(latest_result_count),
         str(latest_trade_data_ready),
         str(running_task.id if running_task else ""),
         str(running_task.status if running_task else ""),
@@ -238,7 +264,9 @@ async def get_tomorrow_star_freshness(
         "latest_trade_data_ready": latest_trade_data_ready,
         "local_latest_date": local_latest_date,
         "latest_candidate_date": latest_candidate_date,
+        "latest_candidate_count": latest_candidate_count,
         "latest_result_date": latest_result_date,
+        "latest_result_count": latest_result_count,
         "needs_update": needs_update,
         "freshness_version": freshness_version,
         "running_task_id": running_task.id if running_task else None,
@@ -309,6 +337,7 @@ async def get_candidates(
                         turnover=float(c["turnover_n"]) if c.get("turnover_n") is not None else None,
                         b1_passed=c.get("b1_passed"),
                         kdj_j=c.get("kdj_j"),
+                        consecutive_days=int(c.get("consecutive_days") or 1),
                     )
                 )
 

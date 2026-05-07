@@ -151,6 +151,12 @@ class TomorrowStarWindowService:
         run.candidate_count = int(
             self.db.query(func.count(Candidate.id)).filter(Candidate.pick_date == pick_dt).scalar() or 0
         )
+        run.consecutive_candidate_count = int(
+            self.db.query(func.count(Candidate.id))
+            .filter(Candidate.pick_date == pick_dt, Candidate.consecutive_days >= 2)
+            .scalar()
+            or 0
+        )
         run.analysis_count = int(
             self.db.query(func.count(AnalysisResult.id)).filter(AnalysisResult.pick_date == pick_dt).scalar() or 0
         )
@@ -271,6 +277,10 @@ class TomorrowStarWindowService:
             self.db.add_all(candidate_rows)
         if analysis_rows:
             self.db.add_all(analysis_rows)
+        self.db.flush()
+
+        from app.services.candidate_service import CandidateService
+        CandidateService.recalculate_consecutive_metrics(self.db, commit=False)
 
         run = self._upsert_run(
             trade_date,
@@ -285,11 +295,18 @@ class TomorrowStarWindowService:
         run.candidate_count = len(candidate_rows)
         run.analysis_count = len(analysis_rows)
         run.trend_start_count = sum(1 for event in events if event.get("signal_type") == "trend_start")
+        run.consecutive_candidate_count = int(
+            self.db.query(func.count(Candidate.id))
+            .filter(Candidate.pick_date == pick_dt, Candidate.consecutive_days >= 2)
+            .scalar()
+            or 0
+        )
         self.db.flush()
         return {
             "candidate_count": run.candidate_count,
             "analysis_count": run.analysis_count,
             "trend_start_count": run.trend_start_count,
+            "consecutive_candidate_count": run.consecutive_candidate_count,
         }
 
     def _build_window_via_backtest(
@@ -408,6 +425,19 @@ class TomorrowStarWindowService:
             .group_by(AnalysisResult.pick_date)
             .all()
         }
+        consecutive_counts = {
+            row.pick_date.isoformat(): int(row.count or 0)
+            for row in self.db.query(
+                Candidate.pick_date,
+                func.count(Candidate.id).label("count"),
+            )
+            .filter(
+                Candidate.pick_date.in_(pick_dates),
+                Candidate.consecutive_days >= 2,
+            )
+            .group_by(Candidate.pick_date)
+            .all()
+        }
 
         items: list[dict[str, Any]] = []
         ready_count = missing_count = running_count = failed_count = pending_count = 0
@@ -416,6 +446,7 @@ class TomorrowStarWindowService:
             candidate_count = candidate_counts.get(pick_date_text, 0)
             analysis_count = analysis_counts.get(pick_date_text, 0)
             trend_start_count = trend_counts.get(pick_date_text, 0)
+            consecutive_candidate_count = consecutive_counts.get(pick_date_text, 0)
 
             if run is not None:
                 status = run.status
@@ -444,6 +475,7 @@ class TomorrowStarWindowService:
                     "candidate_count": candidate_count,
                     "analysis_count": analysis_count,
                     "trend_start_count": trend_start_count,
+                    "consecutive_candidate_count": consecutive_candidate_count,
                     "status": status,
                     "error_message": run.error_message if run else None,
                     "is_latest": pick_date_text == latest_date,
@@ -611,6 +643,73 @@ class TomorrowStarWindowService:
         finally:
             self._unlock_advisory()
 
+    def rebuild_trade_date(
+        self,
+        trade_date: str,
+        *,
+        reviewer: str = DEFAULT_REVIEWER,
+        source: str = DEFAULT_SOURCE,
+        window_size: int = DEFAULT_WINDOW_SIZE,
+    ) -> dict[str, Any]:
+        """基于回测结果重建指定交易日的候选/分析/运行统计。
+
+        与旧的 build_for_trade_date 不同，这里不依赖 data/review/<date> 文件是否完整，
+        而是直接用回测事件一次性替换 Candidate / AnalysisResult / TomorrowStarRun，
+        以保证三者始终一致。
+        """
+        if not self._try_advisory_lock():
+            return {"success": False, "status": "locked", "pick_date": trade_date}
+
+        try:
+            rebuild_result = self._build_window_via_backtest(
+                [trade_date],
+                reviewer=reviewer,
+                source=source,
+                window_size=window_size,
+            )
+            self.reconcile_run_rows(window_size, reviewer=reviewer, source=source)
+
+            run = (
+                self.db.query(TomorrowStarRun)
+                .filter(TomorrowStarRun.pick_date == date.fromisoformat(trade_date))
+                .first()
+            )
+            if trade_date in set(rebuild_result.get("failed_dates", [])):
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "pick_date": trade_date,
+                    "candidate_count": int(getattr(run, "candidate_count", 0) or 0),
+                    "analysis_count": int(getattr(run, "analysis_count", 0) or 0),
+                    "trend_start_count": int(getattr(run, "trend_start_count", 0) or 0),
+                }
+
+            return {
+                "success": True,
+                "status": "success",
+                "pick_date": trade_date,
+                "candidate_count": int(getattr(run, "candidate_count", 0) or 0),
+                "analysis_count": int(getattr(run, "analysis_count", 0) or 0),
+                "trend_start_count": int(getattr(run, "trend_start_count", 0) or 0),
+            }
+        except Exception as exc:
+            self.db.rollback()
+            run = self._upsert_run(
+                trade_date,
+                status="failed",
+                reviewer=reviewer,
+                source=source,
+                window_size=window_size,
+                error_message=str(exc)[:4000],
+                finished_at=utc_now(),
+            )
+            self._refresh_run_counts(run)
+            self.db.commit()
+            logger.exception("rebuild_trade_date failed: %s", trade_date)
+            return {"success": False, "status": "failed", "pick_date": trade_date, "error": str(exc)}
+        finally:
+            self._unlock_advisory()
+
     def ensure_window(
         self,
         window_size: int = DEFAULT_WINDOW_SIZE,
@@ -716,7 +815,7 @@ def maintain_tomorrow_star_for_trade_date(
 ) -> dict[str, Any]:
     """在线程内为指定交易日构建并裁剪明日之星窗口。"""
     with TomorrowStarWindowService() as service:
-        build_result = service.build_for_trade_date(
+        build_result = service.rebuild_trade_date(
             trade_date,
             reviewer=reviewer,
             source=source,

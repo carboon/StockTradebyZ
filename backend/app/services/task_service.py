@@ -27,8 +27,10 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.time_utils import utc_now
+from app.services.daily_batch_update_service import DailyBatchUpdateService
 
 ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -189,6 +191,8 @@ class TaskService:
     ACTIVE_STATUSES = ("pending", "running")
     FULL_TASK_TYPES = ("full_update", "tomorrow_star")
     SINGLE_ANALYSIS_TASK_TYPE = "single_analysis"
+    INCREMENTAL_UPDATE_TASK_TYPE = "incremental_update"
+    DAILY_BATCH_UPDATE_TASK_TYPE = "daily_batch_update"
     GENERATE_HISTORY_TASK_TYPE = "generate_history"
     GENERATE_HISTORY_DETAIL_TASK_TYPE = "generate_history_detail"
     # 阶段6：历史回溯任务类型
@@ -197,7 +201,9 @@ class TaskService:
     HISTORY_BACKFILL_BATCH_TASK_TYPE = "history_backfill_batch"
     _creation_lock = threading.Lock()
     _running_tasks: Dict[int, asyncio.subprocess.Process] = {}
+    _background_async_tasks: Dict[int, asyncio.Task] = {}
     _cancelled_tasks: set[int] = set()
+    _progress_commit_interval_seconds = 2.0
 
     # 全量更新步骤定义（断点续传支持）
     # 优化后的6阶段流程
@@ -244,6 +250,12 @@ class TaskService:
 
         # === 其他任务类型 ===
         "analysis": {"label": "单股分析", "index": 1, "total": 1, "percent": 50},
+        "daily_batch_prepare": {"label": "准备批量刷新", "index": 1, "total": 4, "percent": 5},
+        "daily_batch_fetch": {"label": "抓取日快照", "index": 2, "total": 4, "percent": 20},
+        "daily_batch_persist_raw": {"label": "写入原始分片", "index": 3, "total": 4, "percent": 55},
+        "daily_batch_load_db": {"label": "批量入库", "index": 4, "total": 4, "percent": 80},
+        "daily_batch_rebuild_star": {"label": "重建明日之星", "index": 5, "total": 5, "percent": 90},
+        "daily_batch_completed": {"label": "批量刷新完成", "index": 5, "total": 5, "percent": 100},
         "generating_history": {"label": "生成历史数据", "index": 1, "total": 2, "percent": 50},
         "generating_history_detail": {"label": "生成诊断详情", "index": 1, "total": 2, "percent": 50},
 
@@ -255,6 +267,7 @@ class TaskService:
     def __init__(self, db: Session, manager=None):
         self.db = db
         self.running_tasks = self.__class__._running_tasks
+        self.background_async_tasks = self.__class__._background_async_tasks
         self.manager = manager
 
         # 确保后台刷新任务只启动一次
@@ -282,6 +295,16 @@ class TaskService:
                 reviewer = params.get("reviewer", "quant")
                 if code:
                     existing_task = self._get_active_single_analysis_task(code, reviewer)
+                    if existing_task:
+                        return {
+                            "task_id": existing_task.id,
+                            "ws_url": f"/ws/tasks/{existing_task.id}",
+                            "existing": True,
+                        }
+            if task_type in (self.DAILY_BATCH_UPDATE_TASK_TYPE, self.INCREMENTAL_UPDATE_TASK_TYPE):
+                trade_date = str(params.get("trade_date") or "").strip()
+                if trade_date:
+                    existing_task = self._get_active_daily_batch_task(trade_date)
                     if existing_task:
                         return {
                             "task_id": existing_task.id,
@@ -342,7 +365,7 @@ class TaskService:
             self.db.refresh(task)
 
         # 启动任务（后台执行）
-        asyncio.create_task(self._run_task(task.id))
+        self.background_async_tasks[task.id] = asyncio.create_task(self._run_task(task.id))
 
         return {
             "task_id": task.id,
@@ -365,11 +388,11 @@ class TaskService:
         )
 
     def _get_active_single_analysis_task(self, code: str, reviewer: str = "quant") -> Optional[Any]:
-        """返回指定股票的活跃分析任务（pending/running）。
+        """返回指定股票可复用的分析任务。
 
-        用于防止重复创建同一股票的分析任务。业务键为：code + reviewer + analysis_date。
-        仅复用同业务键的 pending/running 任务，已完成任务允许重新发起，以便在
-        规则修复或数据更新后重新生成结果。
+        兼容历史行为：
+        1. 优先复用同业务键的 pending/running 任务。
+        2. 若当日已存在同业务键的 completed 任务，也直接复用。
 
         Args:
             code: 股票代码
@@ -395,6 +418,22 @@ class TaskService:
         )
         if running_task:
             return running_task
+
+        today = date.today()
+        completed_task = (
+            self.db.query(Task)
+            .filter(
+                Task.task_type == self.SINGLE_ANALYSIS_TASK_TYPE,
+                Task.filter_by_code(code),
+                Task.params_json["reviewer"].as_string() == reviewer,
+                Task.status == "completed",
+                func.date(Task.created_at) == today.isoformat(),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+        if completed_task:
+            return completed_task
 
         return None
 
@@ -475,6 +514,10 @@ class TaskService:
                 await self._run_full_update(task, db)
             elif task_type == "single_analysis":
                 await self._run_single_analysis(task, db, params_json)
+            elif task_type == self.DAILY_BATCH_UPDATE_TASK_TYPE:
+                await self._run_daily_batch_update(task, db, params_json)
+            elif task_type == self.INCREMENTAL_UPDATE_TASK_TYPE:
+                await self._run_incremental_update(task, db, params_json)
             elif task_type == "tomorrow_star":
                 await self._run_tomorrow_star(task, db)
             elif task_type == "generate_history":
@@ -532,6 +575,7 @@ class TaskService:
             _task_log_buffer.flush_all()
             if saved_task_id in self.running_tasks:
                 del self.running_tasks[saved_task_id]
+            self.background_async_tasks.pop(saved_task_id, None)
             self._cancelled_tasks.discard(saved_task_id)
             # 仅关闭当前方法内部创建的 session，避免误关测试注入的共享 session。
             if owns_session:
@@ -665,11 +709,19 @@ class TaskService:
                 if not is_progress_line(line) and not _should_skip_task_log_line(line):
                     self._record_task_log(task, line, log_type, stage=stage)
 
-                # 每处理100行输出提交一次状态，避免频繁写库
-                db.commit()
-                await self._publish_ops_task_event(task, "task_progress")
+                now_monotonic = time.perf_counter()
+                should_flush_state = bool(progress_payload or stage or progress is not None)
+                if should_flush_state and (
+                    not hasattr(task, "_last_progress_flush_at")
+                    or now_monotonic - getattr(task, "_last_progress_flush_at", 0.0) >= self._progress_commit_interval_seconds
+                ):
+                    db.commit()
+                    setattr(task, "_last_progress_flush_at", now_monotonic)
+                    await self._publish_ops_task_event(task, "task_progress")
 
         # 等待进程完成
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
         return_code = await process.wait()
 
         if return_code != 0:
@@ -761,6 +813,257 @@ class TaskService:
         task.task_stage = "analysis"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta("analysis", progress=100, message=f"单股分析完成: {code}")
+
+    async def _run_daily_batch_update(self, task: Any, db: Session, params_json: dict = None):
+        """运行按交易日批量刷新任务。"""
+        from app.services.daily_batch_update_service import DailyBatchUpdateService
+        from app.services.tomorrow_star_window_service import maintain_tomorrow_star_for_trade_date
+        from app.services.tushare_service import TushareService
+
+        params = params_json or task.params_json or {}
+        trade_date = str(params.get("trade_date") or "").strip()
+        source = str(params.get("source") or "task_service").strip() or "task_service"
+        token = params.get("token")
+        if not trade_date:
+            raise Exception("缺少交易日")
+
+        task.task_stage = "daily_batch_prepare"
+        task.progress = 5
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_prepare",
+            progress=5,
+            message=f"准备批量刷新 {trade_date}",
+        )
+        db.commit()
+
+        last_flush_at = 0.0
+
+        def progress_callback(payload: dict[str, Any]) -> None:
+            nonlocal last_flush_at
+            stage = str(payload.get("stage") or task.task_stage or "daily_batch_prepare")
+            progress = int(payload.get("progress", payload.get("percent", task.progress)) or task.progress or 0)
+            task.task_stage = stage
+            task.progress = max(0, min(100, progress))
+            task.progress_meta_json = self._merge_progress_meta(task, payload)
+
+            message = str(payload.get("message") or "")
+            if message:
+                self._record_task_log(task, message, "info", stage=stage)
+
+            now_monotonic = time.perf_counter()
+            if now_monotonic - last_flush_at >= self._progress_commit_interval_seconds or progress >= 100:
+                db.commit()
+                last_flush_at = now_monotonic
+
+        result = await asyncio.to_thread(
+            self._run_daily_batch_update_sync,
+            trade_date,
+            source,
+            token,
+            progress_callback,
+        )
+
+        task.task_stage = "daily_batch_rebuild_star"
+        task.progress = 90
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_rebuild_star",
+            progress=90,
+            message=f"重建 {trade_date} 明日之星候选与分析",
+        )
+        db.commit()
+        self._record_task_log(task, f"开始重建 {trade_date} 明日之星候选与分析", "info", stage="daily_batch_rebuild_star")
+        await self._publish_ops_task_event(task, "task_progress")
+
+        consistency_result = await asyncio.to_thread(
+            maintain_tomorrow_star_for_trade_date,
+            trade_date,
+            reviewer="quant",
+            source=source,
+            window_size=180,
+        )
+        build_result = consistency_result.get("build") or {}
+        if not build_result.get("success"):
+            raise Exception(build_result.get("error") or build_result.get("status") or f"{trade_date} 明日之星重建失败")
+
+        TushareService.clear_data_status_cache()
+        self._invalidate_tomorrow_star_caches()
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            metadata_service = get_admin_summary_metadata_service(db)
+            metadata_service.invalidate()
+        except Exception:
+            pass
+
+        task.result_json = {
+            "ok": bool(result.get("ok")),
+            "mode": "daily_batch",
+            "trade_date": trade_date,
+            "source": source,
+            "tomorrow_star_rebuild": consistency_result,
+            **result,
+        }
+        task.task_stage = "daily_batch_completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_completed",
+            progress=100,
+            message=f"{trade_date} 批量刷新完成",
+        )
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
+
+    async def _run_incremental_update(self, task: Any, db: Session, params_json: dict = None):
+        """运行增量更新任务。
+
+        当前主路径统一到底层按交易日批量刷新，并在完成后执行增量任务专属收尾动作。
+        """
+        from app.services.market_service import MarketService
+        from app.services.tushare_service import TushareService
+        from app.services.tomorrow_star_window_service import maintain_tomorrow_star_for_trade_date
+
+        params = dict(params_json or task.params_json or {})
+        trade_date = str(params.get("trade_date") or "").strip()
+        if not trade_date:
+            raise Exception("缺少交易日")
+
+        params.setdefault("source", "incremental_update")
+        params.setdefault("task_type", self.INCREMENTAL_UPDATE_TASK_TYPE)
+        token = params.get("token")
+
+        task.task_stage = "daily_batch_prepare"
+        task.progress = 5
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_prepare",
+            progress=5,
+            message=f"准备增量刷新 {trade_date}",
+        )
+        db.commit()
+        MarketService.start_update(task.id)
+
+        last_flush_at = 0.0
+
+        def progress_callback(payload: dict[str, Any]) -> None:
+            nonlocal last_flush_at
+            stage = str(payload.get("stage") or task.task_stage or "daily_batch_prepare")
+            progress = int(payload.get("progress", payload.get("percent", task.progress)) or task.progress or 0)
+            merged_payload = {
+                "task_id": task.id,
+                "task_type": self.INCREMENTAL_UPDATE_TASK_TYPE,
+                "mode": "daily_batch",
+                "target_trade_date": trade_date,
+                "stage_label": "按交易日批量刷新",
+                **payload,
+            }
+            task.task_stage = stage
+            task.progress = max(0, min(100, progress))
+            task.progress_meta_json = self._merge_progress_meta(task, merged_payload)
+            MarketService.update_progress(merged_payload)
+
+            message = str(merged_payload.get("message") or "")
+            if message:
+                self._record_task_log(task, message, "info", stage=stage)
+
+            now_monotonic = time.perf_counter()
+            if now_monotonic - last_flush_at >= self._progress_commit_interval_seconds or progress >= 100:
+                db.commit()
+                last_flush_at = now_monotonic
+
+        result = await asyncio.to_thread(
+            self._run_daily_batch_update_sync,
+            trade_date,
+            params["source"],
+            token,
+            progress_callback,
+        )
+
+        if not result.get("ok"):
+            message = str(result.get("message") or f"{trade_date} 增量刷新失败")
+            MarketService.fail_update(message)
+            raise Exception(message)
+
+        task.task_stage = "daily_batch_rebuild_star"
+        task.progress = 90
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_rebuild_star",
+            progress=90,
+            message=f"重建 {trade_date} 明日之星候选与分析",
+        )
+        db.commit()
+        self._record_task_log(task, f"开始重建 {trade_date} 明日之星候选与分析", "info", stage="daily_batch_rebuild_star")
+        await self._publish_ops_task_event(task, "task_progress")
+
+        consistency_result = await asyncio.to_thread(
+            maintain_tomorrow_star_for_trade_date,
+            trade_date,
+            reviewer="quant",
+            source="incremental_update",
+            window_size=180,
+        )
+        build_result = consistency_result.get("build") or {}
+        if not build_result.get("success"):
+            message = str(build_result.get("error") or build_result.get("status") or f"{trade_date} 明日之星重建失败")
+            MarketService.fail_update(message)
+            raise Exception(message)
+
+        latest_trade_date = TushareService(token=token).get_latest_trade_date()
+        if latest_trade_date:
+            MarketService(token=token).update_cache(latest_trade_date)
+
+        TushareService.clear_data_status_cache()
+        self._invalidate_tomorrow_star_caches()
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            metadata_service = get_admin_summary_metadata_service(db)
+            metadata_service.invalidate()
+        except Exception:
+            pass
+
+        updated_count = int(result.get("stock_count") or result.get("db_stock_count") or 0)
+        message = f"增量更新完成: {trade_date}，写入 {updated_count} 只股票"
+        task.result_json = {
+            "ok": True,
+            "success": True,
+            "task_type": self.INCREMENTAL_UPDATE_TASK_TYPE,
+            "mode": "daily_batch",
+            "trade_date": trade_date,
+            "source": params["source"],
+            "message": message,
+            "tomorrow_star_rebuild": consistency_result,
+            **result,
+        }
+        task.task_stage = "daily_batch_completed"
+        task.progress = 100
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_completed",
+            progress=100,
+            message=message,
+        )
+        db.commit()
+        MarketService.finish_update(message)
+        await self._publish_ops_task_event(task, "task_progress")
+
+    @staticmethod
+    def _run_daily_batch_update_sync(
+        trade_date: str,
+        source: str,
+        token: Optional[str],
+        progress_callback,
+    ) -> dict[str, Any]:
+        with DailyBatchUpdateService(token=token) as batch_service:
+            return batch_service.update_trade_date(
+                trade_date,
+                source=source,
+                progress_callback=progress_callback,
+            )
+
+    @staticmethod
+    def _invalidate_tomorrow_star_caches() -> None:
+        from app.api.cache_decorators import build_freshness_cache_key
+        from app.cache import cache
+
+        cache.delete_prefix("candidates:")
+        cache.delete_prefix("analysis_results:")
+        cache.delete(build_freshness_cache_key())
 
     async def _run_tomorrow_star(self, task: Any, db: Session):
         """生成明日之星"""
@@ -1046,8 +1349,43 @@ class TaskService:
         )
         return running_task
 
+    def _get_active_daily_batch_task(self, trade_date: str) -> Optional[Any]:
+        from app.models import Task
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type.in_([
+                    self.DAILY_BATCH_UPDATE_TASK_TYPE,
+                    self.INCREMENTAL_UPDATE_TASK_TYPE,
+                ]),
+                Task.params_json["trade_date"].as_string() == trade_date,
+                Task.status.in_(self.ACTIVE_STATUSES),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+
+    def get_latest_incremental_task(self) -> Optional[Any]:
+        from app.models import Task
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type.in_([
+                    self.INCREMENTAL_UPDATE_TASK_TYPE,
+                    self.DAILY_BATCH_UPDATE_TASK_TYPE,
+                ]),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+
     def is_task_process_alive(self, task_id: int) -> bool:
         """判断任务对应的子进程是否仍然存活。"""
+        async_task = self.background_async_tasks.get(task_id)
+        if async_task is not None and not async_task.done():
+            return True
         process = self.running_tasks.get(task_id)
         if process is None:
             return False
@@ -1055,6 +1393,11 @@ class TaskService:
 
     async def cancel_task(self, task_id: int) -> bool:
         """取消任务"""
+        async_task = self.background_async_tasks.get(task_id)
+        if async_task is not None and not async_task.done():
+            self._cancelled_tasks.add(task_id)
+            async_task.cancel()
+            return True
         if task_id in self.running_tasks:
             process = self.running_tasks[task_id]
             self._cancelled_tasks.add(task_id)
@@ -1130,6 +1473,10 @@ class TaskService:
             return " | ".join(parts)
         if task_type == "single_analysis":
             return f"单股分析 / code={params.get('code', '-')}"
+        if task_type == TaskService.DAILY_BATCH_UPDATE_TASK_TYPE:
+            return f"按交易日批量刷新 / trade_date={params.get('trade_date', '-')}"
+        if task_type == TaskService.INCREMENTAL_UPDATE_TASK_TYPE:
+            return f"增量更新 / trade_date={params.get('trade_date', '-')}"
         if task_type == "tomorrow_star":
             return f"明日之星生成 / reviewer={params.get('reviewer', 'quant')}"
         if task_type == "generate_history":
@@ -1174,6 +1521,7 @@ class TaskService:
     def _sync_candidates_from_files(self, db: Session) -> int:
         from app.config import settings
         from app.models import Candidate
+        from app.services.candidate_service import CandidateService
         from app.services.tushare_service import TushareService
 
         latest_file = settings.candidates_dir / "candidates_latest.json"
@@ -1217,6 +1565,7 @@ class TaskService:
         if rows:
             db.add_all(rows)
             db.commit()
+            CandidateService.recalculate_consecutive_metrics(db)
         return len(rows)
 
     def _sync_analysis_results_from_files(self, db: Session, reviewer: str = "quant") -> int:

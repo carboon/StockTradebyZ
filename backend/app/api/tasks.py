@@ -21,7 +21,6 @@ from app.config import PROJECT_ROOT, settings
 from app.database import get_db
 from app.models import Config, Task, TaskLog
 from app.services.task_service import TaskService
-from app.services.tomorrow_star_window_service import maintain_tomorrow_star_for_trade_date
 from app.services.tushare_service import TushareService
 from app.schemas import (
     AdminSummaryCard,
@@ -62,6 +61,34 @@ _CSV_PROGRESS_CACHE_TTL = 120  # CSV 进度缓存 2 分钟
 # 预期股票代码缓存（避免重复读取 CSV）
 _expected_codes_cache: dict = {"data": None, "expires_at": 0.0}
 _EXPECTED_CODES_CACHE_TTL = 600  # 10 分钟缓存（股票列表很少变化）
+
+
+def _resolve_raw_status_for_views(raw_status: dict | None) -> dict:
+    raw_status = raw_status or {}
+    manifest_preferred = bool(raw_status.get("manifest_preferred"))
+    manifest_loaded = bool(raw_status.get("manifest_db_loaded"))
+    latest_db_date = raw_status.get("latest_db_date") or raw_status.get("latest_loaded_trade_date") or raw_status.get("latest_date")
+    latest_available_date = raw_status.get("latest_available_date") or raw_status.get("manifest_latest_trade_date") or raw_status.get("latest_date")
+    return {
+        "manifest_preferred": manifest_preferred,
+        "manifest_loaded": manifest_loaded,
+        "latest_db_date": latest_db_date,
+        "latest_available_date": latest_available_date,
+        "display_date": latest_available_date if manifest_preferred else latest_db_date,
+        "available_stock_count": int(
+            raw_status.get("latest_available_stock_count")
+            or raw_status.get("manifest_stock_count")
+            or raw_status.get("latest_date_stock_count")
+            or raw_status.get("stock_count")
+            or 0
+        ),
+        "available_record_count": int(
+            raw_status.get("latest_available_record_count")
+            or raw_status.get("manifest_record_count")
+            or raw_status.get("raw_record_count")
+            or 0
+        ),
+    }
 
 
 def _clear_all_caches(db: Session | None = None) -> None:
@@ -133,14 +160,21 @@ def _load_expected_fetch_codes() -> set[str]:
 
 def _get_latest_date_from_csv(csv_path: Path) -> str | None:
     try:
-        with open(csv_path, encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-        if not rows:
+        with open(csv_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            if file_size <= 0:
+                return None
+
+            chunk_size = min(4096, file_size)
+            f.seek(-chunk_size, os.SEEK_END)
+            tail = f.read(chunk_size).decode("utf-8", errors="ignore")
+
+        lines = [line for line in tail.splitlines() if line.strip()]
+        if len(lines) < 2:
             return None
-        value = str(rows[-1].get("date", "")).strip()
-        if len(value) >= 10:
-            value = value[:10]
-        return value or None
+        value = lines[-1].split(",", 1)[0].strip()
+        return value[:10] if value else None
     except Exception:
         return None
 
@@ -234,6 +268,9 @@ def _raise_initialization_in_progress(task: Task) -> None:
 
 def _cleanup_stale_active_tasks(db: Session) -> set[int]:
     """将数据库中无对应活跃进程的 pending/running 任务标记为 cancelled。"""
+    if _is_test_mode():
+        return set()
+
     task_service = TaskService(db)
     active_tasks = (
         db.query(Task)
@@ -405,13 +442,18 @@ async def get_data_status(
 
     tushare_service = TushareService()
     status = tushare_service.check_data_status()
+    raw_status = status.get("raw_data", {})
+    raw_view = _resolve_raw_status_for_views(raw_status)
 
     # 格式化日期
-    if status["raw_data"].get("latest_date"):
+    if raw_status.get("latest_date"):
         from datetime import datetime
-        ts = status["raw_data"]["latest_date"]
+        ts = raw_status["latest_date"]
         if isinstance(ts, (int, float)):
-            status["raw_data"]["latest_date"] = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            raw_status["latest_date"] = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    raw_status["display_latest_date"] = raw_view["display_date"]
+    raw_status["display_stock_count"] = raw_view["available_stock_count"]
+    raw_status["display_record_count"] = raw_view["available_record_count"]
 
     result = DataStatusResponse(**status)
     if not _is_test_mode():
@@ -436,7 +478,10 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
 
     existing_task = task_service.get_active_full_task()
     if existing_task:
-        _raise_initialization_in_progress(existing_task)
+        return TaskResponse(
+            task=TaskItem.model_validate(existing_task, from_attributes=True),
+            ws_url=f"/ws/tasks/{existing_task.id}",
+        )
 
     incremental_state = MarketService.get_update_state()
     if incremental_state.get("running"):
@@ -476,109 +521,103 @@ async def start_incremental_update(
     2. 同步更新 data/raw CSV
     3. 将新增交易日写入数据库
     """
+    from app.main import manager
     from app.services.market_service import MarketService
 
-    task_service = TaskService(db)
+    task_service = TaskService(db, manager=manager)
 
     # 检查是否有全量任务在运行
     active_full_task = task_service.get_active_full_task()
     if active_full_task:
-        _raise_initialization_in_progress(active_full_task)
-
-    # 检查是否已有更新在运行
-    update_state = MarketService.get_update_state()
-    if update_state["running"]:
         return {
             "success": False,
-            "message": "已有更新任务正在运行",
-            "running": True,
-        }
-
-    # 开始更新
-    if not MarketService.start_update():
-        return {
-            "success": False,
-            "message": "无法启动更新任务",
+            "message": f"正在初始化，请等待（任务 #{active_full_task.id}）",
             "running": False,
+            "blocking_task_id": active_full_task.id,
         }
 
     tushare_service = TushareService()
-
-    resolved_end_date = end_date
+    resolved_end_date = end_date or tushare_service.get_effective_latest_trade_date(prefer_realtime=True)
     if not resolved_end_date:
-        resolved_end_date = tushare_service.get_effective_latest_trade_date(prefer_realtime=True)
+        raise HTTPException(status_code=503, detail="无法确定目标交易日")
 
-    async def run_incremental_update():
-        try:
-            # 定义进度回调
-            def progress_cb(*args, **kwargs):
-                """兼容旧式位置参数和新式 payload 字典的进度回调。"""
-                if args and isinstance(args[0], dict):
-                    payload = dict(args[0])
-                elif kwargs:
-                    payload = dict(kwargs)
-                elif len(args) >= 4:
-                    current, total, code, status = args[:4]
-                    payload = {
-                        "current": current,
-                        "total": total,
-                        "current_code": code,
-                        "status": status,
-                    }
-                else:
-                    return
+    MarketService.start_update()
+    result = await task_service.create_task(
+        TaskService.INCREMENTAL_UPDATE_TASK_TYPE,
+        {
+            "trade_date": resolved_end_date,
+            "source": "incremental_update",
+            "trigger_source": "manual",
+        },
+    )
+    task = db.query(Task).filter(Task.id == result["task_id"]).first()
+    if task and result.get("existing"):
+        MarketService.start_update(task.id)
 
-                MarketService.update_progress(payload)
-
-            # 使用 asyncio.to_thread 在线程池中运行同步函数，避免阻塞事件循环
-            result = await asyncio.to_thread(
-                MarketService().incremental_update,
-                end_date=resolved_end_date,
-                progress_callback=progress_cb,
-            )
-
-            if result.get("ok"):
-                latest_trade_date = tushare_service.get_latest_trade_date()
-                if latest_trade_date and tushare_service.is_trade_date_data_ready(latest_trade_date):
-                    try:
-                        await asyncio.to_thread(
-                            maintain_tomorrow_star_for_trade_date,
-                            latest_trade_date,
-                            reviewer="quant",
-                            source="incremental_update",
-                            window_size=180,
-                        )
-                    except Exception as exc:
-                        print(f"增量更新后维护明日之星 180 日窗口失败: {exc}")
-                MarketService.finish_update(
-                    f"增量更新完成: {result.get('updated')} 更新, {result.get('skipped')} 跳过, {result.get('failed')} 失败"
-                )
-            else:
-                MarketService.fail_update(result.get("message", "增量更新失败"))
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            MarketService.fail_update(f"增量更新异常: {str(e)}")
-        finally:
-            # 清除缓存
-            cache.delete("data_status")
-
-    # 在后台运行
-    import asyncio
-    asyncio.create_task(run_incremental_update())
+    cache.delete("data_status")
+    _clear_all_caches(db)
 
     return {
         "success": True,
-        "message": f"增量更新已启动，目标日期 {resolved_end_date or '自动判定'}",
+        "message": f"增量更新已启动，目标日期 {resolved_end_date}",
         "running": False,
+        "trade_date": resolved_end_date,
+        "task_id": result["task_id"],
+        "ws_url": result["ws_url"],
+        "existing": result.get("existing", False),
+        "task": TaskItem.model_validate(task, from_attributes=True) if task else None,
+    }
+
+
+@router.post("/start-daily-batch")
+async def start_daily_batch_update(
+    trade_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """启动按交易日批量刷新。
+
+    通过正式 TaskService 任务体系执行，支持任务中心、日志和状态观测。
+    """
+    from app.main import manager
+
+    task_service = TaskService(db)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
+
+    service = TushareService()
+    resolved_trade_date = trade_date or service.get_effective_latest_trade_date(prefer_realtime=True)
+    if not resolved_trade_date:
+        raise HTTPException(status_code=503, detail="无法确定目标交易日")
+
+    task_service = TaskService(db, manager=manager)
+    result = await task_service.create_task(
+        TaskService.DAILY_BATCH_UPDATE_TASK_TYPE,
+        {
+            "trade_date": resolved_trade_date,
+            "source": "manual_daily_batch",
+            "trigger_source": "manual",
+        },
+    )
+    task = db.query(Task).filter(Task.id == result["task_id"]).first()
+    cache.delete("data_status")
+    _clear_all_caches(db)
+
+    return {
+        "success": True,
+        "message": f"按交易日批量刷新已启动，目标日期 {resolved_trade_date}",
+        "trade_date": resolved_trade_date,
+        "task_id": result["task_id"],
+        "ws_url": result["ws_url"],
+        "existing": result.get("existing", False),
+        "task": TaskItem.model_validate(task, from_attributes=True) if task else None,
     }
 
 
 @router.get("/incremental-status")
-
-
-@router.get("/incremental-status")
 async def get_incremental_status(
+    db: Session = Depends(get_db),
     _rate_limit: None = Depends(status_api_rate_limit),
     user=Depends(require_user)
 ) -> dict:
@@ -589,14 +628,51 @@ async def get_incremental_status(
     """
     from app.services.market_service import MarketService
 
+    task_service = TaskService(db)
+    latest_incremental_task = task_service.get_latest_incremental_task()
+    if latest_incremental_task:
+        MarketService.sync_update_state_from_task(latest_incremental_task)
+
     state = MarketService.get_update_state()
+    mode = str(state.get("mode") or "per_stock")
+    task_type = str(state.get("task_type") or ("daily_batch_update" if mode == "daily_batch" else "incremental_update"))
+    target_trade_date = state.get("target_trade_date")
+    stage_label = state.get("stage_label")
+    progress = int(state.get("progress") or 0)
+    if state["running"] and mode == "daily_batch" and state.get("total") == 1 and state.get("current") == 0 and progress <= 0:
+        progress = 1
+
+    if mode == "daily_batch":
+        title = "按交易日批量刷新"
+        if state["running"]:
+            status_label = f"{title}进行中"
+            detail = f"目标交易日 {target_trade_date or state.get('current_code') or '-'}"
+        elif state["status"] == "completed":
+            status_label = f"{title}已完成"
+            detail = f"目标交易日 {target_trade_date or state.get('current_code') or '-'}"
+        elif state["status"] == "failed":
+            status_label = f"{title}失败"
+            detail = state.get("last_error") or state.get("message") or "任务失败"
+        else:
+            status_label = title
+            detail = state.get("message") or "等待启动"
+    else:
+        status_label = "增量更新"
+        detail = state.get("message") or "等待启动"
+
     return {
         "status": state["status"],
         "running": state["running"],
-        "progress": state["progress"],
+        "progress": progress,
         "current": state["current"],
         "total": state["total"],
         "current_code": state["current_code"],
+        "task_type": task_type,
+        "mode": mode,
+        "target_trade_date": target_trade_date,
+        "stage_label": stage_label,
+        "display_title": status_label,
+        "display_detail": detail,
         "updated_count": state["updated_count"],
         "skipped_count": state["skipped_count"],
         "failed_count": state["failed_count"],
@@ -639,7 +715,20 @@ async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_
 
     tushare_service = TushareService()
     data_status = tushare_service.check_data_status()
-    raw_csv_progress = _assess_raw_csv_progress(data_status.get("raw_data", {}).get("latest_trade_date"))
+    raw_status = data_status.get("raw_data", {})
+    raw_view = _resolve_raw_status_for_views(raw_status)
+    raw_csv_progress = (
+        {
+            "expected_total": int(raw_status.get("expected_stock_count") or 0),
+            "ready_count": raw_view["available_stock_count"],
+            "missing_count": max(int(raw_status.get("expected_stock_count") or 0) - raw_view["available_stock_count"], 0),
+            "stale_count": 0,
+            "invalid_count": 0,
+            "latest_local_date": raw_view["latest_available_date"],
+        }
+        if raw_view["manifest_preferred"]
+        else _assess_raw_csv_progress(raw_status.get("latest_trade_date"))
+    )
     data_ready = all(bool(data_status[key].get("exists")) for key in ["raw_data", "candidates", "analysis"])
     failure_resolved = _is_failure_resolved(latest_failed, latest_success, data_ready=data_ready)
 
@@ -677,7 +766,11 @@ async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_
             label="数据状态",
             value="正常" if data_ready else "待检查",
             status="success" if data_ready else "warning",
-            meta=f"raw={data_status['raw_data'].get('count', 0)} / analysis={data_status['analysis'].get('count', 0)}",
+            meta=(
+                f"manifest={raw_status.get('manifest_status', '-')} / raw={raw_view['available_stock_count']} / analysis={data_status['analysis'].get('count', 0)}"
+                if raw_view["manifest_preferred"]
+                else f"raw={data_status['raw_data'].get('count', 0)} / analysis={data_status['analysis'].get('count', 0)}"
+            ),
         ),
     ]
 
@@ -715,7 +808,10 @@ async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_
             TaskAlertItem(
                 level="warning",
                 title="数据状态未完全就绪",
-                message="原始数据、候选数据或评分数据至少有一项缺失。",
+                message=(
+                    f"原始数据、候选数据或评分数据至少有一项缺失。最新交易日 {raw_status.get('latest_trade_date') or '-'}，"
+                    f"当前已就绪 {int(raw_csv_progress.get('ready_count') or 0)} / {int(raw_csv_progress.get('expected_total') or 0)}。"
+                ),
             )
         )
 

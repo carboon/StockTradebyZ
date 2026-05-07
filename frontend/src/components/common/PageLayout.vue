@@ -293,6 +293,9 @@ const layoutClasses = computed(() => ({
 const activeFullTask = computed(() => {
   return activeTasks.value.find((task) => ['full_update', 'tomorrow_star'].includes(task.task_type)) || null
 })
+const activeDailyTask = computed(() => {
+  return activeTasks.value.find((task) => ['daily_batch_update', 'incremental_update'].includes(task.task_type)) || null
+})
 const headerProgress = computed(() => {
   const task = activeFullTask.value
   if (task) {
@@ -342,8 +345,36 @@ const headerProgress = computed(() => {
     }
   }
 
+  if (activeDailyTask.value) {
+    const meta = activeDailyTask.value.progress_meta_json
+    const secondaryParts: string[] = []
+    if (meta?.eta_seconds != null) {
+      secondaryParts.push(`预计剩余 ${formatDuration(meta.eta_seconds)}`)
+    } else if (activeDailyTask.value.started_at) {
+      secondaryParts.push(`已运行 ${formatDuration(getElapsedSeconds(activeDailyTask.value.started_at))}`)
+    }
+    if (meta?.current_code) {
+      secondaryParts.push(`当前 ${meta.current_code}`)
+    }
+    if (meta?.failed_count) {
+      secondaryParts.push(`失败 ${meta.failed_count}`)
+    }
+    return {
+      eyebrow: activeDailyTask.value.task_type === 'daily_batch_update' ? '批量刷新任务' : '增量更新任务',
+      title: activeDailyTask.value.task_type === 'daily_batch_update' ? '按交易日批量刷新进行中' : '增量更新进行中',
+      subtitle: meta?.stage_label || getStageLabel(meta?.stage || activeDailyTask.value.task_stage),
+      percent: Math.max(0, Math.min(100, meta?.percent ?? activeDailyTask.value.progress ?? 0)),
+      percentLabel: activeDailyTask.value.task_type === 'daily_batch_update' ? '批量刷新' : '增量',
+      primary: meta?.current != null && meta?.total != null
+        ? `进度 ${meta.current}/${meta.total}`
+        : `进度 ${meta?.percent ?? activeDailyTask.value.progress}%`,
+      secondary: secondaryParts.join(' / '),
+    }
+  }
+
   if (incrementalStatus.value?.running) {
     const status = incrementalStatus.value
+    const isDailyBatch = status.mode === 'daily_batch'
     const secondaryParts: string[] = []
     if (status.eta_seconds != null) {
       secondaryParts.push(`预计剩余 ${formatDuration(status.eta_seconds)}`)
@@ -351,14 +382,20 @@ const headerProgress = computed(() => {
     if (status.current_code) {
       secondaryParts.push(`当前 ${status.current_code}`)
     }
-    secondaryParts.push(`${status.updated_count} 更新 / ${status.skipped_count} 跳过 / ${status.failed_count} 失败`)
+    if (isDailyBatch) {
+      secondaryParts.push(`${status.updated_count} 只股票写入 / ${status.failed_count} 失败`)
+    } else {
+      secondaryParts.push(`${status.updated_count} 更新 / ${status.skipped_count} 跳过 / ${status.failed_count} 失败`)
+    }
     return {
-      eyebrow: 'Tushare 数据源',
-      title: '增量更新进行中',
-      subtitle: '最新交易日同步',
+      eyebrow: isDailyBatch ? '批量刷新任务' : 'Tushare 数据源',
+      title: status.display_title || (isDailyBatch ? '按交易日批量刷新进行中' : '增量更新进行中'),
+      subtitle: status.display_detail || (isDailyBatch ? '最新交易日批量同步' : '最新交易日同步'),
       percent: Math.max(0, Math.min(100, status.progress)),
-      percentLabel: '增量',
-      primary: `进度 ${status.current}/${status.total}`,
+      percentLabel: isDailyBatch ? '批量刷新' : '增量',
+      primary: isDailyBatch
+        ? `目标交易日 ${status.target_trade_date || status.current_code || '-'}`
+        : `进度 ${status.current}/${status.total}`,
       secondary: secondaryParts.join(' / '),
     }
   }

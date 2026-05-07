@@ -85,6 +85,7 @@ class CandidateItem(BaseModel):
     turnover: Optional[float] = None
     b1_passed: Optional[bool] = None
     kdj_j: Optional[float] = None
+    consecutive_days: int = 1
 
 
 class CandidatesResponse(BaseModel):
@@ -133,6 +134,7 @@ class TomorrowStarHistoryItem(BaseModel):
     candidate_count: int = 0
     analysis_count: int = 0
     trend_start_count: int = 0
+    consecutive_candidate_count: int = 0
     status: str = "missing"
     error_message: Optional[str] = None
     is_latest: bool = False

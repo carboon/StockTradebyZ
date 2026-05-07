@@ -65,6 +65,7 @@ class Candidate(Base):
     turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     kdj_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    consecutive_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -105,6 +106,7 @@ class TomorrowStarRun(Base):
     candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     analysis_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     trend_start_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    consecutive_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reviewer: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     strategy_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     window_size: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
@@ -302,6 +304,65 @@ class DataUpdateLog(Base):
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class RawDataBatch(Base):
+    """原始数据批次表
+
+    记录一次按交易日或按区间的抓取批次，供任务中心和状态页读取。
+    """
+    __tablename__ = "raw_data_batches"
+    __table_args__ = (
+        Index("ix_raw_data_batches_status_trade_date", "status", "trade_date"),
+        Index("ix_raw_data_batches_batch_type_created_at", "batch_type", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_type: Mapped[str] = mapped_column(String(32), nullable=False, default="daily")
+    trade_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    storage_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stock_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    meta_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class RawDataManifest(Base):
+    """原始数据清单表
+
+    按交易日维护最新的抓取和入库状态，避免接口频繁扫描文件系统。
+    """
+    __tablename__ = "raw_data_manifest"
+    __table_args__ = (
+        UniqueConstraint("trade_date", name="uq_raw_data_manifest_trade_date"),
+        Index("ix_raw_data_manifest_status_trade_date", "status", "trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    batch_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("raw_data_batches.id"), nullable=True, index=True)
+    storage_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stock_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    db_record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    db_stock_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    meta_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    loaded_to_db_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class User(Base):

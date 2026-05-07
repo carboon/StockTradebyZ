@@ -7,7 +7,7 @@ Admin Summary Metadata Service
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
@@ -104,6 +104,56 @@ class AdminSummaryMetadataService:
             .limit(1)
         ).scalar_one_or_none()
 
+    @staticmethod
+    def _resolve_raw_metrics(raw_status: dict[str, Any]) -> dict[str, Any]:
+        manifest_preferred = bool(raw_status.get("manifest_preferred"))
+        manifest_loaded = bool(raw_status.get("manifest_db_loaded"))
+
+        latest_trade_date = raw_status.get("latest_trade_date")
+        latest_db_date = raw_status.get("latest_db_date") or raw_status.get("latest_loaded_trade_date") or raw_status.get("latest_date")
+        latest_available_date = raw_status.get("latest_available_date") or raw_status.get("manifest_latest_trade_date") or raw_status.get("latest_date")
+
+        available_stock_count = int(
+            raw_status.get("latest_available_stock_count")
+            or raw_status.get("manifest_stock_count")
+            or raw_status.get("latest_date_stock_count")
+            or 0
+        )
+        available_record_count = int(
+            raw_status.get("latest_available_record_count")
+            or raw_status.get("manifest_record_count")
+            or raw_status.get("raw_record_count")
+            or 0
+        )
+        db_stock_count = int(
+            raw_status.get("db_stock_count")
+            or raw_status.get("manifest_db_stock_count")
+            or raw_status.get("latest_db_date_stock_count")
+            or 0
+        )
+        db_record_count = int(
+            raw_status.get("db_record_count")
+            or raw_status.get("manifest_db_record_count")
+            or raw_status.get("raw_record_count")
+            or 0
+        )
+
+        if manifest_preferred and not manifest_loaded and latest_db_date == latest_available_date:
+            latest_db_date = raw_status.get("latest_db_date")
+
+        return {
+            "manifest_preferred": manifest_preferred,
+            "manifest_loaded": manifest_loaded,
+            "latest_trade_date": latest_trade_date,
+            "latest_db_date": latest_db_date,
+            "latest_available_date": latest_available_date,
+            "available_stock_count": available_stock_count,
+            "available_record_count": available_record_count,
+            "db_stock_count": db_stock_count,
+            "db_record_count": db_record_count,
+            "display_date": latest_available_date if manifest_preferred else latest_db_date,
+        }
+
     async def _compute_and_cache(self, now: datetime) -> AdminSummaryResponse:
         """计算数据并缓存到数据库
 
@@ -166,11 +216,14 @@ class AdminSummaryMetadataService:
 
         tushare_service = TushareService()
         data_status = tushare_service.check_data_status()
+        raw_status = data_status.get("raw_data", {})
+        raw_metrics = self._resolve_raw_metrics(raw_status)
 
         # 1. 获取最新交易日
-        latest_trade_date = data_status.get("raw_data", {}).get("latest_trade_date")
-        calendar_latest_trade_date = data_status.get("raw_data", {}).get("calendar_latest_trade_date")
-        latest_db_date = data_status.get("raw_data", {}).get("latest_date")
+        latest_trade_date = raw_metrics["latest_trade_date"]
+        calendar_latest_trade_date = raw_status.get("calendar_latest_trade_date")
+        latest_db_date = raw_metrics["latest_db_date"]
+        latest_available_date = raw_metrics["latest_available_date"]
 
         # 2. 获取最新候选日期
         latest_candidate_result = self.db.execute(
@@ -255,10 +308,12 @@ class AdminSummaryMetadataService:
             data_status.get("analysis", {}).get("exists"),
         ])
 
-        latest_day_stock_count = int(data_status.get("raw_data", {}).get("latest_date_stock_count") or 0)
-        expected_stock_count = int(data_status.get("raw_data", {}).get("expected_stock_count") or 0)
-        raw_is_latest = bool(data_status.get("raw_data", {}).get("is_latest"))
-        raw_is_latest_complete = bool(data_status.get("raw_data", {}).get("is_latest_complete"))
+        latest_day_stock_count = int(raw_status.get("latest_date_stock_count") or 0)
+        expected_stock_count = int(raw_status.get("expected_stock_count") or 0)
+        raw_is_latest = bool(raw_status.get("is_latest"))
+        raw_is_latest_complete = bool(raw_status.get("is_latest_complete"))
+        manifest_preferred = bool(raw_metrics["manifest_preferred"])
+        manifest_loaded = bool(raw_metrics["manifest_loaded"])
 
         db_synced = bool(
             latest_db_date
@@ -274,7 +329,18 @@ class AdminSummaryMetadataService:
 
         # 构建 pipeline_status
         from app.schemas import AdminPipelineStageSummary
-        raw_csv_progress = self._assess_raw_csv_progress(latest_trade_date)
+        raw_csv_progress = (
+            self._assess_raw_csv_progress(latest_trade_date)
+            if not manifest_preferred
+            else {
+                "expected_total": expected_stock_count,
+                "ready_count": raw_metrics["available_stock_count"],
+                "missing_count": max(expected_stock_count - raw_metrics["available_stock_count"], 0),
+                "stale_count": 0,
+                "invalid_count": 0,
+                "latest_local_date": latest_available_date,
+            }
+        )
 
         # 获取停牌信息（从 data_status）
         suspended_count = int(data_status.get("raw_data", {}).get("suspended_count", 0))
@@ -284,12 +350,23 @@ class AdminSummaryMetadataService:
             AdminPipelineStageSummary(
                 key="source_fetch",
                 label="Tushare 拉取",
-                status="success" if raw_is_latest_complete else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+                status="success" if raw_is_latest_complete else ("warning" if raw_status.get("exists") else "info"),
                 ready=raw_is_latest_complete,
-                value="已拉取完成" if raw_is_latest_complete else ("拉取未完成" if data_status.get("raw_data", {}).get("exists") else "待开始"),
-                meta=f"最新交易日: {latest_trade_date or '-'} | 数据最新日: {latest_db_date or '-'}",
+                value="已拉取完成" if raw_is_latest_complete else ("拉取未完成" if raw_status.get("exists") else "待开始"),
+                meta=(
+                    f"最新交易日: {latest_trade_date or '-'} | 清单最新日: {latest_available_date or '-'}"
+                    if manifest_preferred
+                    else f"最新交易日: {latest_trade_date or '-'} | 数据最新日: {latest_db_date or '-'}"
+                ),
                 detail=(
-                    f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} | 缺失 {int(raw_csv_progress.get('missing_count') or 0):,} | 过期 {int(raw_csv_progress.get('stale_count') or 0):,} | 异常 {int(raw_csv_progress.get('invalid_count') or 0):,}"
+                    (
+                        f"manifest {raw_status.get('manifest_status') or '-'} | "
+                        f"股票 {raw_metrics['available_stock_count']:,} / {expected_stock_count:,} | "
+                        f"记录 {raw_metrics['available_record_count']:,} | "
+                        f"{'已入库' if manifest_loaded else '待入库'}"
+                    )
+                    if manifest_preferred
+                    else f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} | 缺失 {int(raw_csv_progress.get('missing_count') or 0):,} | 过期 {int(raw_csv_progress.get('stale_count') or 0):,} | 异常 {int(raw_csv_progress.get('invalid_count') or 0):,}"
                     if raw_csv_progress.get("expected_total")
                     else "尚未生成原始 K 线数据"
                 ),
@@ -297,14 +374,21 @@ class AdminSummaryMetadataService:
             AdminPipelineStageSummary(
                 key="db_sync",
                 label="数据库同步",
-                status="success" if db_synced else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+                status="success" if db_synced else ("warning" if raw_status.get("exists") else "info"),
                 ready=db_synced,
                 value="已同步" if db_synced else "未同步完成",
                 meta=f"K线: {latest_db_date or '-'} | 候选: {latest_candidate_date or '-'} | 分析: {latest_analysis_date or '-'}",
                 detail=(
-                    f"候选 {int(data_status.get('candidates', {}).get('count') or 0):,} 条，分析 {int(data_status.get('analysis', {}).get('count') or 0):,} 条"
-                    if data_status.get("candidates", {}).get("exists") or data_status.get("analysis", {}).get("exists")
-                    else "候选与分析结果尚未生成"
+                    (
+                        f"manifest 入库股票 {raw_metrics['db_stock_count']:,} | 数据库记录 {raw_metrics['db_record_count']:,}"
+                        if manifest_preferred
+                        else None
+                    )
+                    or (
+                        f"候选 {int(data_status.get('candidates', {}).get('count') or 0):,} 条，分析 {int(data_status.get('analysis', {}).get('count') or 0):,} 条"
+                        if data_status.get("candidates", {}).get("exists") or data_status.get("analysis", {}).get("exists")
+                        else "候选与分析结果尚未生成"
+                    )
                 ),
             ),
             AdminPipelineStageSummary(
@@ -317,14 +401,14 @@ class AdminSummaryMetadataService:
                 detail=(
                     f"最新统计日期 {latest_analysis_date or latest_candidate_date or '-'}"
                     if data_status.get("analysis", {}).get("exists") or data_status.get("candidates", {}).get("exists")
-                    else "尚未生成可用统计结果"
+                    else "候选与分析结果尚未生成"
                 ),
             ),
         ]
 
         # 8. 构建今日状态卡片
-        raw_stock_count = data_status.get("raw_data", {}).get("stock_count", 0)
-        raw_record_count = data_status.get("raw_data", {}).get("raw_record_count", 0)
+        raw_stock_count = raw_metrics["available_stock_count"]
+        raw_record_count = raw_metrics["available_record_count"]
         candidate_count = data_status.get("candidates", {}).get("count", 0)
         analysis_count = data_status.get("analysis", {}).get("count", 0)
 
@@ -333,15 +417,19 @@ class AdminSummaryMetadataService:
             AdminSummaryCard(
                 key="raw_data",
                 label="Tushare 拉取",
-                value="已完成" if raw_is_latest_complete else ("进行中" if data_status.get("raw_data", {}).get("exists") else "待开始"),
-                status="success" if raw_is_latest_complete else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
-                meta=f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} / {int(raw_csv_progress.get('expected_total') or 0):,} 只 | {raw_record_count:,} 条",
+                value="已完成" if raw_is_latest_complete else ("进行中" if raw_status.get("exists") else "待开始"),
+                status="success" if raw_is_latest_complete else ("warning" if raw_status.get("exists") else "info"),
+                meta=(
+                    f"manifest {raw_status.get('manifest_status') or '-'} | {raw_stock_count:,} 只 | {raw_record_count:,} 条"
+                    if manifest_preferred
+                    else f"已就绪 {int(raw_csv_progress.get('ready_count') or 0):,} / {int(raw_csv_progress.get('expected_total') or 0):,} 只 | {raw_record_count:,} 条"
+                ),
             ),
             AdminSummaryCard(
                 key="candidates",
                 label="数据库同步",
                 value="已同步" if db_synced else "未同步完成",
-                status="success" if db_synced else ("warning" if data_status.get("raw_data", {}).get("exists") else "info"),
+                status="success" if db_synced else ("warning" if raw_status.get("exists") else "info"),
                 meta=f"K线 {latest_db_date or '-'} / 候选 {latest_candidate_date or '-'} / 分析 {latest_analysis_date or '-'}",
             ),
             AdminSummaryCard(
@@ -364,7 +452,9 @@ class AdminSummaryMetadataService:
         data_production = {
             "raw_data_exists": data_status.get("raw_data", {}).get("exists", False),
             "raw_data_count": raw_stock_count,
-            "raw_data_latest": latest_db_date,
+            "raw_data_latest": raw_metrics["display_date"],
+            "raw_db_latest": latest_db_date,
+            "raw_manifest_latest": latest_available_date,
             "raw_effective_latest_trade_date": latest_trade_date,
             "raw_calendar_latest_trade_date": calendar_latest_trade_date,
             "raw_ready_count": int(raw_csv_progress.get("ready_count") or 0),
@@ -374,6 +464,10 @@ class AdminSummaryMetadataService:
             "raw_suspended_count": int(data_status.get("raw_data", {}).get("suspended_count", 0)),
             "raw_long_stale_count": int(data_status.get("raw_data", {}).get("long_stale_count", 0)),
             "raw_active_expected_count": int(data_status.get("raw_data", {}).get("expected_stock_count", 0)),
+            "raw_manifest_preferred": manifest_preferred,
+            "raw_manifest_db_loaded": manifest_loaded,
+            "raw_db_stock_count": raw_metrics["db_stock_count"],
+            "raw_db_record_count": raw_metrics["db_record_count"],
             "candidates_exists": data_status.get("candidates", {}).get("exists", False),
             "candidates_count": candidate_count,
             "candidates_latest": latest_candidate_date,
@@ -490,4 +584,3 @@ class AdminSummaryMetadataService:
         # 延迟导入以避免循环依赖
         from app.api.tasks import _assess_raw_csv_progress
         return _assess_raw_csv_progress(latest_trade_date)
-

@@ -32,6 +32,7 @@ export interface Candidate {
   turnover?: number
   b1_passed?: boolean
   kdj_j?: number
+  consecutive_days?: number
 }
 
 export interface AnalysisResult {
@@ -175,6 +176,13 @@ export interface DataStatus {
     raw_record_count?: number
     latest_date?: number | string
     latest_trade_date?: string | null
+    manifest_latest_trade_date?: string | null
+    manifest_status?: string | null
+    manifest_record_count?: number
+    manifest_stock_count?: number
+    manifest_db_record_count?: number
+    manifest_db_stock_count?: number
+    manifest_loaded_to_db_at?: string | null
     is_latest?: boolean
     is_latest_complete?: boolean
   }
@@ -189,6 +197,16 @@ export interface DataFreshnessResponse {
   latest_data_date: string | null
   is_latest_data_ready: boolean
   error?: string
+}
+
+export interface DailyBatchUpdateResponse {
+  success: boolean
+  message: string
+  trade_date: string
+  task_id?: number
+  ws_url?: string
+  existing?: boolean
+  task?: Task | null
 }
 
 // K线数据
@@ -248,6 +266,7 @@ export interface TomorrowStarHistoryItem {
   candidate_count?: number
   analysis_count?: number
   trend_start_count?: number
+  consecutive_candidate_count?: number
   status?: 'pending' | 'running' | 'success' | 'failed' | 'missing' | string
   source?: string
   error_message?: string | null
@@ -261,6 +280,7 @@ export interface TomorrowStarWindowStatusItem {
   candidate_count?: number
   analysis_count?: number
   trend_start_count?: number
+  consecutive_candidate_count?: number
   reviewer?: string | null
   source?: string | null
   started_at?: string | null
@@ -498,6 +518,13 @@ export interface TaskDiagnosticsResponse {
 export interface IncrementalUpdateStatus {
   status?: 'idle' | 'running' | 'completed' | 'failed' | string
   running: boolean
+  task_id?: number | null
+  task_type?: string
+  mode?: 'daily_batch' | 'per_stock_fallback' | 'incremental_update' | 'pending' | 'idle' | string
+  target_trade_date?: string | null
+  stage_label?: string | null
+  display_title?: string
+  display_detail?: string
   progress: number
   current: number
   total: number

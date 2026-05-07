@@ -73,11 +73,30 @@ def _task_steps_completed_migration_satisfied(inspector: Any) -> bool:
     return _has_column(inspector, "tasks", "steps_completed")
 
 
+def _raw_data_manifest_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_table(inspector, "raw_data_batches")
+        and _has_table(inspector, "raw_data_manifest")
+        and _has_unique_constraint(inspector, "raw_data_manifest", "uq_raw_data_manifest_trade_date")
+        and _has_index(inspector, "raw_data_batches", "ix_raw_data_batches_status_trade_date")
+        and _has_index(inspector, "raw_data_manifest", "ix_raw_data_manifest_status_trade_date")
+    )
+
+
+def _candidate_consecutive_metrics_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_column(inspector, "candidates", "consecutive_days")
+        and _has_column(inspector, "tomorrow_star_runs", "consecutive_candidate_count")
+    )
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
     "add_stock_analysis_table.sql": _stock_analysis_migration_satisfied,
     "add_steps_completed_column.sql": _task_steps_completed_migration_satisfied,
+    "add_raw_data_manifest_tables.sql": _raw_data_manifest_migration_satisfied,
+    "add_candidate_consecutive_metrics.sql": _candidate_consecutive_metrics_migration_satisfied,
 }
 
 

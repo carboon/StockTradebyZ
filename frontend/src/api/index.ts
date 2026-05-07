@@ -16,6 +16,7 @@ import type {
   DiagnosisHistoryStatusResponse,
   DiagnosisResultResponse,
   FreshnessResponse,
+  DailyBatchUpdateResponse,
   IncrementalUpdateResponse,
   IncrementalUpdateStatus,
   KLineData,
@@ -342,7 +343,12 @@ export const apiTasks = {
   startIncrementalUpdate: (endDate?: string) =>
     api.post<null, IncrementalUpdateResponse>('/v1/tasks/start-incremental', null, { params: { end_date: endDate } }),
 
+  // 启动按交易日批量更新
+  startDailyBatchUpdate: (tradeDate?: string) =>
+    api.post<null, DailyBatchUpdateResponse>('/v1/tasks/start-daily-batch', null, { params: { trade_date: tradeDate } }),
+
   // 获取增量更新状态
+  // 仅作为兼容兜底状态源；任务展示优先使用 running/tasks 接口
   getIncrementalStatus: (options?: RequestOptions) => api.get<never, IncrementalUpdateStatus>('/v1/tasks/incremental-status', withRequestOptions(options, TIMEOUTS.short)),
 
   // 获取任务列表

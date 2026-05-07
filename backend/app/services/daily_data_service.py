@@ -350,11 +350,63 @@ class DailyDataService:
         Returns:
             更新结果: {success, total, updated, skipped, failed, message}
         """
-        # 规范化日期
         if end_date:
-            end_date = end_date.replace("-", "")
+            normalized_end_date = end_date.replace("-", "")
         else:
-            end_date = datetime.now().strftime("%Y%m%d")
+            normalized_end_date = datetime.now().strftime("%Y%m%d")
+        trade_date = f"{normalized_end_date[:4]}-{normalized_end_date[4:6]}-{normalized_end_date[6:]}"
+
+        if progress_callback:
+            progress_callback({
+                "current": 0,
+                "total": 1,
+                "progress": 0,
+                "current_code": trade_date,
+                "updated_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "message": f"按交易日批量刷新 {trade_date}",
+                "status": "starting",
+            })
+
+        try:
+            from app.services.daily_batch_update_service import DailyBatchUpdateService
+            with DailyBatchUpdateService(token=self.token) as batch_service:
+                batch_result = batch_service.update_trade_date(trade_date, source="incremental_update")
+        except Exception as exc:
+            logger.warning("按交易日批量刷新失败，回退旧增量逻辑: %s", exc)
+            batch_result = {
+                "ok": False,
+                "message": str(exc),
+            }
+
+        if batch_result.get("ok"):
+            updated_count = int(batch_result.get("stock_count") or batch_result.get("db_stock_count") or 0)
+            message = f"按交易日批量刷新完成: {trade_date}，写入 {updated_count} 只股票"
+            if progress_callback:
+                progress_callback({
+                    "current": 1,
+                    "total": 1,
+                    "progress": 100,
+                    "current_code": trade_date,
+                    "updated_count": updated_count,
+                    "skipped_count": 0,
+                    "failed_count": 0,
+                    "message": message,
+                    "status": "completed",
+                })
+            return {
+                "success": True,
+                "ok": True,
+                "mode": "daily_batch",
+                "total": 1,
+                "updated": updated_count,
+                "skipped": 0,
+                "failed": 0,
+                "trade_date": trade_date,
+                "message": message,
+                "record_count": int(batch_result.get("record_count") or 0),
+            }
 
         # 获取需要更新的股票列表
         codes = self.get_stock_list()
@@ -402,7 +454,7 @@ class DailyDataService:
                 start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
 
             # 获取数据
-            df = self.fetch_daily_data(code, start_date, end_date)
+            df = self.fetch_daily_data(code, start_date, normalized_end_date)
 
             if df is None or df.empty:
                 failed += 1
@@ -423,12 +475,21 @@ class DailyDataService:
 
         return {
             "success": True,
+            "ok": failed == 0,
+            "mode": "per_stock_fallback",
             "total": total,
             "updated": updated,
             "skipped": skipped,
             "failed": failed,
             "failed_codes": failed_codes,
-            "message": f"更新完成: {updated} 更新, {skipped} 跳过, {failed} 失败"
+            "message": (
+                f"更新完成: {updated} 更新, {skipped} 跳过, {failed} 失败"
+                + (
+                    f" | 已回退按股模式: {batch_result.get('message')}"
+                    if batch_result.get("message")
+                    else ""
+                )
+            )
         }
 
     def get_data_status(self) -> dict:
