@@ -162,8 +162,7 @@ def invalidate_stock_cache(code: str) -> None:
 
 def invalidate_watchlist_cache(user_id: int) -> None:
     """清除用户自选股缓存"""
-    cache.delete(build_watchlist_cache_key(user_id, None))
-    cache.delete(build_watchlist_cache_key(user_id, "latest"))
+    cache.delete_prefix(f"watchlist:{user_id}:")
 
 
 def invalidate_candidates_cache() -> None:

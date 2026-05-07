@@ -27,19 +27,28 @@ EOF
 }
 
 # 解析参数
-ARGS=()
+REMOVE_VOLUMES=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help|help)
             show_help
             exit 0
             ;;
-        *)
-            ARGS+=("$1")
+        -v|--volumes)
+            REMOVE_VOLUMES="-v"
             shift
+            ;;
+        *)
+            echo "未知参数: $1"
+            show_help
+            exit 1
             ;;
     esac
 done
 
 # 调用统一运行脚本
-exec "$SCRIPT_DIR/deploy/scripts/start.sh" down "${ARGS[@]}"
+if [ -n "$REMOVE_VOLUMES" ]; then
+    exec "$SCRIPT_DIR/deploy/scripts/start.sh" down "$REMOVE_VOLUMES"
+else
+    exec "$SCRIPT_DIR/deploy/scripts/start.sh" down
+fi

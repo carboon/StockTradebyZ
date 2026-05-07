@@ -1,6 +1,6 @@
 #!/bin/bash
-# StockTrader 本地开发启动入口
-# 默认启动 dev-like-prod 环境
+# StockTrader 本地启动入口
+# 默认启动可用的统一入口环境
 
 set -euo pipefail
 
@@ -32,9 +32,9 @@ log_error() {
 # 显示帮助信息
 show_help() {
     cat << EOF
-StockTrader 本地开发启动脚本
+StockTrader 本地启动脚本
 
-默认启动 dev-like-prod 环境 (Docker)
+默认启动统一入口环境 (Docker)
 
 用法:
   $0 [options] [args...]
@@ -46,14 +46,14 @@ StockTrader 本地开发启动脚本
 
 说明:
   此脚本是根目录的快捷启动入口，默认调用:
-    ./deploy/scripts/start.sh dev --build
+    ./deploy/scripts/start.sh prod --build
 
   如需更多控制 (如启动生产环境、查看日志等)，请直接使用:
     ./deploy/scripts/start.sh
 
 示例:
-  $0                  # 启动开发环境 (默认构建)
-  $0 --no-build       # 启动开发环境 (不构建)
+  $0                  # 启动统一入口环境 (默认构建)
+  $0 --no-build       # 启动统一入口环境 (不构建)
 
 访问地址:
   - 主入口:   http://127.0.0.1:8080
@@ -111,7 +111,7 @@ if [ ! -f "$SCRIPT_DIR/deploy/scripts/start.sh" ]; then
     exit 1
 fi
 
-log_info "启动 dev-like-prod 环境..."
+log_info "启动统一入口环境..."
 
 # 调用部署脚本
-exec "$SCRIPT_DIR/deploy/scripts/start.sh" dev $BUILD_ARG $NO_CACHE_ARG
+exec "$SCRIPT_DIR/deploy/scripts/start.sh" prod $BUILD_ARG $NO_CACHE_ARG

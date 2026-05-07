@@ -346,7 +346,7 @@
             <span>每日检查历史 (近180个交易日收盘后回放)</span>
             <div class="history-actions">
               <span v-if="refreshingHistory" class="refreshing-text">
-                正在刷新... ({{ historyData.length }}/180)
+                正在刷新第 {{ historyPage }} 页数据...
               </span>
               <el-button
                 type="primary"

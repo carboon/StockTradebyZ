@@ -750,6 +750,10 @@ class DailyDataService:
         }
 
 
+# 兼容旧类名，避免历史调用链仍引用旧实现时直接抛 NameError
+DailyBatchUpdateService = DailyDataService
+
+
 # 全局实例
 _daily_data_service: Optional[DailyDataService] = None
 

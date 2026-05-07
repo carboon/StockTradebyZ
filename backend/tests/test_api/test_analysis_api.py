@@ -1113,7 +1113,7 @@ def test_get_diagnosis_history_read_only_no_recalc(test_client: TestClient) -> N
     """
     with patch("app.api.analysis.analysis_service") as mock_service:
         # 模拟历史文件不存在，返回空列表（不触发计算）
-        mock_service.get_stock_history_checks.return_value = []
+        mock_service.get_stock_history_checks.return_value = ([], 0)
 
         response = test_client.get("/api/v1/analysis/diagnosis/600000/history")
 
@@ -1126,4 +1126,4 @@ def test_get_diagnosis_history_read_only_no_recalc(test_client: TestClient) -> N
         assert "message" in data
 
         # 确保没有调用任何计算方法（只读模式）
-        mock_service.get_stock_history_checks.assert_called_once_with("600000", 30)
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 180, 1, 10)

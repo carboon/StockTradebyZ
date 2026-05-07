@@ -452,20 +452,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Plus, Delete } from '@element-plus/icons-vue'
 import { apiWatchlist, apiStock, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
+import { useAuthStore } from '@/store/auth'
 import type { KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
 import type { ECharts } from 'echarts/core'
 
 const router = useRouter()
 const { isMobile } = useResponsive()
-const WATCHLIST_STATE_KEY = 'stocktrade:watchlist:state'
+const authStore = useAuthStore()
+const WATCHLIST_STATE_KEY_PREFIX = 'stocktrade:watchlist:state'
 const WATCHLIST_CACHE_TTL_MS = 5 * 60 * 1000
-const WATCHLIST_CHART_CACHE_KEY = 'stocktrade:watchlist:chart-cache'
+const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache'
 const WATCHLIST_CHART_CACHE_TTL_MS = 30 * 60 * 1000
 const INITIAL_CHART_DAYS = 60
 const FULL_CHART_DAYS = 120
@@ -492,6 +494,14 @@ type WatchlistChartCacheEntry = {
 }
 
 type WatchlistChartCacheMap = Record<string, WatchlistChartCacheEntry>
+
+function getWatchlistStateKey() {
+  return `${WATCHLIST_STATE_KEY_PREFIX}:${authStore.user?.id || 'guest'}`
+}
+
+function getWatchlistChartCacheKey() {
+  return `${WATCHLIST_CHART_CACHE_KEY_PREFIX}:${authStore.user?.id || 'guest'}`
+}
 
 const watchlist = ref<WatchlistItem[]>([])
 const selectedStock = ref<WatchlistItem | null>(null)
@@ -599,6 +609,31 @@ function cancelWatchlistPageRequests() {
   requestControllers.clear()
 }
 
+function resetWatchlistViewState(options?: { clearStorageForUserId?: number | null }) {
+  watchlist.value = []
+  selectedStock.value = null
+  analysisHistory.value = []
+  trendData.value = {
+    outlook: 'neutral',
+    support: null,
+    resistance: null,
+  }
+  chartDataCache.clear()
+  chartDataDaysCache.clear()
+  analysisCache.clear()
+  isLoading.value = false
+  isDataReady.value = false
+  isHydratedFromCache.value = false
+  isRefreshingList.value = false
+  loadingChart.value = false
+  loadingAnalysis.value = false
+  analyzing.value = false
+  if (options && Object.prototype.hasOwnProperty.call(options, 'clearStorageForUserId')) {
+    clearWatchlistState(options.clearStorageForUserId)
+    clearChartCache(options.clearStorageForUserId)
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
   hydrateWatchlistState()
@@ -632,6 +667,19 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   cancelWatchlistPageRequests()
 })
+
+watch(
+  () => authStore.user?.id,
+  (newUserId, oldUserId) => {
+    selectionSequence += 1
+    cancelWatchlistPageRequests()
+    resetWatchlistViewState(
+      oldUserId != null && oldUserId !== newUserId
+        ? { clearStorageForUserId: oldUserId }
+        : undefined,
+    )
+  },
+)
 
 function handleResize() {
   chartInstance?.resize()
@@ -1227,7 +1275,7 @@ function persistWatchlistState() {
     cachedAt: Date.now(),
   }
 
-  window.localStorage.setItem(WATCHLIST_STATE_KEY, JSON.stringify(state))
+  window.localStorage.setItem(getWatchlistStateKey(), JSON.stringify(state))
 }
 
 function hydrateWatchlistState() {
@@ -1248,7 +1296,7 @@ function hydrateWatchlistState() {
 function loadWatchlistState(): WatchlistViewState | null {
   if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
 
-  const raw = window.localStorage.getItem(WATCHLIST_STATE_KEY)
+  const raw = window.localStorage.getItem(getWatchlistStateKey())
   if (!raw) return null
 
   try {
@@ -1264,14 +1312,21 @@ function loadWatchlistState(): WatchlistViewState | null {
   }
 }
 
-function clearWatchlistState() {
+function clearWatchlistState(userIdToClear?: number | null) {
   if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
-  window.localStorage.removeItem(WATCHLIST_STATE_KEY)
+  const key = userIdToClear != null ? `${WATCHLIST_STATE_KEY_PREFIX}:${userIdToClear}` : getWatchlistStateKey()
+  window.localStorage.removeItem(key)
+}
+
+function clearChartCache(userIdToClear?: number | null) {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
+  const key = userIdToClear != null ? `${WATCHLIST_CHART_CACHE_KEY_PREFIX}:${userIdToClear}` : getWatchlistChartCacheKey()
+  window.localStorage.removeItem(key)
 }
 
 function loadChartCache(code: string): WatchlistChartCacheEntry | null {
   if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
-  const raw = window.localStorage.getItem(WATCHLIST_CHART_CACHE_KEY)
+  const raw = window.localStorage.getItem(getWatchlistChartCacheKey())
   if (!raw) return null
 
   try {
@@ -1280,12 +1335,12 @@ function loadChartCache(code: string): WatchlistChartCacheEntry | null {
     if (!entry) return null
     if (!entry.cachedAt || Date.now() - entry.cachedAt > WATCHLIST_CHART_CACHE_TTL_MS) {
       delete cache[code]
-      window.localStorage.setItem(WATCHLIST_CHART_CACHE_KEY, JSON.stringify(cache))
+      window.localStorage.setItem(getWatchlistChartCacheKey(), JSON.stringify(cache))
       return null
     }
     return entry
   } catch {
-    window.localStorage.removeItem(WATCHLIST_CHART_CACHE_KEY)
+    window.localStorage.removeItem(getWatchlistChartCacheKey())
     return null
   }
 }
@@ -1305,7 +1360,7 @@ function setChartCache(code: string, data: KLineData, days: number) {
 
   let cache: WatchlistChartCacheMap = {}
   try {
-    cache = JSON.parse(window.localStorage.getItem(WATCHLIST_CHART_CACHE_KEY) || '{}') as WatchlistChartCacheMap
+    cache = JSON.parse(window.localStorage.getItem(getWatchlistChartCacheKey()) || '{}') as WatchlistChartCacheMap
   } catch {
     cache = {}
   }
@@ -1315,7 +1370,7 @@ function setChartCache(code: string, data: KLineData, days: number) {
     .sort((a, b) => b.cachedAt - a.cachedAt)
     .slice(0, 12)
   const trimmedCache = Object.fromEntries(trimmedEntries.map((entry) => [entry.code, entry]))
-  window.localStorage.setItem(WATCHLIST_CHART_CACHE_KEY, JSON.stringify(trimmedCache))
+  window.localStorage.setItem(getWatchlistChartCacheKey(), JSON.stringify(trimmedCache))
 }
 
 function queueDetailRefresh(target: WatchlistItem) {

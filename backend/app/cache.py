@@ -181,6 +181,29 @@ class RedisCache:
         if self._fallback_to_memory:
             self._memory_store.pop(cache_key, None)
 
+    def delete_prefix(self, key_prefix: str) -> int:
+        """删除指定前缀下的所有缓存项"""
+        cache_key_prefix = self._make_key(key_prefix)
+        deleted = 0
+
+        if self.is_redis_available and self._redis:
+            try:
+                keys = self._redis.keys(f"{cache_key_prefix}*")
+                if keys:
+                    deleted += len(keys)
+                    self._redis.delete(*keys)
+            except Exception as e:
+                logger.warning(f"Redis DELETE PREFIX 失败: {e}")
+                self._redis_available = False
+
+        if self._fallback_to_memory:
+            keys_to_delete = [k for k in list(self._memory_store.keys()) if k.startswith(cache_key_prefix)]
+            for key in keys_to_delete:
+                self._memory_store.pop(key, None)
+                deleted += 1
+
+        return deleted
+
     def clear(self) -> None:
         """清空所有缓存（只清空带当前前缀的）"""
         if self.is_redis_available and self._redis:

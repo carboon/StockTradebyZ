@@ -120,6 +120,8 @@ const authStore = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
 const registerQuestionText = ref('系统管理员的微信名是什么')
+const HEALTH_CHECK_RETRIES = 3
+const HEALTH_CHECK_DELAY_MS = 1000
 
 // 后端健康状态
 const backendHealthy = ref(true)
@@ -147,13 +149,37 @@ const backendStatus = computed(() => {
 const registerQuestion = computed(() => registerQuestionText.value || '系统管理员的微信名是什么')
 
 async function checkBackend() {
+  for (let attempt = 0; attempt <= HEALTH_CHECK_RETRIES; attempt += 1) {
+    const result = await checkHealth()
+    if (result !== null) {
+      backendHealthy.value = true
+      ElMessage.success('后端服务连接正常')
+      return
+    }
+    if (attempt < HEALTH_CHECK_RETRIES) {
+      await new Promise((resolve) => setTimeout(resolve, HEALTH_CHECK_DELAY_MS))
+    }
+  }
+
+  backendHealthy.value = false
+  ElMessage.warning('后端服务仍不可用')
+}
+
+async function refreshBackendState(silent: boolean = false) {
   const result = await checkHealth()
-  backendHealthy.value = result !== null
-  if (backendHealthy.value) {
-    ElMessage.success('后端服务连接正常')
-  } else {
+  if (result !== null) {
+    backendHealthy.value = true
+    if (!silent) {
+      ElMessage.success('后端服务连接正常')
+    }
+    return true
+  }
+
+  backendHealthy.value = false
+  if (!silent) {
     ElMessage.warning('后端服务仍不可用')
   }
+  return false
 }
 
 const validateConfirm = (_rule: unknown, value: string, callback: (err?: Error) => void) => {
@@ -202,7 +228,7 @@ async function handleRegister() {
       ElMessage.error(message)
       // 如果是网络错误，更新后端状态
       if (message.includes('fetch') || message.includes('网络') || message.includes('连接') || message.includes('ECONNREFUSED')) {
-        backendHealthy.value = false
+        void refreshBackendState(true)
       }
     } finally {
       loading.value = false
@@ -218,7 +244,10 @@ onMounted(async () => {
   } catch {
     // ignore and keep default prompt
   }
-  await checkBackend()
+  await refreshBackendState(true)
+  if (!backendHealthy.value) {
+    await checkBackend()
+  }
 })
 </script>
 

@@ -24,6 +24,8 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from app.cache import cache
+from app.api.cache_decorators import build_watchlist_cache_key, invalidate_watchlist_cache
 from app.models import Stock, User, Watchlist, WatchlistAnalysis
 
 
@@ -137,6 +139,24 @@ def test_get_watchlist_empty(test_client_with_db) -> None:
     assert "total" in data
     assert data["total"] == 0
     assert data["items"] == []
+
+
+@pytest.mark.api
+def test_watchlist_cache_invalidation_clears_all_entries(test_client_with_db) -> None:
+    user_id = test_client_with_db.db.query(User.id).first()[0]
+    test_client_with_db.db.add(Watchlist(user_id=user_id, code="600000", is_active=True))
+    test_client_with_db.db.commit()
+
+    cache.clear()
+    cache_key_latest = build_watchlist_cache_key(user_id, None)
+    cache_key_dated = build_watchlist_cache_key(user_id, "2025-05-07:1:2025-05-06T00:00:00")
+    cache.set(cache_key_latest, {"items": []})
+    cache.set(cache_key_dated, {"items": []})
+
+    invalidate_watchlist_cache(user_id)
+
+    assert cache.get(cache_key_latest) is None
+    assert cache.get(cache_key_dated) is None
 
 
 @pytest.mark.api

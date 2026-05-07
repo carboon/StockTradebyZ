@@ -796,16 +796,20 @@ def test_get_candidates_history(analysis_service, tmp_path):
         with open(file_path, "w") as f:
             json.dump(data, f)
 
-    # Mock整个导入的settings模块
-    with patch("app.services.analysis_service.settings") as mock_settings:
-        with patch("app.services.analysis_service.ROOT", test_root):
-            mock_settings.candidates_dir = candidates_dir
-            result = analysis_service.get_candidates_history(limit=30)
+    mock_candidate_service = MagicMock()
+    mock_candidate_service.get_candidate_dates.return_value = [
+        {"date": "2024-01-12", "count": 1, "pass": 0},
+        {"date": "2024-01-11", "count": 1, "pass": 0},
+        {"date": "2024-01-10", "count": 1, "pass": 0},
+    ]
 
-            assert isinstance(result, list)
-            assert len(result) == 3
-            assert "date" in result[0]
-            assert "count" in result[0]
+    with patch("app.services.candidate_service.get_candidate_service", return_value=mock_candidate_service):
+        result = analysis_service.get_candidates_history(limit=30)
+
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert "date" in result[0]
+        assert "count" in result[0]
 
 
 @pytest.mark.service
@@ -820,13 +824,16 @@ def test_get_candidates_history_empty(analysis_service, tmp_path):
     candidates_dir = test_root / "candidates"
     candidates_dir.mkdir(parents=True, exist_ok=True)
 
-    # Mock整个导入的settings模块
-    with patch("app.services.analysis_service.settings") as mock_settings:
-        with patch("app.services.analysis_service.ROOT", test_root):
-            mock_settings.candidates_dir = candidates_dir
-            result = analysis_service.get_candidates_history()
+    mock_candidate_service = MagicMock()
+    mock_candidate_service.get_candidate_dates.return_value = []
 
-            assert result == []
+    with patch("app.services.candidate_service.get_candidate_service", return_value=mock_candidate_service):
+        with patch("app.services.analysis_service.settings") as mock_settings:
+            with patch("app.services.analysis_service.ROOT", test_root):
+                mock_settings.candidates_dir = candidates_dir
+                result = analysis_service.get_candidates_history()
+
+                assert result == []
 
 
 # ============================================
@@ -927,16 +934,19 @@ def test_get_analysis_results_latest(analysis_service, tmp_path):
     with open(suggestion_file, "w") as f:
         json.dump(suggestion_data, f)
 
-    # Mock整个导入的settings模块
-    with patch("app.services.analysis_service.settings") as mock_settings:
-        with patch("app.services.analysis_service.ROOT", test_root):
-            mock_settings.candidates_dir = candidates_dir
-            mock_settings.review_dir = review_dir
-            mock_settings.min_score_threshold = 4.0
-            result = analysis_service.get_analysis_results()
+    mock_candidate_service = MagicMock()
+    mock_candidate_service.get_latest_candidate_date.return_value = None
 
-            assert result["pick_date"] == "2024-01-15"
-            assert result["total"] == 1
+    with patch("app.services.candidate_service.get_candidate_service", return_value=mock_candidate_service):
+        with patch("app.services.analysis_service.settings") as mock_settings:
+            with patch("app.services.analysis_service.ROOT", test_root):
+                mock_settings.candidates_dir = candidates_dir
+                mock_settings.review_dir = review_dir
+                mock_settings.min_score_threshold = 4.0
+                result = analysis_service.get_analysis_results()
+
+                assert result["pick_date"] == "2024-01-15"
+                assert result["total"] == 1
 
 
 @pytest.mark.service

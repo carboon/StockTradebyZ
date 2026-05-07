@@ -8,6 +8,8 @@ import { apiAuth } from '@/api'
 import type { UserInfo, LoginResponse } from '@/types'
 
 const TOKEN_KEY = 'stocktrade_token'
+const WATCHLIST_STATE_KEY_PREFIX = 'stocktrade:watchlist:state'
+const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache'
 
 export const useAuthStore = defineStore('auth', () => {
   // --- State ---
@@ -24,10 +26,14 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(username: string, password: string): Promise<void> {
     loading.value = true
     try {
+      const previousUserId = user.value?.id ?? null
       const res: LoginResponse = await apiAuth.login(username, password)
       token.value = res.access_token
       user.value = res.user
       localStorage.setItem(TOKEN_KEY, res.access_token)
+      if (previousUserId !== null && previousUserId !== res.user.id) {
+        clearScopedLocalStorage(previousUserId)
+      }
     } finally {
       loading.value = false
     }
@@ -36,19 +42,27 @@ export const useAuthStore = defineStore('auth', () => {
   async function register(username: string, password: string, adminWechat: string, displayName?: string): Promise<void> {
     loading.value = true
     try {
+      const previousUserId = user.value?.id ?? null
       const res: LoginResponse = await apiAuth.register(username, password, adminWechat, displayName)
       token.value = res.access_token
       user.value = res.user
       localStorage.setItem(TOKEN_KEY, res.access_token)
+      if (previousUserId !== null && previousUserId !== res.user.id) {
+        clearScopedLocalStorage(previousUserId)
+      }
     } finally {
       loading.value = false
     }
   }
 
   function logout(): void {
+    const previousUserId = user.value?.id ?? null
     token.value = null
     user.value = null
     localStorage.removeItem(TOKEN_KEY)
+    if (previousUserId !== null) {
+      clearScopedLocalStorage(previousUserId)
+    }
   }
 
   async function fetchMe(): Promise<void> {
@@ -68,6 +82,23 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  function clearScopedLocalStorage(userId?: number | null): void {
+    if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
+
+    const keysToRemove: string[] = []
+    const statePrefix = userId != null ? `${WATCHLIST_STATE_KEY_PREFIX}:${userId}` : `${WATCHLIST_STATE_KEY_PREFIX}:`
+    const chartPrefix = userId != null ? `${WATCHLIST_CHART_CACHE_KEY_PREFIX}:${userId}` : `${WATCHLIST_CHART_CACHE_KEY_PREFIX}:`
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (!key) continue
+      if (key.startsWith(statePrefix) || key.startsWith(chartPrefix)) {
+        keysToRemove.push(key)
+      }
+    }
+
+    keysToRemove.forEach((key) => localStorage.removeItem(key))
+  }
+
   return {
     token,
     user,
@@ -79,5 +110,6 @@ export const useAuthStore = defineStore('auth', () => {
     logout,
     fetchMe,
     loadFromStorage,
+    clearScopedLocalStorage,
   }
 })
