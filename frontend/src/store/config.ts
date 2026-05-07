@@ -47,7 +47,7 @@ export const useConfigStore = defineStore('config', () => {
     if (!status.candidates?.exists) missing.push('候选结果')
     if (!status.analysis?.exists) missing.push('分析结果')
 
-    if (status.raw_data?.exists && status.raw_data?.is_latest) {
+    if (status.raw_data?.exists && status.raw_data?.is_latest_complete) {
       if (!status.candidates?.exists && !status.analysis?.exists) {
         return '原始数据已存在且已是最新交易日，当前只需补全候选结果和分析结果；重新初始化时会自动跳过重新抓取。'
       }

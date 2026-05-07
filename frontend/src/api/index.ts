@@ -8,6 +8,7 @@ import type {
   CandidatesResponse,
   ConfigItem,
   ConfigResponse,
+  DataFreshnessResponse,
   DataStatus,
   DiagnosisAnalyzeTaskResponse,
   DiagnosisHistoryResponse,
@@ -359,6 +360,9 @@ export const apiTasks = {
 
   // 清空历史任务
   clearTasks: () => api.delete<never, { status: string; message: string }>('/v1/tasks/clear', { timeout: TIMEOUTS.short }),
+
+  // 查询 Tushare 日线数据最新时效
+  getDataFreshness: () => api.get<never, DataFreshnessResponse>('/v1/tasks/data-freshness', { timeout: TIMEOUTS.standard }),
 }
 
 export const apiAuth = {

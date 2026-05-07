@@ -23,6 +23,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+import pandas as pd
+
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
@@ -335,6 +337,9 @@ class IncrementalFillService:
                 # 对该日期的股票进行增量更新
                 # 注意：这里需要为每个日期单独处理
                 # 使用 daily_service 的增量更新逻辑，但限制到特定日期
+                raw_dir = ROOT / settings.raw_data_dir
+                raw_dir.mkdir(parents=True, exist_ok=True)
+
                 for code in codes:
                     try:
                         df = daily_service.fetch_daily_data(
@@ -344,6 +349,7 @@ class IncrementalFillService:
                         )
                         if df is not None and not df.empty:
                             daily_service.save_daily_data(df)
+                            self._sync_csv_for_code(code, df, raw_dir)
                     except Exception as e:
                         logger.debug(f"补齐 {code} {trade_date} 数据失败: {e}")
                         continue
@@ -381,6 +387,32 @@ class IncrementalFillService:
                 "gap_end": missing_dates[-1] if missing_dates else None,
             },
         )
+
+    @staticmethod
+    def _sync_csv_for_code(code: str, new_df: pd.DataFrame, raw_dir: Path) -> None:
+        """将新增日线数据同步到 CSV 文件。
+
+        读取已有 CSV（如果存在），合并新数据（按 date 去重），写回。
+        CSV 列格式：date, open, close, high, low, volume
+        """
+        csv_path = raw_dir / f"{code}.csv"
+
+        # 转换 DataFrame 列为 CSV 格式
+        csv_df = new_df.rename(columns={"trade_date": "date"})
+        csv_df = csv_df[["date", "open", "close", "high", "low", "volume"]].copy()
+        csv_df["date"] = pd.to_datetime(csv_df["date"])
+
+        if csv_path.exists():
+            try:
+                existing = pd.read_csv(csv_path)
+                if not existing.empty:
+                    existing["date"] = pd.to_datetime(existing["date"])
+                    csv_df = pd.concat([existing, csv_df], ignore_index=True)
+            except Exception:
+                pass
+
+        csv_df = csv_df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
+        csv_df.to_csv(csv_path, index=False)
 
     def fill_tomorrow_star_results(
         self,

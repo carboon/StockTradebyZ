@@ -419,6 +419,13 @@ async def get_data_status(
     return result
 
 
+@router.get("/data-freshness")
+async def get_data_freshness(user=Depends(require_user)) -> dict:
+    """实时查询 Tushare 日线数据最新时效"""
+    service = TushareService()
+    return service.get_data_freshness()
+
+
 @router.post("/start", response_model=TaskResponse)
 async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> TaskResponse:
     """启动全量更新"""

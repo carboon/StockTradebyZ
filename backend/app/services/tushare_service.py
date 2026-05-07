@@ -27,6 +27,7 @@ class TushareService:
     # check_data_status 缓存（非实时系统，使用较长缓存时间）
     _data_status_cache: dict[str, tuple[float, dict]] = {}
     _data_status_cache_ttl = 300  # 5分钟缓存 - 数据只有在交易完成后才会更新
+    _latest_trade_date_completion_threshold = 0.95
 
     def __init__(self, token: Optional[str] = None):
         if token is not None:
@@ -107,6 +108,32 @@ class TushareService:
         if text.endswith(".BJ"):
             return "BJ"
         return None
+
+    @classmethod
+    def _is_latest_date_complete(
+        cls,
+        *,
+        latest_date: Optional[str],
+        latest_trade_date: Optional[str],
+        latest_date_stock_count: int,
+        expected_stock_count: int,
+        suspended_count: int = 0,
+        long_stale_count: int = 0,
+    ) -> bool:
+        if not latest_date or not latest_trade_date:
+            return False
+        if latest_date != latest_trade_date:
+            return False
+        if expected_stock_count <= 0:
+            return False
+
+        active_expected_count = expected_stock_count - int(suspended_count or 0) - int(long_stale_count or 0)
+        if active_expected_count <= 0:
+            return False
+
+        # 允许少量停牌/退市等自然缺失，但不接受明显零星数据。
+        threshold = max(1, int(active_expected_count * cls._latest_trade_date_completion_threshold))
+        return int(latest_date_stock_count or 0) >= threshold
 
     def find_stock_by_code(self, code: str) -> Optional[dict]:
         """通过6位代码查找股票基础信息"""
@@ -345,6 +372,44 @@ class TushareService:
         except Exception:
             return latest_trade_date
 
+    def get_data_freshness(self) -> dict:
+        """实时查询 Tushare 日线数据的最新时效信息。
+
+        通过查询参考股票（000001.SZ）近7天日线数据，
+        判断 Tushare 上最新可用的数据日期。
+        实时查询，不使用缓存。
+        """
+        result = {
+            "query_time": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+            "latest_calendar_trade_date": None,
+            "latest_data_date": None,
+            "is_latest_data_ready": False,
+        }
+
+        try:
+            latest_cal = self.get_latest_trade_date()
+            result["latest_calendar_trade_date"] = latest_cal
+
+            if not latest_cal or not self.token:
+                return result
+
+            today = datetime.now().strftime("%Y%m%d")
+            recent_start = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
+
+            acquire_tushare_slot("daily")
+            df = self.pro.daily(ts_code="000001.SZ", start_date=recent_start, end_date=today)
+
+            if df is not None and not df.empty:
+                latest = str(df["trade_date"].max())
+                result["latest_data_date"] = f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+
+                normalized_cal = latest_cal.replace("-", "")
+                result["is_latest_data_ready"] = normalized_cal in df["trade_date"].values
+        except Exception as e:
+            result["error"] = str(e)
+
+        return result
+
     def get_suspended_stocks(self, trade_date: str) -> set[str]:
         """获取指定日期的停牌股票代码集合
 
@@ -540,9 +605,14 @@ class TushareService:
                         and status["raw_data"]["latest_date"] == latest_trade_date
                     )
                     status["raw_data"]["is_latest_complete"] = bool(
-                        status["raw_data"]["is_latest"]
-                        and active_expected_count > 0
-                        and status["raw_data"]["latest_date_stock_count"] >= active_expected_count
+                        self._is_latest_date_complete(
+                            latest_date=status["raw_data"]["latest_date"],
+                            latest_trade_date=latest_trade_date,
+                            latest_date_stock_count=int(status["raw_data"]["latest_date_stock_count"] or 0),
+                            expected_stock_count=expected_total,
+                            suspended_count=len(suspended_codes),
+                            long_stale_count=len(long_stale_codes),
+                        )
                     )
 
                 candidate_count = db.execute(select(func.count()).select_from(Candidate)).scalar() or 0

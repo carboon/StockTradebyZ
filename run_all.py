@@ -105,6 +105,10 @@ def _emit_observability_progress(
     full_count: int | None = None,
     csv_imported_count: int | None = None,
     csv_failed_count: int | None = None,
+    current: int | None = None,
+    total: int | None = None,
+    initial_completed: int | None = None,
+    completed_in_run: int | None = None,
 ) -> None:
     payload = {
         "kind": "stage",
@@ -116,6 +120,10 @@ def _emit_observability_progress(
         "full_count": full_count,
         "csv_imported_count": csv_imported_count,
         "csv_failed_count": csv_failed_count,
+        "current": current,
+        "total": total,
+        "initial_completed": initial_completed,
+        "completed_in_run": completed_in_run,
     }
     print(f"{PROGRESS_JSON_PREFIX} {json.dumps(payload, ensure_ascii=False)}", flush=True)
 

@@ -176,10 +176,19 @@ export interface DataStatus {
     latest_date?: number | string
     latest_trade_date?: string | null
     is_latest?: boolean
+    is_latest_complete?: boolean
   }
   candidates: { exists: boolean; count: number; latest_date?: string }
   analysis: { exists: boolean; count: number; latest_date?: string }
   kline: { exists: boolean; count: number; latest_date?: string | null }
+}
+
+export interface DataFreshnessResponse {
+  query_time: string
+  latest_calendar_trade_date: string | null
+  latest_data_date: string | null
+  is_latest_data_ready: boolean
+  error?: string
 }
 
 // K线数据

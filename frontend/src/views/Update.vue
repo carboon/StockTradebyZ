@@ -30,6 +30,12 @@
                 >
                   重新执行全量初始化
                 </el-button>
+                <el-button
+                  :loading="checkingFreshness"
+                  @click="checkDataFreshness"
+                >
+                  查询最新数据时效
+                </el-button>
               </div>
               <div v-if="hasActiveBackgroundWork" class="running-hint">
                 <el-icon class="is-loading"><Loading /></el-icon>
@@ -918,6 +924,7 @@ const bootstrapStarting = ref(false)
 const startingUpdate = ref(false)
 const startingFullUpdate = ref(false)
 const checkingData = ref(false)
+const checkingFreshness = ref(false)
 const diagnosticsLoading = ref(false)
 const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
 
@@ -1681,6 +1688,31 @@ async function startFullUpdate() {
     ElMessage.error(isInitializationPendingError(error) ? '系统尚未完成初始化' : (error.message || '启动失败'))
   } finally {
     startingFullUpdate.value = false
+  }
+}
+
+async function checkDataFreshness() {
+  checkingFreshness.value = true
+  try {
+    const res = await apiTasks.getDataFreshness()
+    const lines = [
+      `<strong>查询时间：</strong>${formatDateTime(res.query_time)}`,
+      `<strong>最新交易日（日历）：</strong>${res.latest_calendar_trade_date || '-'}`,
+      `<strong>最新日线数据日期：</strong>${res.latest_data_date || '-'}`,
+      `<strong>当日数据已就绪：</strong>${res.is_latest_data_ready ? '是' : '否'}`,
+    ]
+    if (res.error) {
+      lines.push(`<strong>错误：</strong>${res.error}`)
+    }
+    await ElMessageBox.alert(lines.join('<br/>'), '最新数据时效', {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '关闭',
+    })
+  } catch (error: any) {
+    console.error('checkDataFreshness failed:', error)
+    ElMessage.error(error.response?.data?.detail || error.message || '查询失败')
+  } finally {
+    checkingFreshness.value = false
   }
 }
 

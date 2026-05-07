@@ -758,8 +758,8 @@ def fetch_one_incremental(
         # 文件不存在，使用默认起始日期
         start = "20190101"
 
-    # 如果起始日期已经大于结束日期，无需更新
-    if start >= end:
+    # 如果起始日期已经在结束日期之后，无需更新
+    if start > end:
         result["success"] = True
         result["updated"] = False
         return result

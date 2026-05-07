@@ -265,6 +265,7 @@ def test_start_full_update_auto_resume_when_raw_data_is_latest(test_client_with_
                 "latest_date": "2026-04-30",
                 "latest_trade_date": "2026-04-30",
                 "is_latest": True,
+                "is_latest_complete": True,
             },
             "candidates": {"exists": False, "count": 0, "latest_date": None},
             "analysis": {"exists": False, "count": 0, "latest_date": None},
