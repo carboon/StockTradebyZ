@@ -184,6 +184,70 @@ compose_run() {
     "${DOCKER_COMPOSE[@]}" $(get_compose_args "$mode") "$@"
 }
 
+append_unique_service() {
+    local service="$1"
+    case " ${BUILD_TARGETS[*]} " in
+        *" ${service} "*) ;;
+        *) BUILD_TARGETS+=("$service") ;;
+    esac
+}
+
+get_build_targets() {
+    local mode="$1"
+    BUILD_TARGETS=()
+
+    if [ ${#TARGETS[@]} -eq 0 ]; then
+        case "$mode" in
+            dev)
+                BUILD_TARGETS=(backend frontend-dev)
+                ;;
+            prod)
+                BUILD_TARGETS=(backend nginx)
+                ;;
+        esac
+        return 0
+    fi
+
+    local target
+    for target in "${TARGETS[@]}"; do
+        case "$mode:$target" in
+            dev:backend|prod:backend)
+                append_unique_service backend
+                ;;
+            dev:frontend-dev)
+                append_unique_service frontend-dev
+                ;;
+            prod:nginx)
+                # nginx 依赖 backend，顺序构建可规避当前 Docker/BuildKit 并行导出异常。
+                append_unique_service backend
+                append_unique_service nginx
+                ;;
+        esac
+    done
+}
+
+build_mode_images() {
+    local mode="$1"
+    get_build_targets "$mode"
+
+    if [ ${#BUILD_TARGETS[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    log_info "顺序构建镜像，规避当前 Docker/BuildKit 并行导出异常..."
+
+    local service
+    for service in "${BUILD_TARGETS[@]}"; do
+        log_info "构建镜像: $service"
+        local build_args=("${DOCKER_COMPOSE[@]}" $(get_compose_args "$mode") build)
+        if [ "$NO_CACHE" = "1" ]; then
+            build_args+=(--no-cache)
+        fi
+        build_args+=("$service")
+        "${build_args[@]}"
+    done
+}
+
 # 检测当前运行模式
 detect_mode() {
     if docker ps --format '{{.Names}}' | grep -q '^stocktrade-nginx$'; then
@@ -199,12 +263,11 @@ detect_mode() {
 cmd_dev() {
     log_info "启动开发环境..."
 
-    local up_args=("${DOCKER_COMPOSE[@]}" $(get_compose_args dev) up -d)
-    if [ "$NO_CACHE" = "1" ]; then
-        up_args+=(--build --no-cache)
-    elif [ "$BUILD" = "1" ]; then
-        up_args+=(--build)
+    if [ "$NO_CACHE" = "1" ] || [ "$BUILD" = "1" ]; then
+        build_mode_images dev
     fi
+
+    local up_args=("${DOCKER_COMPOSE[@]}" $(get_compose_args dev) up -d)
     if [ ${#TARGETS[@]} -gt 0 ]; then
         up_args+=("${TARGETS[@]}")
     fi
@@ -227,12 +290,11 @@ cmd_dev() {
 cmd_prod() {
     log_info "启动生产环境..."
 
-    local up_args=("${DOCKER_COMPOSE[@]}" $(get_compose_args prod) up -d)
-    if [ "$NO_CACHE" = "1" ]; then
-        up_args+=(--build --no-cache)
-    elif [ "$BUILD" = "1" ]; then
-        up_args+=(--build)
+    if [ "$NO_CACHE" = "1" ] || [ "$BUILD" = "1" ]; then
+        build_mode_images prod
     fi
+
+    local up_args=("${DOCKER_COMPOSE[@]}" $(get_compose_args prod) up -d)
     if [ ${#TARGETS[@]} -gt 0 ]; then
         up_args+=("${TARGETS[@]}")
     fi

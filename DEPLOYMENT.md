@@ -97,6 +97,21 @@ cp .env.example deploy/.env
 ./deploy/scripts/start.sh prod --build
 ```
 
+如需宿主机重启后自动拉起同一套生产服务：
+
+```bash
+sudo cp deploy/systemd/stocktrade-prod.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now stocktrade-prod.service
+sudo systemctl status stocktrade-prod.service
+```
+
+该 service 会执行与你当前手工启动一致的命令：
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up -d --build postgres redis backend nginx
+```
+
 标准发布：
 
 ```bash
@@ -126,20 +141,37 @@ deploy/systemd/stocktrade-background-update.timer
 
 该 service 已内置以下限制：
 
-- `CPUQuota=35%`
-- `MemoryMax=2G`
+- `CPUQuota=100%`
+- `MemoryMax=1500M`
 - `Nice=10`
 - `IOSchedulingClass=idle`
 
-使用前请确认：
+当前仓库中的 service 已按这台宿主机预设为：
 
-- `WorkingDirectory` 与仓库实际路径一致
-- `User` / `Group` 与部署用户一致
+- `WorkingDirectory=/root/StockTradebyZ`
+- `User=root`
+- `Group=root`
+- `Restart=on-failure`
+- `RestartPreventExitStatus=1`
+- `RestartSec=10min`
 - Docker 服务已启动，且 `backend` 容器处于运行状态
+
+当前 timer 规则为：
+
+- `OnCalendar=Mon..Fri *-*-* 16:30:00 Asia/Shanghai`
+- `Persistent=true`
+
+当前行为约定为：
+
+- 由 systemd 在交易日北京时间 `16:30` 触发首次更新
+- 若当天交易数据在 Tushare 仍未就绪，脚本会以 `TEMPFAIL(75)` 退出，service 每 `10` 分钟自动重试一次
+- 一旦更新成功，自动重试终止
+- 普通脚本错误不会进入自动重试循环，需要人工处理
 
 启用方式示例：
 
 ```bash
+sudo mkdir -p /root/StockTradebyZ/data/logs /root/StockTradebyZ/.docker
 sudo cp deploy/systemd/stocktrade-background-update.service /etc/systemd/system/
 sudo cp deploy/systemd/stocktrade-background-update.timer /etc/systemd/system/
 sudo systemctl daemon-reload

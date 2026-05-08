@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from app.models import Stock, StockDaily
 from app.services.background_update_service import BackgroundLatestTradeDayUpdateService
@@ -103,6 +104,102 @@ def test_run_skips_when_data_is_latest(test_db, tmp_path, monkeypatch) -> None:
     assert result["skipped"] is True
     assert called["batch"] is False
     assert called["star"] is False
+
+
+def test_run_fails_after_1630_when_latest_trade_date_data_not_ready(test_db, tmp_path, monkeypatch) -> None:
+    import app.services.background_update_service as background_update_module
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "000001.csv").write_text(
+        "date,open,close,high,low,volume\n2026-05-07,10,10.2,10.3,9.9,1000\n",
+        encoding="utf-8",
+    )
+
+    _seed_stock_daily(test_db, code="000001", trade_date="2026-05-07")
+
+    monkeypatch.setattr(background_update_module, "SessionLocal", lambda: test_db)
+    monkeypatch.setattr(background_update_module.settings, "raw_data_dir", raw_dir)
+    monkeypatch.setattr(
+        background_update_module.MarketService,
+        "get_latest_trade_date",
+        lambda self: "2026-05-08",
+    )
+    monkeypatch.setattr(
+        background_update_module.analysis_service,
+        "get_latest_candidate_date",
+        lambda: "2026-05-07",
+    )
+    monkeypatch.setattr(
+        background_update_module.analysis_service,
+        "get_latest_result_date",
+        lambda: "2026-05-07",
+    )
+    monkeypatch.setattr(
+        background_update_module.BackgroundLatestTradeDayUpdateService,
+        "_is_retry_window_open",
+        classmethod(lambda cls, now=None: True),
+    )
+    monkeypatch.setattr(
+        background_update_module.TushareService,
+        "is_trade_date_data_ready",
+        lambda self, trade_date: False,
+    )
+
+    service = BackgroundLatestTradeDayUpdateService()
+
+    try:
+        service.run()
+        assert False, "expected run() to fail for systemd retry"
+    except RuntimeError as exc:
+        assert "10 分钟后重试" in str(exc)
+
+
+def test_run_does_not_fail_before_1630_when_latest_trade_date_data_not_ready(test_db, tmp_path, monkeypatch) -> None:
+    import app.services.background_update_service as background_update_module
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "000001.csv").write_text(
+        "date,open,close,high,low,volume\n2026-05-08,10,10.2,10.3,9.9,1000\n",
+        encoding="utf-8",
+    )
+
+    _seed_stock_daily(test_db, code="000001", trade_date="2026-05-08")
+
+    monkeypatch.setattr(background_update_module, "SessionLocal", lambda: test_db)
+    monkeypatch.setattr(background_update_module.settings, "raw_data_dir", raw_dir)
+    monkeypatch.setattr(
+        background_update_module.MarketService,
+        "get_latest_trade_date",
+        lambda self: "2026-05-08",
+    )
+    monkeypatch.setattr(
+        background_update_module.analysis_service,
+        "get_latest_candidate_date",
+        lambda: "2026-05-08",
+    )
+    monkeypatch.setattr(
+        background_update_module.analysis_service,
+        "get_latest_result_date",
+        lambda: "2026-05-08",
+    )
+    monkeypatch.setattr(
+        background_update_module.BackgroundLatestTradeDayUpdateService,
+        "_is_retry_window_open",
+        classmethod(lambda cls, now=None: False),
+    )
+    monkeypatch.setattr(
+        background_update_module.TushareService,
+        "is_trade_date_data_ready",
+        lambda self, trade_date: False,
+    )
+
+    service = BackgroundLatestTradeDayUpdateService()
+    result = service.run()
+
+    assert result["success"] is True
+    assert result["skipped"] is True
 
 
 def test_run_executes_batch_and_tomorrow_star_when_update_needed(test_db, tmp_path, monkeypatch) -> None:

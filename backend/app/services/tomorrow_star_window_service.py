@@ -3,6 +3,7 @@ Tomorrow Star 180-day rolling window maintenance service.
 """
 from __future__ import annotations
 
+import json
 import os
 import logging
 import math
@@ -17,6 +18,7 @@ import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import SessionLocal
 from app.models import AnalysisResult, Candidate, StockDaily, TomorrowStarRun
 from app.services.tushare_service import TushareService
@@ -108,6 +110,185 @@ class TomorrowStarWindowService:
             .limit(1)
         ).scalar()
         return row.isoformat() if row else None
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(f"{path.suffix}.tmp")
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+
+    @staticmethod
+    def _is_recommendable_result(result: dict[str, Any], min_score_threshold: float) -> bool:
+        score = result.get("total_score", result.get("score"))
+        if score is None:
+            return False
+        try:
+            normalized_score = float(score)
+        except (TypeError, ValueError):
+            return False
+        return result.get("verdict") == "PASS" and normalized_score >= min_score_threshold
+
+    def _build_suggestion_payload(
+        self,
+        trade_date: str,
+        results: list[dict[str, Any]],
+        *,
+        min_score_threshold: float,
+    ) -> dict[str, Any]:
+        passed = [
+            item for item in results
+            if self._is_recommendable_result(item, min_score_threshold)
+        ]
+        passed.sort(
+            key=lambda item: float(item.get("total_score", item.get("score")) or 0),
+            reverse=True,
+        )
+        recommendations = [
+            {
+                "rank": index + 1,
+                "code": item.get("code"),
+                "verdict": item.get("verdict", ""),
+                "total_score": item.get("total_score", item.get("score")),
+                "signal_type": item.get("signal_type", ""),
+                "comment": item.get("comment", ""),
+            }
+            for index, item in enumerate(passed)
+        ]
+        excluded = [
+            item.get("code")
+            for item in results
+            if not self._is_recommendable_result(item, min_score_threshold) and item.get("code")
+        ]
+
+        blocked_by_counts: dict[str, int] = {}
+        prefilter_passed = 0
+        for item in results:
+            prefilter = item.get("prefilter") or {}
+            if prefilter.get("passed", True):
+                prefilter_passed += 1
+            for key in prefilter.get("blocked_by", []):
+                key_text = str(key).strip()
+                if not key_text:
+                    continue
+                blocked_by_counts[key_text] = blocked_by_counts.get(key_text, 0) + 1
+
+        return {
+            "date": trade_date,
+            "min_score_threshold": min_score_threshold,
+            "total_reviewed": len(results),
+            "recommendations": recommendations,
+            "excluded": excluded,
+            "prefilter_summary": {
+                "passed": prefilter_passed,
+                "blocked": len(results) - prefilter_passed,
+                "blocked_by": blocked_by_counts,
+            },
+        }
+
+    def _sync_candidate_files_for_date(self, trade_date: str, *, write_latest: bool) -> int:
+        if str(ROOT / "pipeline") not in sys.path:
+            sys.path.insert(0, str(ROOT / "pipeline"))
+
+        from pipeline_io import save_candidates
+        from schemas import Candidate as PipelineCandidate, CandidateRun
+
+        pick_dt = date.fromisoformat(trade_date)
+        candidate_rows = (
+            self.db.query(Candidate)
+            .filter(Candidate.pick_date == pick_dt)
+            .order_by(Candidate.turnover.is_(None).asc(), Candidate.turnover.desc(), Candidate.id.asc())
+            .all()
+        )
+        run = CandidateRun(
+            run_date=datetime.now().date().isoformat(),
+            pick_date=trade_date,
+            candidates=[
+                PipelineCandidate(
+                    code=row.code,
+                    date=trade_date,
+                    strategy=row.strategy or "b1",
+                    close=float(row.close_price or 0.0),
+                    turnover_n=float(row.turnover or 0.0),
+                    extra={"kdj_j": float(row.kdj_j)} if row.kdj_j is not None else {},
+                )
+                for row in candidate_rows
+            ],
+            meta={
+                "config": None,
+                "data_dir": None,
+                "total": len(candidate_rows),
+            },
+        )
+        save_candidates(
+            run,
+            candidates_dir=settings.candidates_dir,
+            write_dated=True,
+            write_latest=write_latest,
+        )
+        return len(candidate_rows)
+
+    def _sync_review_files_for_date(self, trade_date: str, *, reviewer: str) -> int:
+        from app.services.analysis_cache import analysis_cache
+
+        pick_dt = date.fromisoformat(trade_date)
+        candidate_map = {
+            row.code: row
+            for row in self.db.query(Candidate).filter(Candidate.pick_date == pick_dt).all()
+        }
+        analysis_rows = (
+            self.db.query(AnalysisResult)
+            .filter(AnalysisResult.pick_date == pick_dt)
+            .order_by(AnalysisResult.id.asc())
+            .all()
+        )
+
+        review_dir = Path(settings.review_dir) / trade_date
+        review_dir.mkdir(parents=True, exist_ok=True)
+
+        valid_names = {"suggestion.json"}
+        exported_results: list[dict[str, Any]] = []
+        for row in analysis_rows:
+            code = str(row.code).zfill(6)
+            payload = dict(row.details_json or {})
+            candidate_row = candidate_map.get(code)
+            payload.setdefault("code", code)
+            payload.setdefault("reviewer", reviewer)
+            payload.setdefault("strategy", getattr(candidate_row, "strategy", None) or "b1")
+            payload.setdefault("pick_date", trade_date)
+            payload.setdefault("analysis_date", trade_date)
+            payload.setdefault("verdict", row.verdict)
+            payload.setdefault("signal_type", row.signal_type)
+            payload.setdefault("comment", row.comment)
+            if payload.get("total_score") is None and row.total_score is not None:
+                payload["total_score"] = float(row.total_score)
+
+            analysis_cache.save_analysis_result(code, trade_date, payload)
+            valid_names.add(f"{code}.json")
+            exported_results.append(payload)
+
+        for path in review_dir.glob("*.json"):
+            if path.name not in valid_names:
+                path.unlink()
+
+        suggestion_payload = self._build_suggestion_payload(
+            trade_date,
+            exported_results,
+            min_score_threshold=float(settings.min_score_threshold),
+        )
+        self._atomic_write_json(review_dir / "suggestion.json", suggestion_payload)
+        return len(exported_results)
+
+    def _sync_trade_date_artifacts(self, trade_date: str, *, reviewer: str, write_latest: bool) -> dict[str, int]:
+        candidate_count = self._sync_candidate_files_for_date(trade_date, write_latest=write_latest)
+        analysis_count = self._sync_review_files_for_date(trade_date, reviewer=reviewer)
+        return {
+            "candidate_count": candidate_count,
+            "analysis_count": analysis_count,
+        }
 
     def _upsert_run(
         self,
@@ -668,6 +849,11 @@ class TomorrowStarWindowService:
                 window_size=window_size,
             )
             self.reconcile_run_rows(window_size, reviewer=reviewer, source=source)
+            self._sync_trade_date_artifacts(
+                trade_date,
+                reviewer=reviewer,
+                write_latest=(trade_date == self._get_latest_trade_date()),
+            )
 
             run = (
                 self.db.query(TomorrowStarRun)
@@ -740,6 +926,13 @@ class TomorrowStarWindowService:
                 for failed_date in backfill_result.get("built_dates", [])
             )
         self.reconcile_run_rows(window_size, reviewer=reviewer, source=source)
+        latest_trade_date = self._get_latest_trade_date()
+        if latest_trade_date:
+            self._sync_trade_date_artifacts(
+                latest_trade_date,
+                reviewer=reviewer,
+                write_latest=True,
+            )
         pruned = self.prune_window(window_size)
         return {
             "window_size": window_size,

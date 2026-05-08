@@ -174,15 +174,25 @@ build_images() {
     local build_started_at
     build_started_at=$(date +%s)
 
-    local build_cmd=("${DOCKER_COMPOSE[@]}" -f docker-compose.yml --profile postgres --profile prod build)
-    if [ "$NO_CACHE" = "1" ]; then
-        build_cmd+=(--no-cache)
-    fi
+    local services=(backend nginx)
+    local service
+    for service in "${services[@]}"; do
+        local build_cmd=("${DOCKER_COMPOSE[@]}" -f docker-compose.yml --profile postgres --profile prod build)
+        if [ "$NO_CACHE" = "1" ]; then
+            build_cmd+=(--no-cache)
+        fi
+        build_cmd+=("$service")
 
-    if [ "$DRY_RUN" = "1" ]; then
-        echo -e "${YELLOW}[DRY RUN]${NC} ${build_cmd[*]}"
-    else
+        if [ "$DRY_RUN" = "1" ]; then
+            echo -e "${YELLOW}[DRY RUN]${NC} ${build_cmd[*]}"
+            continue
+        fi
+
+        log_info "构建镜像: $service"
         "${build_cmd[@]}"
+    done
+
+    if [ "$DRY_RUN" = "0" ]; then
         echo "build_seconds=$(( $(date +%s) - build_started_at ))" >> "$BENCH_DIR/summary.env"
         log_success "镜像构建完成"
     fi

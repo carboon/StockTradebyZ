@@ -36,7 +36,10 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 from app.config import settings
+from app.services.background_update_exceptions import RetryableBackgroundUpdateError
 from app.services.background_update_service import BackgroundLatestTradeDayUpdateService
+
+TEMPFAIL_EXIT_CODE = 75
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,6 +127,9 @@ def main() -> int:
         task_logger.info("任务结果: %s", json.dumps(result, ensure_ascii=False, default=str))
         print(json.dumps(result, ensure_ascii=False, default=str, indent=2))
         return 0
+    except RetryableBackgroundUpdateError as exc:
+        task_logger.warning("后台更新稍后重试: %s", exc)
+        return TEMPFAIL_EXIT_CODE
     except Exception as exc:
         task_logger.exception("后台更新失败: %s", exc)
         return 1

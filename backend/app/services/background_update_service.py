@@ -25,10 +25,12 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import StockDaily, TomorrowStarRun
 from app.services.analysis_service import analysis_service
+from app.services.background_update_exceptions import RetryableBackgroundUpdateError
 from app.services.daily_batch_update_service import DailyBatchUpdateService
 from app.services.market_service import MarketService
 from app.services.tomorrow_star_window_service import maintain_tomorrow_star_for_trade_date
 from app.services.tushare_service import TushareService
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,9 @@ class BackgroundLatestTradeDayUpdateService:
 
     DEFAULT_REVIEWER = "quant"
     DEFAULT_WINDOW_SIZE = 180
+    BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+    RETRY_START_HOUR = 16
+    RETRY_START_MINUTE = 30
 
     def __init__(
         self,
@@ -164,6 +169,23 @@ class BackgroundLatestTradeDayUpdateService:
     @staticmethod
     def _push_market_state(payload: dict[str, Any]) -> None:
         MarketService.update_progress(payload)
+
+    @classmethod
+    def _is_retry_window_open(cls, now: Optional[datetime] = None) -> bool:
+        current = now.astimezone(cls.BEIJING_TZ) if now else datetime.now(cls.BEIJING_TZ)
+        return (current.hour, current.minute) >= (cls.RETRY_START_HOUR, cls.RETRY_START_MINUTE)
+
+    def _ensure_latest_trade_date_ready_for_retry(self, latest_trade_date: Optional[str]) -> None:
+        if not latest_trade_date or not self._is_retry_window_open():
+            return
+
+        tushare_service = TushareService(token=self.token)
+        if tushare_service.is_trade_date_data_ready(latest_trade_date):
+            return
+
+        raise RetryableBackgroundUpdateError(
+            f"{latest_trade_date} 交易日数据在 Tushare 尚未就绪，将由 systemd 在 10 分钟后重试"
+        )
 
     @staticmethod
     def _read_latest_date_from_csv(csv_path: Path) -> Optional[str]:
@@ -296,6 +318,7 @@ class BackgroundLatestTradeDayUpdateService:
         try:
             freshness = self.assess_freshness(target_trade_date=target_trade_date)
             freshness_elapsed = round(max(0.0, time.perf_counter() - freshness_started_at), 3)
+            self._ensure_latest_trade_date_ready_for_retry(freshness.latest_trade_date)
 
             self.log.info("最新性检查: %s", freshness.reason)
             self.log.info(

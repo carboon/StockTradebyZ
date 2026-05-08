@@ -2,10 +2,9 @@
 Description=Schedule StockTrade Background Latest Trade Day Update
 
 [Timer]
-# 默认按宿主机本地时区执行。当前设置为工作日 18:30，
-# 适合在收盘后、晚间数据较稳定时触发。
-OnCalendar=Mon..Fri *-*-* 18:30:00
-RandomizedDelaySec=10m
+# 默认按北京时间执行。交易日 16:30 触发首次更新，
+# 若服务因“当日数据未就绪”以 TEMPFAIL(75) 退出，则交由 service 每 10 分钟重试直到成功。
+OnCalendar=Mon..Fri *-*-* 16:30:00 Asia/Shanghai
 Persistent=true
 Unit=stocktrade-background-update.service
 

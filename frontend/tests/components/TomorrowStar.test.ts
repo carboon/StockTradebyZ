@@ -237,8 +237,7 @@ describe('TomorrowStar.vue', () => {
     })
   })
 
-  it('starts incremental update when freshness says data should refresh', async () => {
-    vi.setSystemTime(new Date('2024-01-15T07:30:00Z'))
+  it('does not auto-start incremental update when freshness says data should refresh', async () => {
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-16',
       latest_trade_data_ready: true,
@@ -257,7 +256,7 @@ describe('TomorrowStar.vue', () => {
     await wrapper.vm.ensureFreshDataAndLoad(true)
     await flushPromises()
 
-    expect(apiTasks.startIncrementalUpdate).toHaveBeenCalledTimes(1)
+    expect(apiTasks.startIncrementalUpdate).not.toHaveBeenCalled()
   })
 
   it('shows failed incremental warning and does not auto-restart update', async () => {
@@ -289,7 +288,7 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.incrementalUpdate.last_error).toBe('任务中断，可恢复')
   })
 
-  it('does not auto-start incremental update outside the beijing post-close window', async () => {
+  it('keeps incremental update idle when freshness reports pending work', async () => {
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-16',
       latest_trade_data_ready: true,
@@ -309,20 +308,6 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     expect(apiTasks.startIncrementalUpdate).not.toHaveBeenCalled()
-  })
-
-  it('re-checks freshness every 10 minutes during the beijing post-close window', async () => {
-    vi.setSystemTime(new Date('2024-01-15T07:10:00Z'))
-
-    const wrapper = mountComponent()
-    await flushPromises()
-
-    vi.mocked(apiAnalysis.getFreshness).mockClear()
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
-    await flushPromises()
-
-    expect(apiAnalysis.getFreshness).toHaveBeenCalled()
-    wrapper.unmount()
   })
 
   it('hydrates cached view state from sessionStorage before reloading', async () => {

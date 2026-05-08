@@ -411,7 +411,6 @@ import { ElMessage } from 'element-plus'
 import type {
   Candidate,
   AnalysisResult,
-  FreshnessResponse,
   IncrementalUpdateStatus,
   TomorrowStarHistoryItem,
   TomorrowStarWindowStatusResponse,
@@ -429,13 +428,9 @@ const { isMobile } = useResponsive()
 let loadDataRequestId = 0
 let candidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const AUTO_INCREMENTAL_ATTEMPT_INTERVAL_MS = 10 * 60 * 1000
-const BEIJING_INCREMENTAL_START_MINUTE = 15 * 60
-const BEIJING_INCREMENTAL_END_MINUTE = 20 * 60
 const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 let incrementalPollTimer: number | null = null
-let autoIncrementalAttemptTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
 
 const loading = ref(false)
@@ -1016,26 +1011,6 @@ async function refreshCurrentCandidates() {
   }
 }
 
-async function startIncrementalUpdate() {
-  try {
-    const result = await apiTasks.startIncrementalUpdate()
-    if (!result.success) {
-      if (result.running) {
-        // 已有任务在运行，开始轮询
-        await checkIncrementalStatus()
-        startIncrementalPolling()
-      }
-      return
-    }
-
-    // 启动成功，开始轮询状态
-    await checkIncrementalStatus()
-    startIncrementalPolling()
-  } catch (error: any) {
-    console.error('Failed to start incremental update:', error)
-  }
-}
-
 async function checkIncrementalStatus() {
   const signal = beginRequest('incrementalStatus')
   try {
@@ -1072,49 +1047,6 @@ function stopIncrementalPolling() {
   }
 }
 
-function getBeijingMinutes(now: Date = new Date()): number {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Shanghai',
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-  }).formatToParts(now)
-  const hour = Number(parts.find((part) => part.type === 'hour')?.value || '0')
-  const minute = Number(parts.find((part) => part.type === 'minute')?.value || '0')
-  return hour * 60 + minute
-}
-
-function isWithinBeijingIncrementalWindow(now: Date = new Date()): boolean {
-  const minutes = getBeijingMinutes(now)
-  return minutes >= BEIJING_INCREMENTAL_START_MINUTE && minutes < BEIJING_INCREMENTAL_END_MINUTE
-}
-
-function shouldAutoStartIncremental(freshness: FreshnessResponse): boolean {
-  return Boolean(
-    isWithinBeijingIncrementalWindow()
-    && freshness.needs_update
-    && freshness.latest_trade_data_ready === true
-    && !incrementalUpdate.value.running
-    && !freshness.running_task_id
-    && freshness.incremental_update?.status !== 'failed'
-  )
-}
-
-function startAutoIncrementalAttemptTimer() {
-  stopAutoIncrementalAttemptTimer()
-  autoIncrementalAttemptTimer = window.setInterval(() => {
-    if (!isWithinBeijingIncrementalWindow()) return
-    void ensureFreshDataAndLoad(true)
-  }, AUTO_INCREMENTAL_ATTEMPT_INTERVAL_MS)
-}
-
-function stopAutoIncrementalAttemptTimer() {
-  if (autoIncrementalAttemptTimer) {
-    window.clearInterval(autoIncrementalAttemptTimer)
-    autoIncrementalAttemptTimer = null
-  }
-}
-
 async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   if (!configStore.tushareReady) return
   if (checkingFreshness.value || incrementalUpdate.value.running || loading.value) return
@@ -1147,11 +1079,6 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
       if (freshness.incremental_update.running) {
         startIncrementalPolling()
       }
-    }
-
-    // 如果需要更新且没有正在运行的增量更新，自动启动
-    if (shouldAutoStartIncremental(freshness)) {
-      await startIncrementalUpdate()
     }
 
     if (
@@ -1378,7 +1305,6 @@ async function refreshAfterStatusReady(forceReload: boolean = false) {
 
 onMounted(() => {
   hydrateTomorrowStarCache()
-  startAutoIncrementalAttemptTimer()
 
   if (historyData.value.length === 0) {
     void loadData()
@@ -1392,14 +1318,12 @@ onMounted(() => {
 })
 
 onActivated(() => {
-  startAutoIncrementalAttemptTimer()
   void refreshAfterStatusReady()
   void checkIncrementalStatus()
 })
 
 onDeactivated(() => {
   stopIncrementalPolling()
-  stopAutoIncrementalAttemptTimer()
   cancelAllPageRequests()
   loading.value = false
   loadingLatest.value = false
@@ -1408,7 +1332,6 @@ onDeactivated(() => {
 
 onUnmounted(() => {
   stopIncrementalPolling()
-  stopAutoIncrementalAttemptTimer()
   cancelAllPageRequests()
 })
 </script>

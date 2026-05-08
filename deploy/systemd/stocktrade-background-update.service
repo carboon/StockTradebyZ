@@ -5,35 +5,38 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=yes
-Group=staff
-WorkingDirectory=/Volumes/DATA/StockTradebyZ
+User=root
+Group=root
+WorkingDirectory=/root/StockTradebyZ
 TimeoutStartSec=6h
+Restart=on-failure
+RestartSec=10min
+RestartPreventExitStatus=1
 
 Environment=PYTHONUNBUFFERED=1
 
 # 通过 Docker backend 容器执行，避免宿主机单独处理 DATABASE_URL / Python 依赖
-ExecStart=/Volumes/DATA/StockTradebyZ/deploy/scripts/run_background_update.sh
+ExecStart=/root/StockTradebyZ/deploy/scripts/run_background_update.sh
 
-# 资源限制：避免后台更新明显挤占在线服务
+# 当前服务器为 2 vCPU / 3.6GiB RAM，后台任务最多使用 1 个逻辑核、1.5GiB 内存
 Nice=10
 IOSchedulingClass=idle
 IOSchedulingPriority=7
-CPUQuota=35%
-MemoryMax=2G
+CPUQuota=100%
+MemoryMax=1500M
 TasksMax=128
 
 # 安全与稳定性
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/Volumes/DATA/StockTradebyZ/data
-ReadWritePaths=/Volumes/DATA/StockTradebyZ/backend
-ReadWritePaths=/Volumes/DATA/StockTradebyZ/.docker
+ReadWritePaths=/root/StockTradebyZ/data
+ReadWritePaths=/root/StockTradebyZ/backend
+ReadWritePaths=/root/StockTradebyZ/.docker
 
 # 输出
-StandardOutput=append:/Volumes/DATA/StockTradebyZ/data/logs/systemd-background-update.out.log
-StandardError=append:/Volumes/DATA/StockTradebyZ/data/logs/systemd-background-update.err.log
+StandardOutput=append:/root/StockTradebyZ/data/logs/systemd-background-update.out.log
+StandardError=append:/root/StockTradebyZ/data/logs/systemd-background-update.err.log
 
 [Install]
 WantedBy=multi-user.target

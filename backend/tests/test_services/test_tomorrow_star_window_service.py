@@ -1,7 +1,9 @@
+import json
 from datetime import date
 
 import pandas as pd
 
+from app.config import settings
 from app.models import AnalysisResult, Candidate, Stock, StockDaily, TomorrowStarRun
 from app.services.candidate_service import CandidateService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
@@ -99,8 +101,10 @@ def test_ensure_window_backfills_from_backtest_events(test_db, mocker):
     assert analysis.signal_type == "trend_start"
 
 
-def test_maintain_trade_date_rebuilds_inconsistent_candidate_and_analysis_rows(test_db, mocker):
+def test_maintain_trade_date_rebuilds_inconsistent_candidate_and_analysis_rows(test_db, mocker, tmp_path, monkeypatch):
     target_date = date(2024, 1, 3)
+    monkeypatch.setattr(settings, "candidates_dir", tmp_path / "candidates")
+    monkeypatch.setattr(settings, "review_dir", tmp_path / "review")
     test_db.add(Stock(code="000001", name="PingAn"))
     test_db.add(Stock(code="000002", name="Vanke"))
     for trade_date in [date(2024, 1, 2), target_date]:
@@ -190,6 +194,90 @@ def test_maintain_trade_date_rebuilds_inconsistent_candidate_and_analysis_rows(t
     assert run.analysis_count == 2
     assert run.trend_start_count == 1
     assert run.source == "incremental_update"
+
+    latest_payload = json.loads((tmp_path / "candidates" / "candidates_latest.json").read_text(encoding="utf-8"))
+    dated_payload = json.loads((tmp_path / "candidates" / "candidates_2024-01-03.json").read_text(encoding="utf-8"))
+    suggestion_payload = json.loads((tmp_path / "review" / "2024-01-03" / "suggestion.json").read_text(encoding="utf-8"))
+
+    assert latest_payload["pick_date"] == "2024-01-03"
+    assert latest_payload["meta"]["total"] == 2
+    assert dated_payload["pick_date"] == "2024-01-03"
+    assert suggestion_payload["date"] == "2024-01-03"
+    assert suggestion_payload["total_reviewed"] == 2
+    assert suggestion_payload["recommendations"][0]["code"] == "000001"
+    assert (tmp_path / "review" / "2024-01-03" / "000001.json").exists()
+    assert (tmp_path / "review" / "2024-01-03" / "000002.json").exists()
+
+
+def test_ensure_window_repairs_latest_candidate_and_review_files(test_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "candidates_dir", tmp_path / "candidates")
+    monkeypatch.setattr(settings, "review_dir", tmp_path / "review")
+
+    target_date = date(2024, 1, 3)
+    test_db.add(Stock(code="000001", name="PingAn"))
+    test_db.add(StockDaily(code="000001", trade_date=target_date, open=10, close=11, high=11, low=9, volume=100))
+    test_db.add(
+        Candidate(
+            pick_date=target_date,
+            code="000001",
+            strategy="b1",
+            close_price=11.0,
+            turnover=123456.0,
+            kdj_j=12.3,
+        )
+    )
+    test_db.add(
+        AnalysisResult(
+            pick_date=target_date,
+            code="000001",
+            reviewer="quant",
+            verdict="PASS",
+            total_score=4.2,
+            signal_type="trend_start",
+            comment="ok",
+            details_json={
+                "code": "000001",
+                "strategy": "b1",
+                "verdict": "PASS",
+                "total_score": 4.2,
+                "signal_type": "trend_start",
+                "comment": "ok",
+                "prefilter": {
+                    "enabled": True,
+                    "passed": True,
+                    "blocked_by": [],
+                    "summary": "通过第 4 步预过滤",
+                },
+            },
+        )
+    )
+    test_db.add(
+        TomorrowStarRun(
+            pick_date=target_date,
+            status="success",
+            reviewer="quant",
+            source="bootstrap",
+            candidate_count=1,
+            analysis_count=1,
+            trend_start_count=1,
+        )
+    )
+    test_db.commit()
+
+    result = TomorrowStarWindowService(test_db).ensure_window(window_size=1)
+
+    assert result["rebuilt_dates"] == []
+
+    latest_payload = json.loads((tmp_path / "candidates" / "candidates_latest.json").read_text(encoding="utf-8"))
+    suggestion_payload = json.loads((tmp_path / "review" / "2024-01-03" / "suggestion.json").read_text(encoding="utf-8"))
+    stock_payload = json.loads((tmp_path / "review" / "2024-01-03" / "000001.json").read_text(encoding="utf-8"))
+
+    assert latest_payload["pick_date"] == "2024-01-03"
+    assert latest_payload["meta"]["total"] == 1
+    assert suggestion_payload["date"] == "2024-01-03"
+    assert suggestion_payload["recommendations"][0]["code"] == "000001"
+    assert stock_payload["pick_date"] == "2024-01-03"
+    assert stock_payload["verdict"] == "PASS"
 
 
 def test_window_status_includes_consecutive_candidate_metrics(test_db):

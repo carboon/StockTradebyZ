@@ -1,0 +1,21 @@
+[Unit]
+Description=StockTrade Production Docker Stack
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/root/StockTradebyZ
+RemainAfterExit=true
+TimeoutStartSec=1h
+TimeoutStopSec=10min
+ExecStart=/root/StockTradebyZ/deploy/scripts/run_prod_stack.sh up
+ExecStop=/root/StockTradebyZ/deploy/scripts/run_prod_stack.sh stop
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

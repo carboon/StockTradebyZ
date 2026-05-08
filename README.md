@@ -24,6 +24,12 @@ cp .env.example deploy/.env
 ./deploy/scripts/start.sh prod --build
 ```
 
+如需宿主机重启后自动拉起生产服务，可启用：
+
+```bash
+deploy/systemd/stocktrade-prod.service
+```
+
 后台交易日更新：
 
 ```bash
@@ -36,6 +42,8 @@ cp .env.example deploy/.env
 deploy/systemd/stocktrade-background-update.service
 deploy/systemd/stocktrade-background-update.timer
 ```
+
+当前仓库内的 service 已按这台服务器预设为 `/root/StockTradebyZ`、`root:root`，并把后台任务限制为最多 `1 vCPU + 1500M` 内存。systemd 默认会在交易日北京时间 `16:30` 首次触发；若当天交易数据尚未就绪，则脚本返回 `TEMPFAIL(75)`，service 会每 `10` 分钟自动重试，直到成功；普通脚本错误返回 `1`，不会自动重试。
 
 访问地址：
 

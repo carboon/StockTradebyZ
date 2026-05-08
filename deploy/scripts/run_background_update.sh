@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY_DIR="$PROJECT_ROOT/deploy"
 DOCKER_CONFIG_DIR="$PROJECT_ROOT/.docker"
+LOG_DIR="$PROJECT_ROOT/data/logs"
+RUN_DIR="$PROJECT_ROOT/data/run"
 
 cd "$DEPLOY_DIR"
 
@@ -28,8 +30,11 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+prepare_runtime_dirs() {
+    mkdir -p "$DOCKER_CONFIG_DIR" "$LOG_DIR" "$RUN_DIR"
+}
+
 check_docker() {
-    mkdir -p "$DOCKER_CONFIG_DIR"
     export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
 
     if ! command -v docker >/dev/null 2>&1; then
@@ -83,6 +88,7 @@ check_backend_running() {
 }
 
 main() {
+    prepare_runtime_dirs
     check_docker
     check_backend_running
 
