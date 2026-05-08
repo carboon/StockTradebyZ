@@ -33,6 +33,28 @@ logger = logging.getLogger(__name__)
 
 # 批量操作默认批次大小
 BATCH_SIZE = 1000
+OPTIONAL_DAILY_METRIC_COLUMNS = [
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+    "free_share",
+    "circ_mv",
+    "buy_sm_amount",
+    "sell_sm_amount",
+    "buy_md_amount",
+    "sell_md_amount",
+    "buy_lg_amount",
+    "sell_lg_amount",
+    "buy_elg_amount",
+    "sell_elg_amount",
+    "net_mf_amount",
+]
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
 
 
 def bulk_upsert_stock_daily(
@@ -114,6 +136,20 @@ def bulk_upsert_stock_daily(
                     "high": stmt.excluded.high,
                     "low": stmt.excluded.low,
                     "volume": stmt.excluded.volume,
+                    "turnover_rate": stmt.excluded.turnover_rate,
+                    "turnover_rate_f": stmt.excluded.turnover_rate_f,
+                    "volume_ratio": stmt.excluded.volume_ratio,
+                    "free_share": stmt.excluded.free_share,
+                    "circ_mv": stmt.excluded.circ_mv,
+                    "buy_sm_amount": stmt.excluded.buy_sm_amount,
+                    "sell_sm_amount": stmt.excluded.sell_sm_amount,
+                    "buy_md_amount": stmt.excluded.buy_md_amount,
+                    "sell_md_amount": stmt.excluded.sell_md_amount,
+                    "buy_lg_amount": stmt.excluded.buy_lg_amount,
+                    "sell_lg_amount": stmt.excluded.sell_lg_amount,
+                    "buy_elg_amount": stmt.excluded.buy_elg_amount,
+                    "sell_elg_amount": stmt.excluded.sell_elg_amount,
+                    "net_mf_amount": stmt.excluded.net_mf_amount,
                 },
             )
 
@@ -218,31 +254,54 @@ class DailyDataService:
             if end_date:
                 end_date = end_date.replace("-", "")
 
-            df = self.pro.daily(
+            daily_df = self.pro.daily(
                 ts_code=ts_code,
                 start_date=start_date,
                 end_date=end_date
             )
 
-            if df is None or df.empty:
+            if daily_df is None or daily_df.empty:
                 return None
 
-            # 重命名列并格式化
-            df = df.rename(columns={
-                "trade_date": "trade_date",
-                "open": "open",
-                "high": "high",
-                "low": "low",
-                "close": "close",
-                "vol": "volume"
-            })
+            daily_df = daily_df.rename(columns={"vol": "volume"})
+            daily_df = daily_df[["trade_date", "open", "high", "low", "close", "volume"]].copy()
 
-            # 只保留需要的列
-            df = df[["trade_date", "open", "high", "low", "close", "volume"]]
+            acquire_tushare_slot("daily_basic")
+            daily_basic_df = self.pro.daily_basic(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields="ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,free_share,circ_mv",
+            )
+            if daily_basic_df is None:
+                daily_basic_df = pd.DataFrame()
+
+            acquire_tushare_slot("moneyflow")
+            moneyflow_df = self.pro.moneyflow(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields=(
+                    "ts_code,trade_date,buy_sm_amount,sell_sm_amount,"
+                    "buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,"
+                    "buy_elg_amount,sell_elg_amount,net_mf_amount"
+                ),
+            )
+            if moneyflow_df is None:
+                moneyflow_df = pd.DataFrame()
+
+            df = daily_df.merge(daily_basic_df, on="trade_date", how="left")
+            df = df.merge(moneyflow_df, on="trade_date", how="left")
             df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
             df["code"] = code
 
-            return df.sort_values("trade_date").reset_index(drop=True)
+            numeric_columns = ["open", "high", "low", "close", "volume", *OPTIONAL_DAILY_METRIC_COLUMNS]
+            for column in numeric_columns:
+                if column in df.columns:
+                    df[column] = pd.to_numeric(df[column], errors="coerce")
+
+            keep_columns = ["code", "trade_date", "open", "high", "low", "close", "volume", *OPTIONAL_DAILY_METRIC_COLUMNS]
+            return df[keep_columns].sort_values("trade_date").reset_index(drop=True)
 
         except Exception as e:
             logger.error(f"获取 {code} 数据失败: {e}")
@@ -284,6 +343,9 @@ class DailyDataService:
                 "low": float(row["low"]),
                 "volume": float(row["volume"]),
             })
+            for column in OPTIONAL_DAILY_METRIC_COLUMNS:
+                if column in df.columns:
+                    records[-1][column] = _optional_float(row.get(column))
 
         if not records:
             return 0
@@ -329,7 +391,21 @@ class DailyDataService:
                 "high": float(r.high),
                 "low": float(r.low),
                 "close": float(r.close),
-                "vol": float(r.volume)
+                "vol": float(r.volume),
+                "turnover_rate": _optional_float(r.turnover_rate),
+                "turnover_rate_f": _optional_float(r.turnover_rate_f),
+                "volume_ratio": _optional_float(r.volume_ratio),
+                "free_share": _optional_float(r.free_share),
+                "circ_mv": _optional_float(r.circ_mv),
+                "buy_sm_amount": _optional_float(r.buy_sm_amount),
+                "sell_sm_amount": _optional_float(r.sell_sm_amount),
+                "buy_md_amount": _optional_float(r.buy_md_amount),
+                "sell_md_amount": _optional_float(r.sell_md_amount),
+                "buy_lg_amount": _optional_float(r.buy_lg_amount),
+                "sell_lg_amount": _optional_float(r.sell_lg_amount),
+                "buy_elg_amount": _optional_float(r.buy_elg_amount),
+                "sell_elg_amount": _optional_float(r.sell_elg_amount),
+                "net_mf_amount": _optional_float(r.net_mf_amount),
             } for r in results]
 
             df = pd.DataFrame(data)

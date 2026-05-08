@@ -31,7 +31,17 @@ def test_save_daily_data_creates_parent_stock_row_when_missing() -> None:
     try:
         df = pd.DataFrame(
             [
-                {"date": "2024-01-02", "open": 10, "close": 11, "high": 12, "low": 9, "volume": 1000},
+                {
+                    "date": "2024-01-02",
+                    "open": 10,
+                    "close": 11,
+                    "high": 12,
+                    "low": 9,
+                    "volume": 1000,
+                    "turnover_rate": 2.1,
+                    "volume_ratio": 1.3,
+                    "net_mf_amount": 123.4,
+                },
                 {"date": "2024-01-03", "open": 11, "close": 10.5, "high": 11.5, "low": 10, "volume": 800},
             ]
         )
@@ -48,6 +58,9 @@ def test_save_daily_data_creates_parent_stock_row_when_missing() -> None:
         )
         assert stock.market == "SZ"
         assert [row.trade_date for row in rows] == [date(2024, 1, 2), date(2024, 1, 3)]
+        assert rows[0].turnover_rate == 2.1
+        assert rows[0].volume_ratio == 1.3
+        assert rows[0].net_mf_amount == 123.4
     finally:
         close_db_session(db)
         Base.metadata.drop_all(bind=engine)
@@ -70,6 +83,8 @@ def test_daily_data_service_normalizes_code_and_creates_parent_stock_row(monkeyp
                     "low": 9,
                     "close": 11,
                     "volume": 1000,
+                    "turnover_rate": 3.5,
+                    "net_mf_amount": -88.8,
                 }
             ]
         )
@@ -81,6 +96,8 @@ def test_daily_data_service_normalizes_code_and_creates_parent_stock_row(monkeyp
         row = db.query(StockDaily).filter(StockDaily.code == "000069").one()
         assert stock.market == "SZ"
         assert row.trade_date == date(2024, 1, 2)
+        assert row.turnover_rate == 3.5
+        assert row.net_mf_amount == -88.8
     finally:
         close_db_session(db)
         Base.metadata.drop_all(bind=engine)

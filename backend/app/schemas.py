@@ -661,6 +661,20 @@ class KLineDataPoint(BaseModel):
     low: float
     close: float
     volume: float
+    turnover_rate: Optional[float] = None
+    turnover_rate_f: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    free_share: Optional[float] = None
+    circ_mv: Optional[float] = None
+    buy_sm_amount: Optional[float] = None
+    sell_sm_amount: Optional[float] = None
+    buy_md_amount: Optional[float] = None
+    sell_md_amount: Optional[float] = None
+    buy_lg_amount: Optional[float] = None
+    sell_lg_amount: Optional[float] = None
+    buy_elg_amount: Optional[float] = None
+    sell_elg_amount: Optional[float] = None
+    net_mf_amount: Optional[float] = None
     ma5: Optional[float] = None
     ma10: Optional[float] = None
     ma20: Optional[float] = None

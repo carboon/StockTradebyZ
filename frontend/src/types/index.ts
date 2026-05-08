@@ -282,6 +282,20 @@ export interface KLineDataPoint {
   low: number
   close: number
   volume: number
+  turnover_rate?: number
+  turnover_rate_f?: number
+  volume_ratio?: number
+  free_share?: number
+  circ_mv?: number
+  buy_sm_amount?: number
+  sell_sm_amount?: number
+  buy_md_amount?: number
+  sell_md_amount?: number
+  buy_lg_amount?: number
+  sell_lg_amount?: number
+  buy_elg_amount?: number
+  sell_elg_amount?: number
+  net_mf_amount?: number
   ma5?: number
   ma10?: number
   ma20?: number

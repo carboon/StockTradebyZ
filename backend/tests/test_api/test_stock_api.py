@@ -343,6 +343,9 @@ def test_get_kline_daily(test_client: TestClient, sample_kline_data: pd.DataFram
         assert "low" in first_day
         assert "close" in first_day
         assert "volume" in first_day
+        assert "turnover_rate" in first_day
+        assert "volume_ratio" in first_day
+        assert "net_mf_amount" in first_day
         assert isinstance(first_day["open"], float)
         assert isinstance(first_day["close"], float)
 
@@ -383,6 +386,7 @@ def test_get_kline_weekly(test_client: TestClient, sample_kline_data: pd.DataFra
         assert "low" in first_week
         assert "close" in first_week
         assert "volume" in first_week
+        assert "turnover_rate" in first_week
 
 
 @pytest.mark.api

@@ -184,6 +184,67 @@ def _to_ts_code(code: str) -> str:
     """把6位code映射到标准 ts_code 后缀。"""
     return resolve_ts_code(code)
 
+
+def _fetch_daily_basic(ts_code: str, start: str, end: str) -> pd.DataFrame:
+    acquire_tushare_slot("daily_basic")
+    df = pro.daily_basic(
+        ts_code=ts_code,
+        start_date=start,
+        end_date=end,
+        fields="ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,free_share,circ_mv",
+    )
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["date", "turnover_rate", "turnover_rate_f", "volume_ratio", "free_share", "circ_mv"])
+    df = df.rename(columns={"trade_date": "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    return df[["date", "turnover_rate", "turnover_rate_f", "volume_ratio", "free_share", "circ_mv"]].copy()
+
+
+def _fetch_moneyflow(ts_code: str, start: str, end: str) -> pd.DataFrame:
+    acquire_tushare_slot("moneyflow")
+    df = pro.moneyflow(
+        ts_code=ts_code,
+        start_date=start,
+        end_date=end,
+        fields=(
+            "ts_code,trade_date,buy_sm_amount,sell_sm_amount,"
+            "buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,"
+            "buy_elg_amount,sell_elg_amount,net_mf_amount"
+        ),
+    )
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "buy_sm_amount",
+                "sell_sm_amount",
+                "buy_md_amount",
+                "sell_md_amount",
+                "buy_lg_amount",
+                "sell_lg_amount",
+                "buy_elg_amount",
+                "sell_elg_amount",
+                "net_mf_amount",
+            ]
+        )
+    df = df.rename(columns={"trade_date": "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    return df[
+        [
+            "date",
+            "buy_sm_amount",
+            "sell_sm_amount",
+            "buy_md_amount",
+            "sell_md_amount",
+            "buy_lg_amount",
+            "sell_lg_amount",
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "net_mf_amount",
+        ]
+    ].copy()
+
+
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     ts_code = _to_ts_code(code)
     try:
@@ -210,6 +271,8 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"])
     for c in ["open", "close", "high", "low", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.merge(_fetch_daily_basic(ts_code, start, end), on="date", how="left")
+    df = df.merge(_fetch_moneyflow(ts_code, start, end), on="date", how="left")
     return df.sort_values("date").reset_index(drop=True)
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:

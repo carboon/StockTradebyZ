@@ -19,6 +19,29 @@ from app.utils.stock_metadata import normalize_stock_code, resolve_market
 
 logger = logging.getLogger(__name__)
 
+_OPTIONAL_DAILY_METRIC_COLUMNS = [
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+    "free_share",
+    "circ_mv",
+    "buy_sm_amount",
+    "sell_sm_amount",
+    "buy_md_amount",
+    "sell_md_amount",
+    "buy_lg_amount",
+    "sell_lg_amount",
+    "buy_elg_amount",
+    "sell_elg_amount",
+    "net_mf_amount",
+]
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
 
 def ensure_stock_row(db: Session, code: str) -> Stock:
     """确保 stocks 表存在对应 code，避免 stock_daily 外键写入失败。"""
@@ -68,7 +91,7 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
         elif isinstance(trade_date, (datetime, pd.Timestamp)):
             trade_date = trade_date.date() if hasattr(trade_date, 'date') else trade_date
 
-        records.append({
+        record = {
             "code": normalized_code,
             "trade_date": trade_date,
             "open": float(row["open"]),
@@ -76,7 +99,11 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
             "high": float(row["high"]),
             "low": float(row["low"]),
             "volume": float(row["volume"]),
-        })
+        }
+        for column in _OPTIONAL_DAILY_METRIC_COLUMNS:
+            if column in df.columns:
+                record[column] = _optional_float(row.get(column))
+        records.append(record)
 
     if not records:
         return 0
@@ -90,6 +117,20 @@ def save_daily_data(db: Session, code: str, df: pd.DataFrame) -> int:
             "high": stmt.excluded.high,
             "low": stmt.excluded.low,
             "volume": stmt.excluded.volume,
+            "turnover_rate": stmt.excluded.turnover_rate,
+            "turnover_rate_f": stmt.excluded.turnover_rate_f,
+            "volume_ratio": stmt.excluded.volume_ratio,
+            "free_share": stmt.excluded.free_share,
+            "circ_mv": stmt.excluded.circ_mv,
+            "buy_sm_amount": stmt.excluded.buy_sm_amount,
+            "sell_sm_amount": stmt.excluded.sell_sm_amount,
+            "buy_md_amount": stmt.excluded.buy_md_amount,
+            "sell_md_amount": stmt.excluded.sell_md_amount,
+            "buy_lg_amount": stmt.excluded.buy_lg_amount,
+            "sell_lg_amount": stmt.excluded.sell_lg_amount,
+            "buy_elg_amount": stmt.excluded.buy_elg_amount,
+            "sell_elg_amount": stmt.excluded.sell_elg_amount,
+            "net_mf_amount": stmt.excluded.net_mf_amount,
         },
     )
 
@@ -152,6 +193,20 @@ def get_daily_data(
             "high": row.high,
             "low": row.low,
             "volume": row.volume,
+            "turnover_rate": row.turnover_rate,
+            "turnover_rate_f": row.turnover_rate_f,
+            "volume_ratio": row.volume_ratio,
+            "free_share": row.free_share,
+            "circ_mv": row.circ_mv,
+            "buy_sm_amount": row.buy_sm_amount,
+            "sell_sm_amount": row.sell_sm_amount,
+            "buy_md_amount": row.buy_md_amount,
+            "sell_md_amount": row.sell_md_amount,
+            "buy_lg_amount": row.buy_lg_amount,
+            "sell_lg_amount": row.sell_lg_amount,
+            "buy_elg_amount": row.buy_elg_amount,
+            "sell_elg_amount": row.sell_elg_amount,
+            "net_mf_amount": row.net_mf_amount,
         })
 
     return pd.DataFrame(data)

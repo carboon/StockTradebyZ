@@ -111,6 +111,26 @@ def _current_hot_tables_migration_satisfied(inspector: Any) -> bool:
     )
 
 
+def _stock_daily_market_metrics_migration_satisfied(inspector: Any) -> bool:
+    required_columns = {
+        "turnover_rate",
+        "turnover_rate_f",
+        "volume_ratio",
+        "free_share",
+        "circ_mv",
+        "buy_sm_amount",
+        "sell_sm_amount",
+        "buy_md_amount",
+        "sell_md_amount",
+        "buy_lg_amount",
+        "sell_lg_amount",
+        "buy_elg_amount",
+        "sell_elg_amount",
+        "net_mf_amount",
+    }
+    return all(_has_column(inspector, "stock_daily", column) for column in required_columns)
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
@@ -119,6 +139,7 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_raw_data_manifest_tables.sql": _raw_data_manifest_migration_satisfied,
     "add_candidate_consecutive_metrics.sql": _candidate_consecutive_metrics_migration_satisfied,
     "add_current_hot_tables.sql": _current_hot_tables_migration_satisfied,
+    "add_stock_daily_market_metrics.sql": _stock_daily_market_metrics_migration_satisfied,
 }
 
 

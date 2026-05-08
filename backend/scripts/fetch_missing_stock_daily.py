@@ -50,6 +50,53 @@ def fetch_kline(pro: ts.pro_api, code: str, end_date: str) -> pd.DataFrame:
     frame["date"] = pd.to_datetime(frame["date"])
     for column in ["open", "close", "high", "low", "volume"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    acquire_tushare_slot("daily_basic")
+    daily_basic = pro.daily_basic(
+        ts_code=ts_code,
+        start_date=START_DATE,
+        end_date=end_date,
+        fields="ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,free_share,circ_mv",
+    )
+    if daily_basic is not None and not daily_basic.empty:
+        daily_basic = daily_basic.rename(columns={"trade_date": "date"})
+        daily_basic["date"] = pd.to_datetime(daily_basic["date"])
+        frame = frame.merge(
+            daily_basic[["date", "turnover_rate", "turnover_rate_f", "volume_ratio", "free_share", "circ_mv"]],
+            on="date",
+            how="left",
+        )
+    acquire_tushare_slot("moneyflow")
+    moneyflow = pro.moneyflow(
+        ts_code=ts_code,
+        start_date=START_DATE,
+        end_date=end_date,
+        fields=(
+            "ts_code,trade_date,buy_sm_amount,sell_sm_amount,"
+            "buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,"
+            "buy_elg_amount,sell_elg_amount,net_mf_amount"
+        ),
+    )
+    if moneyflow is not None and not moneyflow.empty:
+        moneyflow = moneyflow.rename(columns={"trade_date": "date"})
+        moneyflow["date"] = pd.to_datetime(moneyflow["date"])
+        frame = frame.merge(
+            moneyflow[
+                [
+                    "date",
+                    "buy_sm_amount",
+                    "sell_sm_amount",
+                    "buy_md_amount",
+                    "sell_md_amount",
+                    "buy_lg_amount",
+                    "sell_lg_amount",
+                    "buy_elg_amount",
+                    "sell_elg_amount",
+                    "net_mf_amount",
+                ]
+            ],
+            on="date",
+            how="left",
+        )
     frame = frame.dropna(subset=["date", "open", "close", "high", "low", "volume"])
     frame = frame.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
     return frame
