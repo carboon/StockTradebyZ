@@ -24,6 +24,19 @@ cp .env.example deploy/.env
 ./deploy/scripts/start.sh prod --build
 ```
 
+后台交易日更新：
+
+```bash
+./deploy/scripts/start.sh update-latest
+```
+
+如需宿主机后台限流运行，可使用：
+
+```bash
+deploy/systemd/stocktrade-background-update.service
+deploy/systemd/stocktrade-background-update.timer
+```
+
 访问地址：
 
 - 开发主入口：`http://127.0.0.1:8080`
@@ -82,4 +95,5 @@ cp .env.example deploy/.env
 - `postgres` 是 Docker Compose 服务名，只在 Compose 网络内有效
 - 容器内运行后端或测试时，`DATABASE_URL=...@postgres:5432/...` 是正确的
 - 宿主机直接运行测试且未通过 Docker 网络访问数据库时，应改用 `127.0.0.1` 或 `localhost`
+- 当前推荐通过 `./deploy/scripts/start.sh update-latest` 在 `backend` 容器内执行后台更新，避免宿主机单独处理数据库地址
 - 当前测试基座仍使用内存 SQLite 做隔离，这不属于生产部署能力

@@ -1,0 +1,39 @@
+[Unit]
+Description=StockTrade Background Latest Trade Day Update
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=yes
+Group=staff
+WorkingDirectory=/Volumes/DATA/StockTradebyZ
+TimeoutStartSec=6h
+
+Environment=PYTHONUNBUFFERED=1
+
+# 通过 Docker backend 容器执行，避免宿主机单独处理 DATABASE_URL / Python 依赖
+ExecStart=/Volumes/DATA/StockTradebyZ/deploy/scripts/run_background_update.sh
+
+# 资源限制：避免后台更新明显挤占在线服务
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUQuota=35%
+MemoryMax=2G
+TasksMax=128
+
+# 安全与稳定性
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/Volumes/DATA/StockTradebyZ/data
+ReadWritePaths=/Volumes/DATA/StockTradebyZ/backend
+ReadWritePaths=/Volumes/DATA/StockTradebyZ/.docker
+
+# 输出
+StandardOutput=append:/Volumes/DATA/StockTradebyZ/data/logs/systemd-background-update.out.log
+StandardError=append:/Volumes/DATA/StockTradebyZ/data/logs/systemd-background-update.err.log
+
+[Install]
+WantedBy=multi-user.target

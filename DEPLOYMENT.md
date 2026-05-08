@@ -109,12 +109,52 @@ cp .env.example deploy/.env
 - 后端 API：`http://127.0.0.1:8000`
 - API 文档：`http://127.0.0.1:8000/docs`
 
+## 后台交易日更新
+
+仓库已提供独立后台更新脚本：
+
+```bash
+./deploy/scripts/start.sh update-latest
+```
+
+如需用 systemd 以受限资源方式在宿主机后台执行，可使用：
+
+```bash
+deploy/systemd/stocktrade-background-update.service
+deploy/systemd/stocktrade-background-update.timer
+```
+
+该 service 已内置以下限制：
+
+- `CPUQuota=35%`
+- `MemoryMax=2G`
+- `Nice=10`
+- `IOSchedulingClass=idle`
+
+使用前请确认：
+
+- `WorkingDirectory` 与仓库实际路径一致
+- `User` / `Group` 与部署用户一致
+- Docker 服务已启动，且 `backend` 容器处于运行状态
+
+启用方式示例：
+
+```bash
+sudo cp deploy/systemd/stocktrade-background-update.service /etc/systemd/system/
+sudo cp deploy/systemd/stocktrade-background-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now stocktrade-background-update.timer
+sudo systemctl start stocktrade-background-update.service
+sudo systemctl status stocktrade-background-update.timer
+```
+
 ## 宿主机与容器的数据库地址差异
 
 - 容器内访问 PostgreSQL：`postgres:5432`
 - 宿主机访问 PostgreSQL：通常使用 `127.0.0.1:${POSTGRES_PORT:-5432}`
 
-如果你在宿主机直接运行 Python、脚本或 pytest，不要继续使用 `@postgres:5432` 作为数据库地址。
+当前推荐的后台更新方式是通过 `backend` 容器执行，因此不需要单独修改后台更新任务的数据库地址。
+只有在宿主机直接运行 Python、脚本或 pytest 时，才不要继续使用 `@postgres:5432` 作为数据库地址。
 
 ## 数据与备份
 

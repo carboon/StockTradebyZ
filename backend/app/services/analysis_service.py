@@ -21,7 +21,7 @@ from app.config import settings
 from app.services.analysis_cache import analysis_cache
 from app.services.kline_service import get_daily_data
 from app.database import SessionLocal
-from app.models import DailyB1Check, DailyB1CheckDetail, StockDaily
+from app.models import AnalysisResult, DailyB1Check, DailyB1CheckDetail, StockDaily
 
 
 class AnalysisService:
@@ -749,7 +749,24 @@ class AnalysisService:
             return None
 
     def get_latest_result_date(self) -> Optional[str]:
-        """读取最新分析结果日期。"""
+        """读取最新分析结果日期。
+
+        优先从数据库 AnalysisResult 读取，确保与当前接口查询口径一致；
+        文件目录仅作为兼容回退。
+        """
+        try:
+            with SessionLocal() as db:
+                latest = (
+                    db.query(AnalysisResult.pick_date)
+                    .order_by(AnalysisResult.pick_date.desc(), AnalysisResult.id.desc())
+                    .first()
+                )
+            if latest and latest[0]:
+                return self._normalize_pick_date(latest[0].isoformat())
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
         review_dir = ROOT / settings.review_dir
         if not review_dir.exists():
             return None

@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any, Callable
 
 import pandas as pd
 from app.services.daily_batch_update_service import DailyBatchUpdateService
+from app.time_utils import utc_now
 from app.utils.stock_metadata import resolve_ts_code
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
@@ -59,6 +60,29 @@ _update_lock = threading.Lock()
 
 class MarketService:
     """市场数据服务"""
+
+    @staticmethod
+    def _state_now() -> datetime:
+        return utc_now()
+
+    @staticmethod
+    def _parse_state_datetime(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.astimezone()
+        return parsed
+
+    @classmethod
+    def _elapsed_seconds_since(cls, started_at_value: Optional[str]) -> int:
+        started_at = cls._parse_state_datetime(started_at_value)
+        if started_at is None:
+            return 0
+        return max(0, int((cls._state_now() - started_at).total_seconds()))
 
     def __init__(self, token: Optional[str] = None):
         if token is not None:
@@ -185,7 +209,7 @@ class MarketService:
             _update_state["updated_count"] = 0
             _update_state["skipped_count"] = 0
             _update_state["failed_count"] = 0
-            _update_state["started_at"] = datetime.now().isoformat()
+            _update_state["started_at"] = MarketService._state_now().isoformat()
             _update_state["completed_at"] = None
             _update_state["eta_seconds"] = None
             _update_state["elapsed_seconds"] = 0
@@ -206,10 +230,8 @@ class MarketService:
             _update_state["progress"] = 100
             _update_state["current"] = _update_state["total"]
             _update_state["eta_seconds"] = 0
-            _update_state["completed_at"] = datetime.now().isoformat()
-            if _update_state["started_at"]:
-                started_at = datetime.fromisoformat(_update_state["started_at"])
-                _update_state["elapsed_seconds"] = max(0, int((datetime.now() - started_at).total_seconds()))
+            _update_state["completed_at"] = MarketService._state_now().isoformat()
+            _update_state["elapsed_seconds"] = MarketService._elapsed_seconds_since(_update_state["started_at"])
             _update_state["message"] = message
             _update_state["last_error"] = None
 
@@ -220,10 +242,8 @@ class MarketService:
             _update_state["status"] = "failed"
             _update_state["running"] = False
             _update_state["eta_seconds"] = None
-            _update_state["completed_at"] = datetime.now().isoformat()
-            if _update_state["started_at"]:
-                started_at = datetime.fromisoformat(_update_state["started_at"])
-                _update_state["elapsed_seconds"] = max(0, int((datetime.now() - started_at).total_seconds()))
+            _update_state["completed_at"] = MarketService._state_now().isoformat()
+            _update_state["elapsed_seconds"] = MarketService._elapsed_seconds_since(_update_state["started_at"])
             _update_state["message"] = message
             _update_state["last_error"] = message
 
@@ -231,10 +251,7 @@ class MarketService:
     def update_progress(payload: Dict[str, Any]) -> None:
         """更新进度。"""
         with _update_lock:
-            started_at = None
-            if _update_state["started_at"]:
-                started_at = datetime.fromisoformat(_update_state["started_at"])
-            elapsed_seconds = max(0, int((datetime.now() - started_at).total_seconds())) if started_at else 0
+            elapsed_seconds = MarketService._elapsed_seconds_since(_update_state["started_at"])
 
             _update_state["status"] = "running"
             _update_state["running"] = True

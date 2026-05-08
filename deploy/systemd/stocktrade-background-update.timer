@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule StockTrade Background Latest Trade Day Update
+
+[Timer]
+# 默认按宿主机本地时区执行。当前设置为工作日 18:30，
+# 适合在收盘后、晚间数据较稳定时触发。
+OnCalendar=Mon..Fri *-*-* 18:30:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=stocktrade-background-update.service
+
+[Install]
+WantedBy=timers.target

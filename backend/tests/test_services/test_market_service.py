@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import timezone
 from unittest.mock import patch
 
 import pandas as pd
@@ -6,6 +7,7 @@ import pandas as pd
 import app.services.market_service as market_service_module
 from app.config import settings
 from app.services.market_service import MarketService
+from app.time_utils import utc_now
 
 
 def test_incremental_update_includes_end_date_when_local_csv_is_previous_day(tmp_path, monkeypatch) -> None:
@@ -130,3 +132,30 @@ def test_incremental_update_resolves_920_code_from_stocklist(tmp_path, monkeypat
     updated_df = pd.read_csv(raw_dir / "920964.csv")
     updated_df["date"] = pd.to_datetime(updated_df["date"])
     assert updated_df["date"].max() == pd.Timestamp("2026-04-29")
+
+
+def test_update_progress_accepts_timezone_aware_started_at() -> None:
+    started_at = utc_now().isoformat()
+    market_service_module._update_state["started_at"] = started_at
+    market_service_module._update_state["running"] = True
+    market_service_module._update_state["message"] = ""
+
+    MarketService.update_progress(
+        {
+            "current": 0,
+            "total": 1,
+            "progress": 10,
+            "message": "进行中",
+        }
+    )
+
+    assert market_service_module._update_state["elapsed_seconds"] >= 0
+    assert market_service_module._update_state["message"] == "进行中"
+
+
+def test_elapsed_seconds_since_accepts_naive_isoformat() -> None:
+    naive_started_at = utc_now().astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+
+    elapsed = MarketService._elapsed_seconds_since(naive_started_at)
+
+    assert elapsed >= 0

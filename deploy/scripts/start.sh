@@ -50,6 +50,7 @@ StockTrader 统一运行脚本
   ps            查看服务状态
   restart       重启服务
   exec-backend  进入后端容器
+  update-latest 在 backend 容器内执行最新交易日后台更新
 
 选项:
   --build       启动前构建镜像 (dev 默认启用，prod 需显式指定)
@@ -68,6 +69,9 @@ StockTrader 统一运行脚本
   $0 ps                     # 查看服务状态
   $0 restart                # 重启服务
   $0 exec-backend           # 进入后端容器
+  $0 update-latest          # 更新最新交易日数据并重建明日之星
+  $0 update-latest -- --force
+                           # 将参数透传给后台更新脚本
 
 访问地址:
   开发环境:
@@ -298,6 +302,11 @@ cmd_exec_backend() {
     exec "${DOCKER_COMPOSE[@]}" $(get_compose_args "$mode") exec backend bash
 }
 
+cmd_update_latest() {
+    log_info "执行最新交易日后台更新..."
+    exec "$PROJECT_ROOT/deploy/scripts/run_background_update.sh" "${TARGETS[@]}"
+}
+
 # 默认值
 COMMAND=""
 BUILD="0"
@@ -308,9 +317,16 @@ TARGETS=()
 # 解析参数
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        dev|prod|down|logs|ps|restart|exec-backend)
+        dev|prod|down|logs|ps|restart|exec-backend|update-latest)
             COMMAND="$1"
             shift
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                TARGETS+=("$1")
+                shift
+            done
             ;;
         --build)
             BUILD="1"
@@ -375,12 +391,15 @@ case "$COMMAND" in
     restart)
         cmd_restart
         ;;
-    exec-backend)
-        cmd_exec_backend
-        ;;
-    *)
-        log_error "未知命令: $COMMAND"
-        show_help
+        exec-backend)
+            cmd_exec_backend
+            ;;
+        update-latest)
+            cmd_update_latest
+            ;;
+        *)
+            log_error "未知命令: $COMMAND"
+            show_help
         exit 1
         ;;
 esac
