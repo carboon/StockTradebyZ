@@ -19,13 +19,14 @@ from app.api.cache_decorators import (
     build_candidates_cache_key,
     build_freshness_cache_key,
 )
-from app.api.deps import require_user
+from app.api.deps import get_admin_user, require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
 from app.api.tasks import _cleanup_stale_active_tasks, _raise_initialization_in_progress
 from app.cache import cache
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
 from app.services.analysis_service import analysis_service
+from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
@@ -38,6 +39,8 @@ from app.schemas import (
     TomorrowStarDatesResponse,
     TomorrowStarHistoryItem,
     TomorrowStarWindowStatusResponse,
+    IntradayAnalysisGenerateResponse,
+    IntradayAnalysisResponse,
     DiagnosisHistoryResponse,
     DiagnosisHistoryDetailResponse,
     B1CheckItem,
@@ -439,6 +442,45 @@ async def get_analysis_results(
         total=len(items),
         min_score_threshold=4.0,
     )
+
+
+@router.get("/intraday/status")
+async def get_intraday_analysis_status(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
+    service = IntradayAnalysisService(db)
+    status = service.get_status(is_admin=getattr(user, "role", None) == "admin")
+    return {
+        "trade_date": status.trade_date,
+        "source_pick_date": status.source_pick_date,
+        "snapshot_time": status.snapshot_time,
+        "window_open": status.window_open,
+        "has_data": status.has_data,
+        "status": status.status,
+        "message": status.message,
+    }
+
+
+@router.get("/intraday/data", response_model=IntradayAnalysisResponse)
+async def get_intraday_analysis_data(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> IntradayAnalysisResponse:
+    service = IntradayAnalysisService(db)
+    payload = service.get_snapshot_payload(is_admin=getattr(user, "role", None) == "admin")
+    return IntradayAnalysisResponse(**payload)
+
+
+@router.post("/intraday/generate", response_model=IntradayAnalysisGenerateResponse)
+async def generate_intraday_analysis(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> IntradayAnalysisGenerateResponse:
+    ensure_tushare_ready()
+    service = IntradayAnalysisService(db)
+    payload = service.generate_snapshot()
+    return IntradayAnalysisGenerateResponse(**payload)
 
 
 @router.get("/diagnosis/{code}/history", response_model=DiagnosisHistoryResponse)

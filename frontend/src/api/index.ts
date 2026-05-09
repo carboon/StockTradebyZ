@@ -16,6 +16,9 @@ import type {
   DiagnosisHistoryStatusResponse,
   DiagnosisResultResponse,
   FreshnessResponse,
+  IntradayAnalysisActionResponse,
+  IntradayAnalysisResponse,
+  IntradayAnalysisStatusResponse,
   DailyBatchUpdateResponse,
   IncrementalUpdateResponse,
   IncrementalUpdateStatus,
@@ -213,6 +216,22 @@ export const apiAnalysis = {
   // 生成明日之星
   generate: (reviewer: string = 'quant') =>
     api.post<null, { task_id: number }>('/v1/analysis/tomorrow-star/generate', null, { params: { reviewer } }),
+
+  // 获取中盘分析状态
+  getMiddayStatus: (options?: RequestOptions) =>
+    api.get<never, IntradayAnalysisStatusResponse>('/v1/analysis/intraday/status', withRequestOptions(options, TIMEOUTS.short)),
+
+  // 获取当前交易日中盘分析结果
+  getMiddayCurrent: (options?: RequestOptions) =>
+    api.get<never, IntradayAnalysisResponse>('/v1/analysis/intraday/data', withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 手动生成中盘分析
+  generateMidday: () =>
+    api.post<null, IntradayAnalysisActionResponse>('/v1/analysis/intraday/generate', null, { timeout: TIMEOUTS.standard }),
+
+  // 手动刷新中盘分析
+  refreshMidday: () =>
+    api.post<null, IntradayAnalysisActionResponse>('/v1/analysis/intraday/generate', null, { timeout: TIMEOUTS.standard }),
 
   // 获取单股诊断历史
   getDiagnosisHistory: (

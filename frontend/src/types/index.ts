@@ -46,6 +46,31 @@ export interface AnalysisResult {
   comment?: string
 }
 
+export interface IntradayAnalysisItem {
+  id: number
+  trade_date: string
+  code: string
+  name?: string
+  source_pick_date: string
+  snapshot_time: string
+  open_price?: number | null
+  close_price?: number | null
+  high_price?: number | null
+  low_price?: number | null
+  volume?: number | null
+  amount?: number | null
+  change_pct?: number | null
+  turnover?: number | null
+  b1_passed?: boolean | null
+  score?: number | null
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  signal_type?: string | null
+  kdj_j?: number | null
+  zx_long_pos?: boolean | null
+  weekly_ma_aligned?: boolean | null
+  volume_healthy?: boolean | null
+}
+
 export interface B1Check {
   check_date: string
   close_price?: number
@@ -332,6 +357,40 @@ export interface AnalysisResultsResponse {
   results: AnalysisResult[]
   total: number
   min_score_threshold: number
+}
+
+export interface IntradayAnalysisStatusResponse {
+  trade_date?: string | null
+  snapshot_time?: string | null
+  source_pick_date?: string | null
+  window_open?: boolean | null
+  has_data: boolean
+  status?: string | null
+  message?: string | null
+}
+
+export interface IntradayAnalysisResponse {
+  trade_date?: string | null
+  snapshot_time?: string | null
+  source_pick_date?: string | null
+  window_open?: boolean | null
+  has_data: boolean
+  status?: string | null
+  items: IntradayAnalysisItem[]
+  total: number
+  message?: string | null
+}
+
+export interface IntradayAnalysisActionResponse {
+  trade_date?: string | null
+  source_pick_date?: string | null
+  snapshot_time?: string | null
+  window_open?: boolean | null
+  has_data?: boolean
+  status?: string | null
+  message: string
+  generated_count?: number
+  skipped_count?: number
 }
 
 export interface DiagnosisHistoryResponse {

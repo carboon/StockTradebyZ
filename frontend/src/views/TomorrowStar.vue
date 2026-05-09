@@ -1,409 +1,649 @@
 <template>
   <div class="tomorrow-star-page">
-    <el-alert
-      v-if="showInitializationAlert"
-      class="page-alert"
-      type="info"
-      :closable="false"
-      show-icon
-      title="尚未完成首次初始化"
-      :description="configStore.initializationMessage"
-    />
-
-    <div v-if="showInitializationEmpty" class="page-empty">
-      <el-empty description="明日之星尚无可用数据" :image-size="120">
-        <el-button type="primary" @click="router.push('/update')">
-          前往任务中心初始化
-        </el-button>
-        <el-button @click="refreshStatusAndRetry">
-          重新检查状态
-        </el-button>
-      </el-empty>
-    </div>
-
-    <!-- 增量更新进度提示 -->
-    <el-card v-if="incrementalUpdate.running" class="update-progress-card" shadow="never">
-      <div class="progress-content">
-        <div class="progress-info">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <span class="progress-text">增量更新中...</span>
-          <span class="progress-detail">
-            {{ incrementalUpdate.updated_count }} 更新 / {{ incrementalUpdate.skipped_count }} 跳过 / {{ incrementalUpdate.failed_count }} 失败
-          </span>
-          <span v-if="incrementalUpdate.current_code" class="current-code">
-            当前: {{ incrementalUpdate.current_code }}
-          </span>
-        </div>
-        <el-progress
-          :percentage="incrementalUpdate.progress"
-          :stroke-width="12"
-          :show-text="true"
+    <el-tabs v-model="activeTab" class="page-tabs">
+      <el-tab-pane label="明日之星" name="tomorrow-star">
+        <el-alert
+          v-if="showInitializationAlert"
+          class="page-alert"
+          type="info"
+          :closable="false"
+          show-icon
+          title="尚未完成首次初始化"
+          :description="configStore.initializationMessage"
         />
-      </div>
-    </el-card>
-    <el-alert
-      v-else-if="authStore.isAdmin && incrementalUpdate.status === 'failed'"
-      class="page-alert"
-      type="warning"
-      :closable="false"
-      show-icon
-      title="增量更新上次未完成"
-      :description="incrementalUpdate.last_error || incrementalUpdate.message || '可前往任务中心重新发起，系统会尽量从已完成位置继续。'"
-    />
 
-    <div v-if="isMobile" class="mobile-layout">
-      <el-card class="mobile-section-card">
-        <template #header>
-          <div class="card-header">
-            <div class="title-section">
-              <span>历史信息</span>
-              <el-tag v-if="selectedDate" size="small" type="info" effect="plain">
-                已选 {{ viewingDateDisplay }}
-              </el-tag>
-            </div>
-          </div>
-        </template>
-
-        <div class="table-header-tip mobile-tip">
-          <span class="tip-item">· 点击日期刷新对应 Top 5</span>
+        <div v-if="showInitializationEmpty" class="page-empty">
+          <el-empty description="明日之星尚无可用数据" :image-size="120">
+            <el-button type="primary" @click="router.push('/update')">
+              前往任务中心初始化
+            </el-button>
+            <el-button @click="refreshStatusAndRetry">
+              重新检查状态
+            </el-button>
+          </el-empty>
         </div>
 
-        <div v-if="displayHistoryData.length > 0" class="mobile-history-list">
-          <button
-            v-for="row in displayHistoryData"
-            :key="row.rawDate"
-            type="button"
-            class="mobile-history-item"
-            :class="{ active: selectedDate === row.rawDate }"
-            @click="selectDate(row)"
-          >
-            <div class="mobile-history-item__header">
-              <span class="mobile-history-item__date">{{ row.date }}</span>
-              <div class="mobile-history-item__status">
-                <el-tag
-                  v-if="row.rawDate === latestDate"
-                  type="success"
-                  size="small"
-                  class="status-tag"
-                >
-                  最新
-                </el-tag>
-                <el-tag
-                  :type="getHistoryStatusTagType(row.status)"
-                  size="small"
-                  class="status-tag"
-                >
-                  {{ getHistoryStatusLabel(row.status) }}
-                </el-tag>
+        <template v-else>
+          <el-card v-if="incrementalUpdate.running" class="update-progress-card" shadow="never">
+            <div class="progress-content">
+              <div class="progress-info">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                <span class="progress-text">增量更新中...</span>
+                <span class="progress-detail">
+                  {{ incrementalUpdate.updated_count }} 更新 / {{ incrementalUpdate.skipped_count }} 跳过 / {{ incrementalUpdate.failed_count }} 失败
+                </span>
+                <span v-if="incrementalUpdate.current_code" class="current-code">
+                  当前: {{ incrementalUpdate.current_code }}
+                </span>
               </div>
+              <el-progress
+                :percentage="incrementalUpdate.progress"
+                :stroke-width="12"
+                :show-text="true"
+              />
             </div>
-            <div class="mobile-history-item__meta">
-              <span>候选数 {{ row.count === '-' ? '-' : row.count }}</span>
-              <span>趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
-              <span>连续候选数 {{ row.consecutiveCandidateCount === '-' ? '-' : row.consecutiveCandidateCount }}</span>
-            </div>
-          </button>
-        </div>
-        <el-empty v-else description="暂无历史信息" :image-size="90" />
-
-        <div class="pagination-wrap mobile-pagination">
-          <div class="mobile-pagination__summary">
-            第 {{ historyPage }} / {{ historyPageCount }} 页
-          </div>
-          <el-pagination
-            v-model:current-page="historyPage"
-            :page-size="historyPageSize"
-            layout="prev, pager, next"
-            :total="totalHistoryCount"
-            :hide-on-single-page="false"
-            background
-            size="small"
+          </el-card>
+          <el-alert
+            v-else-if="authStore.isAdmin && incrementalUpdate.status === 'failed'"
+            class="page-alert"
+            type="warning"
+            :closable="false"
+            show-icon
+            title="增量更新上次未完成"
+            :description="incrementalUpdate.last_error || incrementalUpdate.message || '可前往任务中心重新发起，系统会尽量从已完成位置继续。'"
           />
-        </div>
-      </el-card>
 
-      <el-card class="mobile-section-card">
-        <template #header>
-          <div class="card-header">
-            <div class="title-section">
-              <span>分析结果 Top 5</span>
-              <el-tag size="small" type="success" class="date-tag">
-                {{ viewingDateDisplay }}
-              </el-tag>
-            </div>
-            <div class="header-actions">
-              <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
-                已展示缓存结果
-              </el-tag>
-              <el-button
-                type="primary"
-                size="small"
-                :icon="Refresh"
-                :loading="loadingLatest"
-                @click="refreshCurrentCandidates"
-              >
-                刷新
-              </el-button>
-            </div>
-          </div>
-        </template>
-
-        <div class="table-header-tip mobile-tip">
-          <span class="tip-item">· 仅展示评分最高的 5 只股票</span>
-        </div>
-
-        <div v-if="topAnalysisResults.length > 0" class="mobile-analysis-list">
-          <button
-            v-for="row in topAnalysisResults"
-            :key="row.code"
-            type="button"
-            class="mobile-analysis-item"
-            @click="viewStock(row.code)"
-          >
-            <div class="mobile-analysis-item__header">
-              <div>
-                <div class="mobile-analysis-item__code">{{ row.code }}</div>
-                <div class="mobile-analysis-item__name">{{ getAnalysisResultName(row) }}</div>
-              </div>
-              <el-tag :type="getScoreType(row.total_score)" size="small">
-                {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
-              </el-tag>
-            </div>
-            <div class="mobile-analysis-item__meta">
-              <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
-                {{ getSignalTypeLabel(row.signal_type) }}
-              </el-tag>
-              <span class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
-            </div>
-          </button>
-        </div>
-        <el-empty v-else description="暂无 Top 5 分析结果" :image-size="90" />
-      </el-card>
-    </div>
-
-    <el-row v-else :gutter="20" class="top-row">
-      <!-- 左侧：历史记录 -->
-      <el-col :span="8">
-        <el-card class="history-card matched-height">
-          <template #header>
-            <div class="card-header">
-              <span>历史记录</span>
-            </div>
-          </template>
-
-          <div class="table-header-tip">
-            <span class="tip-item">· 点击日期查看对应数据</span>
-            <span class="tip-item">· 右侧跟随左侧选择</span>
-          </div>
-
-          <el-table
-            :data="displayHistoryData"
-            @row-click="selectDate"
-            class="history-table"
-            height="400"
-            highlight-current-row
-            :current-row-key="selectedDate"
-            row-key="rawDate"
-          >
-            <el-table-column prop="date" label="时间" width="120" />
-            <el-table-column prop="count" label="候选数" width="100" align="center">
-              <template #default="{ row }">
-                {{ row.count === '-' ? '-' : row.count }}
-              </template>
-            </el-table-column>
-            <el-table-column prop="pass" label="趋势启动数" width="120" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.pass !== '-'" :type="row.pass > 0 ? 'success' : 'info'" size="small">
-                  {{ row.pass }}
-                </el-tag>
-                <span v-else>-</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="consecutiveCandidateCount" label="连续候选数" width="120" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.consecutiveCandidateCount !== '-'" :type="row.consecutiveCandidateCount > 0 ? 'warning' : 'info'" size="small">
-                  {{ row.consecutiveCandidateCount }}
-                </el-tag>
-                <span v-else>-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="80" align="center">
-              <template #default="{ row }">
-                <div class="history-status-cell">
-                  <el-tag
-                    v-if="row.rawDate === latestDate"
-                    type="success"
-                    size="small"
-                    class="status-tag"
-                  >
-                    最新
-                  </el-tag>
-                  <el-tag
-                    :type="getHistoryStatusTagType(row.status)"
-                    size="small"
-                    class="status-tag"
-                  >
-                    {{ getHistoryStatusLabel(row.status) }}
-                  </el-tag>
+          <div v-if="isMobile" class="mobile-layout">
+            <el-card class="mobile-section-card">
+              <template #header>
+                <div class="card-header">
+                  <div class="title-section">
+                    <span>历史信息</span>
+                    <el-tag v-if="selectedDate" size="small" type="info" effect="plain">
+                      已选 {{ viewingDateDisplay }}
+                    </el-tag>
+                  </div>
                 </div>
               </template>
-            </el-table-column>
-          </el-table>
 
-          <div class="pagination-wrap">
-            <el-pagination
-              v-model:current-page="historyPage"
-              :page-size="historyPageSize"
-              layout="total, prev, pager, next"
-              :total="totalHistoryCount"
-              :hide-on-single-page="false"
-              background
-              size="small"
-            />
-          </div>
-        </el-card>
-      </el-col>
-
-      <!-- 右侧：候选列表（跟随左侧选择） -->
-      <el-col :span="16">
-        <el-card class="candidates-card matched-height">
-          <template #header>
-            <div class="card-header">
-              <div class="title-section">
-                <span>候选股票</span>
-                <el-tag size="small" type="success" class="date-tag">
-                  {{ viewingDateDisplay }}
-                </el-tag>
+              <div class="table-header-tip mobile-tip">
+                <span class="tip-item">· 点击日期刷新对应 Top 5</span>
               </div>
-              <div class="header-actions">
-                <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
-                  已展示缓存结果
-                </el-tag>
-                <el-button
-                  type="primary"
-                  size="small"
-                  :icon="Refresh"
-                  :loading="loadingLatest"
-                  @click="refreshCurrentCandidates"
+
+              <div v-if="displayHistoryData.length > 0" class="mobile-history-list">
+                <button
+                  v-for="row in displayHistoryData"
+                  :key="row.rawDate"
+                  type="button"
+                  class="mobile-history-item"
+                  :class="{ active: selectedDate === row.rawDate }"
+                  @click="selectDate(row)"
                 >
-                  刷新
-                </el-button>
+                  <div class="mobile-history-item__header">
+                    <span class="mobile-history-item__date">{{ row.date }}</span>
+                    <div class="mobile-history-item__status">
+                      <el-tag
+                        v-if="row.rawDate === latestDate"
+                        type="success"
+                        size="small"
+                        class="status-tag"
+                      >
+                        最新
+                      </el-tag>
+                      <el-tag
+                        :type="getHistoryStatusTagType(row.status)"
+                        size="small"
+                        class="status-tag"
+                      >
+                        {{ getHistoryStatusLabel(row.status) }}
+                      </el-tag>
+                    </div>
+                  </div>
+                  <div class="mobile-history-item__meta">
+                    <span>候选数 {{ row.count === '-' ? '-' : row.count }}</span>
+                    <span>趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
+                    <span>连续候选数 {{ row.consecutiveCandidateCount === '-' ? '-' : row.consecutiveCandidateCount }}</span>
+                  </div>
+                </button>
               </div>
-            </div>
-          </template>
+              <el-empty v-else description="暂无历史信息" :image-size="90" />
 
-          <div class="table-header-tip">
-            <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
-            <span class="tip-item">· 条件：KDJ 低位 + 知行线结构通过 + 周线多头排列 + 最大量日非阴线</span>
+              <div class="pagination-wrap mobile-pagination">
+                <div class="mobile-pagination__summary">
+                  第 {{ historyPage }} / {{ historyPageCount }} 页
+                </div>
+                <el-pagination
+                  v-model:current-page="historyPage"
+                  :page-size="historyPageSize"
+                  layout="prev, pager, next"
+                  :total="totalHistoryCount"
+                  :hide-on-single-page="false"
+                  background
+                  size="small"
+                />
+              </div>
+            </el-card>
+
+            <el-card class="mobile-section-card">
+              <template #header>
+                <div class="card-header">
+                  <div class="title-section">
+                    <span>分析结果 Top 5</span>
+                    <el-tag size="small" type="success" class="date-tag">
+                      {{ viewingDateDisplay }}
+                    </el-tag>
+                  </div>
+                  <div class="header-actions">
+                    <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
+                      已展示缓存结果
+                    </el-tag>
+                    <el-button
+                      type="primary"
+                      size="small"
+                      :icon="Refresh"
+                      :loading="loadingLatest"
+                      @click="refreshCurrentCandidates"
+                    >
+                      刷新
+                    </el-button>
+                  </div>
+                </div>
+              </template>
+
+              <div class="table-header-tip mobile-tip">
+                <span class="tip-item">· 仅展示评分最高的 5 只股票</span>
+              </div>
+
+              <div v-if="topAnalysisResults.length > 0" class="mobile-analysis-list">
+                <button
+                  v-for="row in topAnalysisResults"
+                  :key="row.code"
+                  type="button"
+                  class="mobile-analysis-item"
+                  @click="viewStock(row.code)"
+                >
+                  <div class="mobile-analysis-item__header">
+                    <div>
+                      <div class="mobile-analysis-item__code">{{ row.code }}</div>
+                      <div class="mobile-analysis-item__name">{{ getAnalysisResultName(row) }}</div>
+                    </div>
+                    <el-tag :type="getScoreType(row.total_score)" size="small">
+                      {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
+                    </el-tag>
+                  </div>
+                  <div class="mobile-analysis-item__meta">
+                    <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                      {{ getSignalTypeLabel(row.signal_type) }}
+                    </el-tag>
+                    <span class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
+                  </div>
+                </button>
+              </div>
+              <el-empty v-else description="暂无 Top 5 分析结果" :image-size="90" />
+            </el-card>
           </div>
 
-          <el-table
-            :data="displayLatestCandidates"
-            stripe
-            class="candidates-table"
-            height="400"
-            table-layout="auto"
-          >
-            <el-table-column prop="code" label="代码" min-width="100" />
-            <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
-            <el-table-column prop="open_price" label="开盘价" min-width="100" align="right">
-              <template #default="{ row }">
-                {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column prop="close_price" label="收盘价" min-width="100" align="right">
-              <template #default="{ row }">
-                {{ typeof row.close_price === 'number' ? row.close_price.toFixed(2) : '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
-              <template #default="{ row }">
-                <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
-                  {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
-                </span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="kdj_j" label="KDJ-J" min-width="100" align="right">
-              <template #default="{ row }">
-                {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column prop="consecutive_days" label="连续候选" min-width="110" align="center">
-              <template #default="{ row }">
-                {{ (row.consecutive_days || 1) > 1 ? row.consecutive_days : '否' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="80" align="center" fixed="right">
-              <template #default="{ row }">
-                <el-button text type="primary" size="small" @click="viewStock(row.code)">
-                  详情
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+          <el-row v-else :gutter="20" class="top-row">
+            <el-col :span="8">
+              <el-card class="history-card matched-height">
+                <template #header>
+                  <div class="card-header">
+                    <span>历史记录</span>
+                  </div>
+                </template>
 
-          <div class="pagination-wrap">
-            <el-pagination
-              v-model:current-page="latestCandidatePage"
-              :page-size="candidatePageSize"
-              layout="total, prev, pager, next"
-              :total="totalLatestCandidates"
-              :hide-on-single-page="false"
-              background
-            />
-          </div>
+                <div class="table-header-tip">
+                  <span class="tip-item">· 点击日期查看对应数据</span>
+                  <span class="tip-item">· 右侧跟随左侧选择</span>
+                </div>
 
-          <!-- 分析结果（移入卡片内部以保持对齐） -->
-          <el-divider v-if="topAnalysisResults.length > 0" />
-          <div v-if="topAnalysisResults.length > 0" class="analysis-section">
-            <div class="analysis-tip">
-              <span>对候选股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度</span>
-            </div>
-            <h4>分析结果 (Top 5)</h4>
-            <el-table
-              :data="topAnalysisResults"
-              stripe
-              size="small"
-              max-height="200"
-            >
-              <el-table-column prop="code" label="代码" width="80" />
-              <el-table-column label="名称" min-width="120" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ getAnalysisResultName(row) }}
+                <el-table
+                  :data="displayHistoryData"
+                  @row-click="selectDate"
+                  class="history-table"
+                  height="400"
+                  highlight-current-row
+                  :current-row-key="selectedDate"
+                  row-key="rawDate"
+                >
+                  <el-table-column prop="date" label="时间" width="120" />
+                  <el-table-column prop="count" label="候选数" width="100" align="center">
+                    <template #default="{ row }">
+                      {{ row.count === '-' ? '-' : row.count }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="pass" label="趋势启动数" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag v-if="row.pass !== '-'" :type="row.pass > 0 ? 'success' : 'info'" size="small">
+                        {{ row.pass }}
+                      </el-tag>
+                      <span v-else>-</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="consecutiveCandidateCount" label="连续候选数" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag v-if="row.consecutiveCandidateCount !== '-'" :type="row.consecutiveCandidateCount > 0 ? 'warning' : 'info'" size="small">
+                        {{ row.consecutiveCandidateCount }}
+                      </el-tag>
+                      <span v-else>-</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="80" align="center">
+                    <template #default="{ row }">
+                      <div class="history-status-cell">
+                        <el-tag
+                          v-if="row.rawDate === latestDate"
+                          type="success"
+                          size="small"
+                          class="status-tag"
+                        >
+                          最新
+                        </el-tag>
+                        <el-tag
+                          :type="getHistoryStatusTagType(row.status)"
+                          size="small"
+                          class="status-tag"
+                        >
+                          {{ getHistoryStatusLabel(row.status) }}
+                        </el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+
+                <div class="pagination-wrap">
+                  <el-pagination
+                    v-model:current-page="historyPage"
+                    :page-size="historyPageSize"
+                    layout="total, prev, pager, next"
+                    :total="totalHistoryCount"
+                    :hide-on-single-page="false"
+                    background
+                    size="small"
+                  />
+                </div>
+              </el-card>
+            </el-col>
+
+            <el-col :span="16">
+              <el-card class="candidates-card matched-height">
+                <template #header>
+                  <div class="card-header">
+                    <div class="title-section">
+                      <span>候选股票</span>
+                      <el-tag size="small" type="success" class="date-tag">
+                        {{ viewingDateDisplay }}
+                      </el-tag>
+                    </div>
+                    <div class="header-actions">
+                      <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
+                        已展示缓存结果
+                      </el-tag>
+                      <el-button
+                        type="primary"
+                        size="small"
+                        :icon="Refresh"
+                        :loading="loadingLatest"
+                        @click="refreshCurrentCandidates"
+                      >
+                        刷新
+                      </el-button>
+                    </div>
+                  </div>
                 </template>
-              </el-table-column>
-              <el-table-column prop="total_score" label="评分" width="80" align="right">
-                <template #default="{ row }">
-                  <el-tag :type="getScoreType(row.total_score)" size="small">
-                    {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
+
+                <div class="table-header-tip">
+                  <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
+                  <span class="tip-item">· 条件：KDJ 低位 + 知行线结构通过 + 周线多头排列 + 最大量日非阴线</span>
+                </div>
+
+                <el-table
+                  :data="displayLatestCandidates"
+                  stripe
+                  class="candidates-table"
+                  height="400"
+                  table-layout="auto"
+                >
+                  <el-table-column prop="code" label="代码" min-width="100" />
+                  <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+                  <el-table-column prop="open_price" label="开盘价" min-width="100" align="right">
+                    <template #default="{ row }">
+                      {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="close_price" label="收盘价" min-width="100" align="right">
+                    <template #default="{ row }">
+                      {{ typeof row.close_price === 'number' ? row.close_price.toFixed(2) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
+                    <template #default="{ row }">
+                      <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
+                        {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
+                      </span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="kdj_j" label="KDJ-J" min-width="100" align="right">
+                    <template #default="{ row }">
+                      {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="consecutive_days" label="连续候选" min-width="110" align="center">
+                    <template #default="{ row }">
+                      {{ (row.consecutive_days || 1) > 1 ? row.consecutive_days : '否' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="80" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button text type="primary" size="small" @click="viewStock(row.code)">
+                        详情
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+
+                <div class="pagination-wrap">
+                  <el-pagination
+                    v-model:current-page="latestCandidatePage"
+                    :page-size="candidatePageSize"
+                    layout="total, prev, pager, next"
+                    :total="totalLatestCandidates"
+                    :hide-on-single-page="false"
+                    background
+                  />
+                </div>
+
+                <el-divider v-if="topAnalysisResults.length > 0" />
+                <div v-if="topAnalysisResults.length > 0" class="analysis-section">
+                  <div class="analysis-tip">
+                    <span>对候选股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度</span>
+                  </div>
+                  <h4>分析结果 (Top 5)</h4>
+                  <el-table
+                    :data="topAnalysisResults"
+                    stripe
+                    size="small"
+                    max-height="200"
+                  >
+                    <el-table-column prop="code" label="代码" width="80" />
+                    <el-table-column label="名称" min-width="120" show-overflow-tooltip>
+                      <template #default="{ row }">
+                        {{ getAnalysisResultName(row) }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="total_score" label="评分" width="80" align="right">
+                      <template #default="{ row }">
+                        <el-tag :type="getScoreType(row.total_score)" size="small">
+                          {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="signal_type" label="信号" width="120">
+                      <template #default="{ row }">
+                        <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                          {{ getSignalTypeLabel(row.signal_type) }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="comment" label="评语" show-overflow-tooltip />
+                    <el-table-column label="操作" width="90" align="center">
+                      <template #default="{ row }">
+                        <el-button text type="primary" size="small" @click="viewStock(row.code)">
+                          详情
+                        </el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </el-card>
+            </el-col>
+          </el-row>
+        </template>
+      </el-tab-pane>
+
+      <el-tab-pane label="中盘分析" name="midday-analysis">
+        <div v-if="isMobile" class="mobile-layout">
+          <el-card class="mobile-section-card midday-card" v-loading="loadingMidday">
+            <template #header>
+              <div class="card-header">
+                <div class="title-section">
+                  <span>中盘分析</span>
+                  <el-tag size="small" type="warning" class="date-tag">
+                    {{ middayTradeDateDisplay || '当前交易日' }}
                   </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="signal_type" label="信号" width="120">
-                <template #default="{ row }">
-                  <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
-                    {{ getSignalTypeLabel(row.signal_type) }}
+                </div>
+                <div class="header-actions">
+                  <el-tag v-if="middayShowCachedHint" type="info" size="small" effect="plain">
+                    已展示缓存结果
                   </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="comment" label="评语" show-overflow-tooltip />
-              <el-table-column label="操作" width="90" align="center">
-                <template #default="{ row }">
-                  <el-button text type="primary" size="small" @click="viewStock(row.code)">
-                    详情
+                  <el-tag
+                    v-if="middayTaskRunning"
+                    size="small"
+                    type="warning"
+                    effect="plain"
+                  >
+                    生成中
+                  </el-tag>
+                  <el-button
+                    v-if="authStore.isAdmin"
+                    type="primary"
+                    size="small"
+                    :loading="loadingMiddayAction"
+                    @click="runMiddayAdminAction('generate')"
+                  >
+                    手动生成
                   </el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-          </div>
-        </el-card>
-      </el-col>
-    </el-row>
+                  <el-button
+                    size="small"
+                    :icon="Refresh"
+                    :loading="loadingMidday || loadingMiddayAction"
+                    @click="refreshMiddayView"
+                  >
+                    刷新
+                  </el-button>
+                </div>
+              </div>
+            </template>
+
+            <div class="table-header-tip mobile-tip">
+              <span class="tip-item">· 仅展示当前交易日盘中候选与评分结果</span>
+              <span class="tip-item">· 普通用户仅在 12:00-15:00 且后端已有数据时可见</span>
+            </div>
+
+            <div class="midday-meta midday-meta--mobile">
+              <el-tag size="small" effect="plain">交易日 {{ middayTradeDateDisplay || '-' }}</el-tag>
+              <el-tag size="small" effect="plain">快照 {{ middaySnapshotTimeDisplay || '-' }}</el-tag>
+              <el-tag size="small" effect="plain">来源 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
+            </div>
+
+            <div v-if="middayRows.length > 0 && middayCanViewData" class="mobile-analysis-list">
+              <button
+                v-for="row in middayRows"
+                :key="row.code"
+                type="button"
+                class="mobile-analysis-item"
+                @click="viewStock(row.code, 'midday-analysis')"
+              >
+                <div class="mobile-analysis-item__header">
+                  <div>
+                    <div class="mobile-analysis-item__code">{{ row.code }}</div>
+                    <div class="mobile-analysis-item__name">{{ row.name }}</div>
+                  </div>
+                  <el-tag :type="getScoreType(row.score ?? undefined)" size="small">
+                    {{ typeof row.score === 'number' ? row.score.toFixed(1) : '-' }}
+                  </el-tag>
+                </div>
+                <div class="mobile-analysis-item__meta">
+                  <div class="midday-mobile-tags">
+                    <el-tag :type="getBooleanTagType(row.b1_passed)" size="small">
+                      B1 {{ getBooleanTagLabel(row.b1_passed) }}
+                    </el-tag>
+                    <el-tag :type="getSignalTypeTag(row.signal_type ?? undefined)" size="small">
+                      {{ getSignalTypeLabel(row.signal_type ?? undefined) }}
+                    </el-tag>
+                    <el-tag :type="getVerdictTagType(row.verdict)" size="small">
+                      {{ getVerdictLabel(row.verdict) }}
+                    </el-tag>
+                    <el-tag :type="getTrendReversalTagType(row)" size="small">
+                      反转 {{ getTrendReversalLabel(row) }}
+                    </el-tag>
+                  </div>
+                  <span class="mobile-analysis-item__comment">{{ getMiddayRowComment(row) }}</span>
+                </div>
+              </button>
+            </div>
+            <el-empty v-else description="暂无数据" :image-size="90">
+              <div v-if="middayEmptyMessage" class="midday-empty-note">
+                {{ middayEmptyMessage }}
+              </div>
+            </el-empty>
+          </el-card>
+        </div>
+
+        <div v-else class="midday-layout">
+          <el-card class="candidates-card midday-card" v-loading="loadingMidday">
+            <template #header>
+              <div class="card-header">
+                <div class="title-section">
+                  <span>中盘分析</span>
+                  <el-tag size="small" type="warning" class="date-tag">
+                    {{ middayTradeDateDisplay || '当前交易日' }}
+                  </el-tag>
+                </div>
+                <div class="header-actions">
+                  <el-tag v-if="middayShowCachedHint" type="info" size="small" effect="plain">
+                    已展示缓存结果
+                  </el-tag>
+                  <el-tag
+                    v-if="middayTaskRunning"
+                    size="small"
+                    type="warning"
+                    effect="plain"
+                  >
+                    生成中
+                  </el-tag>
+                  <el-button
+                    v-if="authStore.isAdmin"
+                    type="primary"
+                    size="small"
+                    :loading="loadingMiddayAction"
+                    @click="runMiddayAdminAction('generate')"
+                  >
+                    手动生成
+                  </el-button>
+                  <el-button
+                    v-if="authStore.isAdmin"
+                    size="small"
+                    :icon="Refresh"
+                    :loading="loadingMidday || loadingMiddayAction"
+                    @click="runMiddayAdminAction('refresh')"
+                  >
+                    刷新
+                  </el-button>
+                  <el-button
+                    v-else
+                    size="small"
+                    :icon="Refresh"
+                    :loading="loadingMidday"
+                    @click="refreshMiddayView"
+                  >
+                    刷新
+                  </el-button>
+                </div>
+              </div>
+            </template>
+
+            <div class="table-header-tip">
+              <span class="tip-item">· 仅展示当前交易日盘中候选与评分结果</span>
+              <span class="tip-item">· 普通用户仅在 12:00-15:00 且后端已有数据时可见</span>
+            </div>
+
+            <div class="midday-meta">
+              <el-tag size="small" effect="plain">交易日 {{ middayTradeDateDisplay || '-' }}</el-tag>
+              <el-tag size="small" effect="plain">快照 {{ middaySnapshotTimeDisplay || '-' }}</el-tag>
+              <el-tag size="small" effect="plain">来源 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
+            </div>
+
+            <el-empty v-if="middayShowEmpty" description="暂无数据" :image-size="100">
+              <div v-if="middayEmptyMessage" class="midday-empty-note">
+                {{ middayEmptyMessage }}
+              </div>
+            </el-empty>
+            <template v-else>
+              <el-table
+                :data="middayRows"
+                stripe
+                class="candidates-table midday-table"
+                height="520"
+                table-layout="auto"
+              >
+                <el-table-column prop="code" label="代码" min-width="100" />
+                <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+                <el-table-column label="B1" min-width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="getBooleanTagType(row.b1_passed)" size="small">
+                      {{ getBooleanTagLabel(row.b1_passed) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="score" label="总分" min-width="90" align="right">
+                  <template #default="{ row }">
+                    <el-tag :type="getScoreType(row.score)" size="small">
+                      {{ typeof row.score === 'number' ? row.score.toFixed(1) : '-' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="signal_type" label="信号类型" min-width="120" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                      {{ getSignalTypeLabel(row.signal_type) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="verdict" label="结论" min-width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="getVerdictTagType(row.verdict)" size="small">
+                      {{ getVerdictLabel(row.verdict) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="趋势反转" min-width="110" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="getTrendReversalTagType(row)" size="small">
+                      {{ getTrendReversalLabel(row) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
+                  <template #default="{ row }">
+                    <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
+                      {{ typeof row.change_pct === 'number' ? `${row.change_pct.toFixed(2)}%` : '-' }}
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="说明" min-width="220" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ getMiddayRowComment(row) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="90" align="center" fixed="right">
+                  <template #default="{ row }">
+                    <el-button text type="primary" size="small" @click="viewStock(row.code, 'midday-analysis')">
+                      详情
+                    </el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </template>
+          </el-card>
+        </div>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh, Loading } from '@element-plus/icons-vue'
 import { apiAnalysis, apiTasks, isRequestCanceled } from '@/api'
@@ -412,6 +652,9 @@ import type {
   Candidate,
   AnalysisResult,
   IncrementalUpdateStatus,
+  IntradayAnalysisItem,
+  IntradayAnalysisResponse,
+  IntradayAnalysisStatusResponse,
   TomorrowStarHistoryItem,
   TomorrowStarWindowStatusResponse,
 } from '@/types'
@@ -424,6 +667,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const configStore = useConfigStore()
 const { isMobile } = useResponsive()
+const activeTab = ref('tomorrow-star')
 
 let loadDataRequestId = 0
 let candidatesRequestId = 0
@@ -436,6 +680,25 @@ const requestControllers = new Map<string, AbortController>()
 const loading = ref(false)
 const loadingLatest = ref(false)
 const checkingFreshness = ref(false)
+const loadingMidday = ref(false)
+const loadingMiddayAction = ref(false)
+
+const middayStatus = ref<IntradayAnalysisStatusResponse>({
+  has_data: false,
+  window_open: false,
+  status: 'not_ready',
+  message: '',
+})
+const middayData = ref<IntradayAnalysisResponse>({
+  has_data: false,
+  window_open: false,
+  status: 'not_ready',
+  message: '',
+  items: [],
+  total: 0,
+})
+const middayLoaded = ref(false)
+const middayShowCachedHint = ref(false)
 
 type HistoryRow = {
   date: string
@@ -515,6 +778,14 @@ const incrementalUpdate = ref<IncrementalUpdateStatus>({
 const showCachedHint = computed(() => hydratedFromCache.value && !incrementalUpdate.value.running)
 const showInitializationAlert = computed(() => authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized)
 const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && latestCandidates.value.length === 0)
+const middayRows = computed<IntradayAnalysisItem[]>(() => middayData.value.items || [])
+const middayCanViewData = computed(() => Boolean(middayData.value.has_data && middayRows.value.length > 0))
+const middayShowEmpty = computed(() => !loadingMidday.value && !middayCanViewData.value)
+const middayTaskRunning = computed(() => loadingMiddayAction.value)
+const middayTradeDateDisplay = computed(() => formatDateString(middayData.value.trade_date || middayStatus.value.trade_date || ''))
+const middaySnapshotTimeDisplay = computed(() => formatDateTime(middayData.value.snapshot_time || middayStatus.value.snapshot_time || ''))
+const middaySourcePickDateDisplay = computed(() => formatDateString(middayData.value.source_pick_date || middayStatus.value.source_pick_date || ''))
+const middayEmptyMessage = computed(() => middayData.value.message || middayStatus.value.message || '暂无数据')
 
 // 历史记录分页数据
 const totalHistoryCount = computed(() => historyData.value.length)
@@ -1122,8 +1393,54 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   }
 }
 
-function viewStock(code: string) {
-  router.push({ path: '/diagnosis', query: { code, source: 'tomorrow-star', days: '30' } })
+async function loadMiddayData(forceRefresh: boolean = false) {
+  if (loadingMidday.value && !forceRefresh) return
+
+  const signal = beginRequest('middayData')
+  loadingMidday.value = true
+  try {
+    const [status, data] = await Promise.all([
+      apiAnalysis.getMiddayStatus({ signal }),
+      apiAnalysis.getMiddayCurrent({ signal }),
+    ])
+    middayStatus.value = status
+    middayData.value = data
+    middayLoaded.value = true
+    middayShowCachedHint.value = false
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to load intraday analysis:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '加载中盘分析失败'))
+  } finally {
+    finishRequest('middayData', signal)
+    loadingMidday.value = false
+  }
+}
+
+async function refreshMiddayView() {
+  await loadMiddayData(true)
+}
+
+async function runMiddayAdminAction(action: 'generate' | 'refresh') {
+  if (loadingMiddayAction.value) return
+
+  loadingMiddayAction.value = true
+  try {
+    const response = action === 'refresh'
+      ? await apiAnalysis.refreshMidday()
+      : await apiAnalysis.generateMidday()
+    ElMessage.success(response.message || (action === 'refresh' ? '中盘分析已刷新' : '中盘分析已生成'))
+    await loadMiddayData(true)
+  } catch (error) {
+    console.error(`Failed to ${action} intraday analysis:`, error)
+    ElMessage.error(getUserSafeErrorMessage(error, action === 'refresh' ? '刷新中盘分析失败' : '生成中盘分析失败'))
+  } finally {
+    loadingMiddayAction.value = false
+  }
+}
+
+function viewStock(code: string, source: 'tomorrow-star' | 'midday-analysis' = 'tomorrow-star') {
+  router.push({ path: '/diagnosis', query: { code, source, days: '30' } })
 }
 
 function getAnalysisResultName(result: AnalysisResult): string {
@@ -1147,6 +1464,7 @@ function formatDate(date: string | Date): string {
 }
 
 function formatDateString(dateStr: string): string {
+  if (!dateStr) return ''
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     return dateStr
   }
@@ -1154,6 +1472,19 @@ function formatDateString(dateStr: string): string {
     return `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
   }
   return dateStr
+}
+
+function formatDateTime(dateTimeStr: string): string {
+  if (!dateTimeStr) return ''
+  const date = new Date(dateTimeStr)
+  if (Number.isNaN(date.getTime())) return dateTimeStr
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
 }
 
 function getScoreType(score?: number): string {
@@ -1177,6 +1508,52 @@ function getSignalTypeTag(signalType?: string): string {
   if (signalType === 'rebound') return 'warning'
   if (signalType === 'distribution_risk') return 'danger'
   return 'info'
+}
+
+function getBooleanTagType(value?: boolean | null): string {
+  if (value === true) return 'success'
+  if (value === false) return 'info'
+  return 'warning'
+}
+
+function getBooleanTagLabel(value?: boolean | null): string {
+  if (value === true) return '通过'
+  if (value === false) return '未过'
+  return '-'
+}
+
+function getVerdictTagType(verdict?: string | null): string {
+  if (verdict === 'PASS') return 'success'
+  if (verdict === 'WATCH') return 'warning'
+  if (verdict === 'FAIL') return 'danger'
+  return 'info'
+}
+
+function getVerdictLabel(verdict?: string | null): string {
+  if (verdict === 'PASS') return '通过'
+  if (verdict === 'WATCH') return '观察'
+  if (verdict === 'FAIL') return '失败'
+  return '-'
+}
+
+function isMiddayTrendReversal(row: IntradayAnalysisItem): boolean {
+  return row.b1_passed === true && row.verdict === 'PASS' && row.signal_type === 'trend_start'
+}
+
+function getTrendReversalTagType(row: IntradayAnalysisItem): string {
+  return isMiddayTrendReversal(row) ? 'success' : 'info'
+}
+
+function getTrendReversalLabel(row: IntradayAnalysisItem): string {
+  return isMiddayTrendReversal(row) ? '是' : '否'
+}
+
+function getMiddayRowComment(row: IntradayAnalysisItem): string {
+  if (isMiddayTrendReversal(row)) return 'B1 通过且信号转为趋势启动，存在趋势反转迹象'
+  if (row.signal_type === 'trend_start') return '趋势启动信号，建议结合单股诊断复核'
+  if (row.signal_type === 'distribution_risk') return '盘中风险信号，建议关注量价变化'
+  if (row.signal_type === 'rebound') return '盘中反弹延续，建议结合仓位管理判断'
+  return '点击查看单股诊断'
 }
 
 function buildHistorySignature(dates: string[], history: Array<{ date: string; count?: number; pass?: number } | HistoryRow>): string {
@@ -1315,11 +1692,21 @@ onMounted(() => {
 
   // 检查增量更新状态
   void checkIncrementalStatus()
+  void loadMiddayData()
 })
 
 onActivated(() => {
   void refreshAfterStatusReady()
   void checkIncrementalStatus()
+  if (activeTab.value === 'midday-analysis') {
+    void loadMiddayData(true)
+  }
+})
+
+watch(activeTab, (value) => {
+  if (value === 'midday-analysis' && !middayLoaded.value) {
+    void loadMiddayData()
+  }
 })
 
 onDeactivated(() => {
@@ -1515,6 +1902,34 @@ $space-lg: 32px;
     line-height: 1.5;
     color: #374151;
     word-break: break-word;
+  }
+
+  .midday-layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .midday-card {
+    .midday-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: $space-sm;
+    }
+
+    .midday-empty-note {
+      margin-top: 8px;
+      color: #606266;
+      line-height: 1.6;
+      text-align: center;
+      max-width: 420px;
+    }
+  }
+
+  .midday-mobile-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
   .mobile-pagination {

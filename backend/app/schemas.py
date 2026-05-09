@@ -125,6 +125,58 @@ class AnalysisResultResponse(BaseModel):
     min_score_threshold: float
 
 
+class IntradayAnalysisItem(BaseModel):
+    """中盘分析快照项"""
+    id: int
+    trade_date: date_class
+    code: str
+    name: Optional[str] = None
+    source_pick_date: date_class
+    snapshot_time: datetime
+    open_price: Optional[float] = None
+    close_price: Optional[float] = None
+    high_price: Optional[float] = None
+    low_price: Optional[float] = None
+    volume: Optional[float] = None
+    amount: Optional[float] = None
+    change_pct: Optional[float] = None
+    turnover: Optional[float] = None
+    b1_passed: Optional[bool] = None
+    score: Optional[float] = None
+    verdict: Optional[str] = None
+    signal_type: Optional[str] = None
+    kdj_j: Optional[float] = None
+    zx_long_pos: Optional[bool] = None
+    weekly_ma_aligned: Optional[bool] = None
+    volume_healthy: Optional[bool] = None
+
+
+class IntradayAnalysisResponse(BaseModel):
+    """中盘分析数据响应"""
+    trade_date: date_class
+    source_pick_date: Optional[date_class] = None
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    items: List[IntradayAnalysisItem]
+    total: int = 0
+
+
+class IntradayAnalysisGenerateResponse(BaseModel):
+    """中盘分析手动生成响应"""
+    trade_date: date_class
+    source_pick_date: Optional[date_class] = None
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    generated_count: int = 0
+    skipped_count: int = 0
+
+
 class TomorrowStarHistoryItem(BaseModel):
     """明日之星历史窗口项"""
     pick_date: date_class

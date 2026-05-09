@@ -118,6 +118,41 @@ class TomorrowStarRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class IntradayAnalysisSnapshot(Base):
+    """中盘分析当日快照表"""
+    __tablename__ = "intraday_analysis_snapshots"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "code", name="uq_intraday_analysis_snapshots_trade_date_code"),
+        Index("ix_intraday_analysis_snapshots_trade_date_code", "trade_date", "code"),
+        Index("ix_intraday_analysis_snapshots_source_pick_date", "source_pick_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    source_pick_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    snapshot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    open_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    close_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    high_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    low_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    verdict: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    signal_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    kdj_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    zx_long_pos: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    weekly_ma_aligned: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    volume_healthy: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class DailyB1Check(Base):
     """每日B1检查表 (单股诊断历史)"""
     __tablename__ = "daily_b1_checks"
