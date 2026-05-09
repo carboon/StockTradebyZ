@@ -37,7 +37,7 @@ from quant_reviewer import (  # noqa: E402
     prepare_review_frame,
     review_prepared_row,
 )
-from review_prefilter import Step4Prefilter, build_prefilter_block_result  # noqa: E402
+from review_prefilter import Step4Prefilter  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -312,15 +312,8 @@ def run_backtest(
 
         for dt, strategy in sorted(picked.items()):
             prefilter_result = prefilter.evaluate(code=code, pick_date=dt, price_df=base_df)
-            if prefilter_result.get("passed", True):
-                result = review_prepared_row(review_frame.loc[dt], config=review_cfg, code=code, strategy=strategy)
-                result["prefilter"] = prefilter_result
-            else:
-                result = build_prefilter_block_result(
-                    code=code,
-                    strategy=strategy,
-                    prefilter=prefilter_result,
-                )
+            result = review_prepared_row(review_frame.loc[dt], config=review_cfg, code=code, strategy=strategy)
+            result["prefilter"] = prefilter_result
 
             pf_details = (result.get("prefilter") or {}).get("details", {})
             market_regime = pf_details.get("market_regime") or {}

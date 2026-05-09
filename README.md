@@ -24,6 +24,12 @@ cp .env.example deploy/.env
 ./deploy/scripts/start.sh prod --build
 ```
 
+如 `nginx:1.27-alpine` 拉取超时，可在 `deploy/.env` 中覆盖：
+
+```bash
+NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
+```
+
 如需宿主机重启后自动拉起生产服务，可启用：
 
 ```bash
@@ -67,6 +73,7 @@ deploy/systemd/stocktrade-background-update.timer
 - `ENVIRONMENT=production`
 - `BACKEND_CORS_ORIGINS` 改为实际域名
 - `POSTGRES_PASSWORD` 不使用示例默认值
+- 如 Docker Hub 不稳定，可将 `NGINX_BASE_IMAGE` 改为镜像站或私有仓库完整地址
 - 如启用 AI 分析，再配置 `ZHIPUAI_API_KEY` / `DASHSCOPE_API_KEY` / `GEMINI_API_KEY`
 
 ## 安全说明

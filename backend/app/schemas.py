@@ -104,23 +104,75 @@ class CandidatesResponse(BaseModel):
         extra = "ignore"
 
 
+class CurrentHotCandidateItem(BaseModel):
+    """当前热盘股票池项"""
+    id: int
+    pick_date: date_class
+    code: str
+    name: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
+    board_group: Optional[str] = None
+    open_price: Optional[float] = None
+    close_price: Optional[float] = None
+    change_pct: Optional[float] = None
+    turnover: Optional[float] = None
+    b1_passed: Optional[bool] = None
+    kdj_j: Optional[float] = None
+    consecutive_days: int = 1
+
+
+class CurrentHotCandidatesResponse(BaseModel):
+    """当前热盘股票池响应"""
+    pick_date: Optional[date_class] = None
+    candidates: List[CurrentHotCandidateItem]
+    total: int
+
+
 # ==================== 分析结果 ====================
 class AnalysisItem(BaseModel):
     """分析结果项"""
     id: int
     pick_date: date_class
     code: str
+    name: Optional[str] = None
     reviewer: Optional[str] = None
     verdict: Optional[str] = None  # PASS/WATCH/FAIL
     total_score: Optional[float] = None
     signal_type: Optional[str] = None
     comment: Optional[str] = None
+    prefilter_passed: Optional[bool] = None
+    prefilter_summary: Optional[str] = None
+    prefilter_blocked_by: Optional[List[str]] = None
 
 
 class AnalysisResultResponse(BaseModel):
     """分析结果响应"""
     pick_date: Optional[date_class] = None
     results: List[AnalysisItem]
+    total: int
+    min_score_threshold: float
+
+
+class CurrentHotAnalysisItem(BaseModel):
+    """当前热盘分析结果项"""
+    id: int
+    pick_date: date_class
+    code: str
+    name: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
+    board_group: Optional[str] = None
+    reviewer: Optional[str] = None
+    b1_passed: Optional[bool] = None
+    verdict: Optional[str] = None
+    total_score: Optional[float] = None
+    signal_type: Optional[str] = None
+    comment: Optional[str] = None
+
+
+class CurrentHotAnalysisResultResponse(BaseModel):
+    """当前热盘分析结果响应"""
+    pick_date: Optional[date_class] = None
+    results: List[CurrentHotAnalysisItem]
     total: int
     min_score_threshold: float
 
@@ -177,6 +229,60 @@ class IntradayAnalysisGenerateResponse(BaseModel):
     skipped_count: int = 0
 
 
+class CurrentHotIntradayAnalysisItem(BaseModel):
+    """当前热盘中盘分析快照项"""
+    id: int
+    trade_date: date_class
+    code: str
+    name: Optional[str] = None
+    source_pick_date: date_class
+    snapshot_time: datetime
+    sector_names: List[str] = Field(default_factory=list)
+    board_group: Optional[str] = None
+    open_price: Optional[float] = None
+    close_price: Optional[float] = None
+    high_price: Optional[float] = None
+    low_price: Optional[float] = None
+    volume: Optional[float] = None
+    amount: Optional[float] = None
+    change_pct: Optional[float] = None
+    turnover: Optional[float] = None
+    b1_passed: Optional[bool] = None
+    score: Optional[float] = None
+    verdict: Optional[str] = None
+    signal_type: Optional[str] = None
+    kdj_j: Optional[float] = None
+    zx_long_pos: Optional[bool] = None
+    weekly_ma_aligned: Optional[bool] = None
+    volume_healthy: Optional[bool] = None
+
+
+class CurrentHotIntradayAnalysisResponse(BaseModel):
+    """当前热盘中盘分析数据响应"""
+    trade_date: date_class
+    source_pick_date: Optional[date_class] = None
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    items: List[CurrentHotIntradayAnalysisItem]
+    total: int = 0
+
+
+class CurrentHotIntradayAnalysisGenerateResponse(BaseModel):
+    """当前热盘中盘分析手动生成响应"""
+    trade_date: date_class
+    source_pick_date: Optional[date_class] = None
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    generated_count: int = 0
+    skipped_count: int = 0
+
+
 class TomorrowStarHistoryItem(BaseModel):
     """明日之星历史窗口项"""
     pick_date: date_class
@@ -212,6 +318,27 @@ class TomorrowStarWindowStatusResponse(BaseModel):
     running_task_id: Optional[int] = None
     items: List[TomorrowStarHistoryItem]
     history: List[TomorrowStarHistoryItem]
+
+
+class CurrentHotHistoryItem(BaseModel):
+    """当前热盘历史项"""
+    pick_date: date_class
+    date: str
+    candidate_count: int = 0
+    analysis_count: int = 0
+    trend_start_count: int = 0
+    consecutive_candidate_count: int = 0
+    pass_count: int = 0
+    status: str = "missing"
+    error_message: Optional[str] = None
+    is_latest: bool = False
+
+
+class CurrentHotDatesResponse(BaseModel):
+    """当前热盘历史日期响应"""
+    dates: List[str]
+    history: List[CurrentHotHistoryItem]
+    latest_date: Optional[date_class] = None
 
 
 # ==================== 单股诊断 ====================

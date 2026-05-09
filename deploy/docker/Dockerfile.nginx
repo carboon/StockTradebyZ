@@ -9,6 +9,8 @@
 # - /api 反向代理
 # - SPA history 路由回退
 
+ARG NGINX_BASE_IMAGE=nginx:1.27-alpine
+
 # 构建阶段 - 使用前端构建 Dockerfile
 FROM node:20-bookworm-slim AS frontend-builder
 
@@ -30,7 +32,7 @@ COPY frontend/ /app/
 RUN npm run build
 
 # 生产阶段 - Nginx
-FROM nginx:1.27-alpine
+FROM ${NGINX_BASE_IMAGE}
 
 # 从构建阶段复制前端产物
 COPY --from=frontend-builder /app/dist /usr/share/nginx/html

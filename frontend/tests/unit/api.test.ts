@@ -121,9 +121,14 @@ describe('api/index.ts', () => {
 
     await apiAnalysis.getCandidates('2024-01-15', { signal })
     await apiAnalysis.getResults('2024-01-15', { signal })
+    await apiAnalysis.getCurrentHotCandidates('2024-01-15', { signal })
+    await apiAnalysis.getCurrentHotResults('2024-01-15', { signal })
+    await apiAnalysis.getCurrentHotMiddayStatus({ signal })
+    await apiAnalysis.getCurrentHotMiddayCurrent({ signal })
     await apiAnalysis.getDiagnosisHistory('600000', 20, 1, 10, false, { signal })
     await apiAnalysis.analyze('600000', { signal })
     await apiAnalysis.refreshHistory('600000', 30, 1, 10, false, { signal })
+    await apiAnalysis.generateCurrentHotMidday()
 
     expect(mockGet).toHaveBeenNthCalledWith(1, '/v1/analysis/tomorrow-star/candidates', {
       signal,
@@ -135,17 +140,41 @@ describe('api/index.ts', () => {
       timeout: 20000,
       params: { date: '2024-01-15' },
     })
-    expect(mockGet).toHaveBeenNthCalledWith(3, '/v1/analysis/diagnosis/600000/history', {
+    expect(mockGet).toHaveBeenNthCalledWith(3, '/v1/analysis/current-hot/candidates', {
+      signal,
+      timeout: 20000,
+      params: { date: '2024-01-15' },
+    })
+    expect(mockGet).toHaveBeenNthCalledWith(4, '/v1/analysis/current-hot/results', {
+      signal,
+      timeout: 20000,
+      params: { date: '2024-01-15' },
+    })
+    expect(mockGet).toHaveBeenNthCalledWith(5, '/v1/analysis/current-hot/intraday/status', {
+      signal,
+      timeout: 10000,
+    })
+    expect(mockGet).toHaveBeenNthCalledWith(6, '/v1/analysis/current-hot/intraday/data', {
+      signal,
+      timeout: 20000,
+    })
+    expect(mockGet).toHaveBeenNthCalledWith(7, '/v1/analysis/diagnosis/600000/history', {
       signal,
       timeout: 45000,
       params: { days: 20, page: 1, page_size: 10, refresh: false },
     })
-    expect(mockPost).toHaveBeenNthCalledWith(1, '/v1/analysis/diagnosis/analyze', { code: '600000' }, { signal, timeout: 45000 })
+    expect(mockPost).toHaveBeenNthCalledWith(1, '/v1/analysis/diagnosis/analyze', { code: '600000' }, { signal, timeout: 20000 })
     expect(mockPost).toHaveBeenNthCalledWith(
       2,
       '/v1/analysis/diagnosis/600000/generate-history',
       null,
       { signal, timeout: 45000, params: { days: 30, page: 1, page_size: 10, force: false } },
+    )
+    expect(mockPost).toHaveBeenNthCalledWith(
+      3,
+      '/v1/analysis/current-hot/intraday/generate',
+      null,
+      { timeout: 20000 },
     )
   })
 
@@ -179,6 +208,7 @@ describe('api/index.ts', () => {
         reviewer: 'quant',
         skip_fetch: true,
         start_from: 3,
+        reset_derived_state: false,
       },
       { timeout: 10000 },
     )

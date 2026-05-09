@@ -211,6 +211,24 @@ class TestIncrementalFillService:
             assert result.status == "completed"
             assert "已是最新" in result.message
 
+    def test_get_top5_codes_for_date_falls_back_to_db(self, service):
+        """测试缺少 suggestion.json 时从数据库回退获取 Top5。"""
+        mock_query = MagicMock()
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.all.return_value = [("600000",), ("000001",)]
+        service.db = MagicMock()
+        service.db.query.return_value = mock_query
+
+        with patch("app.services.incremental_service.settings") as mock_settings:
+            mock_settings.review_dir = Path("missing-review-dir")
+            mock_settings.min_score_threshold = 4.0
+
+            codes = service._get_top5_codes_for_date("2026-02-06")
+
+        assert codes == ["600000", "000001"]
+
     def test_get_fill_summary(self, service):
         """测试获取补齐总览"""
         with patch.object(service, 'detect_gap_status') as mock_gap:

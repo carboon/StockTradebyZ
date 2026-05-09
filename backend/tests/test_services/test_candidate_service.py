@@ -11,6 +11,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.database import Base
 from app.services.candidate_service import CandidateService
 from app.models import Candidate, Stock
@@ -126,6 +127,41 @@ class TestCandidateService:
         assert pick_date == "2024-05-02"
         assert len(candidates) == 3
         assert candidates[0]["code"] == "600519"
+
+    def test_load_candidates_falls_back_to_raw_csv_open_price(self, db, tmp_path, monkeypatch):
+        """当 stock_daily 缺失时，候选列表应回退到原始 CSV 补开盘价。"""
+        raw_dir = tmp_path / "raw"
+        raw_dir.mkdir()
+        (raw_dir / "688779.csv").write_text(
+            "date,open,close,high,low,volume\n"
+            "2026-02-04,10.48,9.91,10.60,9.80,123456.0\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings, "raw_data_dir", raw_dir)
+
+        db.add(Stock(code="688779", name="五矿新能", market="SH"))
+        db.add(
+            Candidate(
+                pick_date=date(2026, 2, 4),
+                code="688779",
+                strategy="b1",
+                close_price=9.91,
+                turnover=199154913.3123,
+                b1_passed=True,
+                kdj_j=-3.215705,
+                consecutive_days=3,
+            )
+        )
+        db.commit()
+
+        pick_date, candidates = CandidateService(db).load_candidates("2026-02-04")
+
+        assert pick_date == "2026-02-04"
+        assert len(candidates) == 1
+        assert candidates[0]["code"] == "688779"
+        assert candidates[0]["name"] == "五矿新能"
+        assert candidates[0]["open"] == 10.48
+        assert candidates[0]["close"] == 9.91
 
     def test_get_latest_candidate_date(self, db, sample_candidates):
         """测试获取最新候选日期"""

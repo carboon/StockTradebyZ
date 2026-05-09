@@ -433,6 +433,23 @@ class BackgroundLatestTradeDayUpdateService:
                 tomorrow_elapsed,
             )
 
+            current_hot_started_at = time.perf_counter()
+            from app.services.current_hot_service import CurrentHotService
+            with SessionLocal() as db:
+                current_hot_result = CurrentHotService(db).generate_for_trade_date(trade_date, reviewer=reviewer)
+            current_hot_elapsed = round(max(0.0, time.perf_counter() - current_hot_started_at), 3)
+            if current_hot_result.get("status") != "ok":
+                raise RuntimeError(
+                    str(current_hot_result.get("message") or f"{trade_date} 当前热盘重建失败")
+                )
+            self.log.info(
+                "当前热盘完成 trade_date=%s generated_count=%s skipped_count=%s elapsed=%.3fs",
+                trade_date,
+                current_hot_result.get("generated_count"),
+                current_hot_result.get("skipped_count"),
+                current_hot_elapsed,
+            )
+
             latest_trade_date = freshness.latest_trade_date or trade_date
             if latest_trade_date:
                 MarketService(token=self.token).update_cache(latest_trade_date)
@@ -442,6 +459,7 @@ class BackgroundLatestTradeDayUpdateService:
                 "freshness_check": freshness_elapsed,
                 **batch_timings,
                 "tomorrow_star_rebuild": tomorrow_elapsed,
+                "current_hot_rebuild": current_hot_elapsed,
                 "total": total_elapsed,
             }
 
@@ -458,6 +476,7 @@ class BackgroundLatestTradeDayUpdateService:
                 "freshness": freshness.to_dict(),
                 "batch_result": batch_result,
                 "tomorrow_star_result": tomorrow_result,
+                "current_hot_result": current_hot_result,
                 "tomorrow_star_stats": tomorrow_stats,
                 "timings": timings,
             }

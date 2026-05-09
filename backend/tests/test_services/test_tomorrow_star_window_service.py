@@ -31,6 +31,39 @@ def test_get_window_status_counts(test_db):
     assert summary.items[1]["status"] == "missing"
 
 
+def test_get_window_status_normalizes_stale_running_rows_without_active_task(test_db):
+    test_db.add(Stock(code="000001", name="PingAn"))
+    test_db.add_all([
+        StockDaily(code="000001", trade_date=date(2024, 1, 3), open=10, close=11, high=11, low=9, volume=100),
+        StockDaily(code="000001", trade_date=date(2024, 1, 2), open=10, close=10.5, high=11, low=9, volume=100),
+    ])
+    test_db.add_all([
+        TomorrowStarRun(pick_date=date(2024, 1, 3), status="running", candidate_count=0, analysis_count=0, trend_start_count=0),
+        TomorrowStarRun(pick_date=date(2024, 1, 2), status="running", candidate_count=0, analysis_count=0, trend_start_count=0),
+    ])
+    test_db.add(Candidate(pick_date=date(2024, 1, 3), code="000001", strategy="b1"))
+    test_db.add(
+        AnalysisResult(
+            pick_date=date(2024, 1, 3),
+            code="000001",
+            reviewer="quant",
+            verdict="PASS",
+            signal_type="trend_start",
+        )
+    )
+    test_db.commit()
+
+    summary = TomorrowStarWindowService(test_db).get_window_status(window_size=2)
+
+    assert summary.ready_count == 1
+    assert summary.missing_count == 1
+    assert summary.running_count == 0
+    assert summary.items[0]["pick_date"] == "2024-01-03"
+    assert summary.items[0]["status"] == "success"
+    assert summary.items[1]["pick_date"] == "2024-01-02"
+    assert summary.items[1]["status"] == "missing"
+
+
 def test_prune_window_removes_old_rows(test_db):
     test_db.add(Stock(code="000001", name="PingAn"))
     dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
@@ -99,6 +132,54 @@ def test_ensure_window_backfills_from_backtest_events(test_db, mocker):
     assert analysis.code == "000001"
     assert analysis.comment == "ok"
     assert analysis.signal_type == "trend_start"
+
+
+def test_ensure_window_creates_missing_stock_rows_for_backtest_events(test_db, mocker):
+    test_db.add(Stock(code="000001", name="PingAn"))
+    for trade_date in [date(2024, 1, 2), date(2024, 1, 3)]:
+        test_db.add(
+            StockDaily(
+                code="000001",
+                trade_date=trade_date,
+                open=10,
+                close=11,
+                high=11,
+                low=9,
+                volume=100,
+            )
+        )
+    test_db.commit()
+
+    events_df = pd.DataFrame(
+        [
+            {
+                "pick_date": "2024-01-03",
+                "code": "603056",
+                "strategy": "b1",
+                "close": 18.6,
+                "turnover_n": 987654.0,
+                "kdj_j": 15.6,
+                "verdict": "PASS",
+                "total_score": 4.8,
+                "signal_type": "trend_start",
+                "comment": "created-stock-row",
+                "details_json": {"signal_type": "trend_start"},
+            }
+        ]
+    )
+    mocker.patch("pipeline.backtest_quant.run_backtest", return_value=(events_df, {"date_range": {}}))
+    mocker.patch("app.services.tushare_service.TushareService.sync_stock_names_to_db", return_value=None)
+
+    result = TomorrowStarWindowService(test_db).ensure_window(window_size=2)
+
+    assert result["failed_dates"] == []
+    created_stock = test_db.query(Stock).filter(Stock.code == "603056").one()
+    candidate = test_db.query(Candidate).filter(Candidate.pick_date == date(2024, 1, 3)).one()
+    analysis = test_db.query(AnalysisResult).filter(AnalysisResult.pick_date == date(2024, 1, 3)).one()
+
+    assert created_stock.market == "SH"
+    assert candidate.code == "603056"
+    assert analysis.code == "603056"
 
 
 def test_maintain_trade_date_rebuilds_inconsistent_candidate_and_analysis_rows(test_db, mocker, tmp_path, monkeypatch):

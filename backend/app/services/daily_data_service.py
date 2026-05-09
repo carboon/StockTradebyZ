@@ -663,8 +663,8 @@ class DailyDataService:
             temp_file_path = merged_file.name
             merged_file.write("code,trade_date,open,close,high,low,volume\n")
 
-            # 第一阶段：合并所有 CSV 文件
-            ensured_codes: set[str] = set()
+            # 第一阶段：合并所有 CSV 文件，同时收集需要补齐的股票主记录
+            codes_to_ensure: set[str] = set()
 
             for i, csv_path in enumerate(csv_files):
                 code = csv_path.stem  # 文件名即股票代码
@@ -704,11 +704,7 @@ class DailyDataService:
                         if not normalized_code:
                             continue
 
-                        # 确保股票在 stocks 表中存在
-                        if normalized_code not in ensured_codes:
-                            with SessionLocal() as db:
-                                ensure_stock_row(db, normalized_code)
-                            ensured_codes.add(normalized_code)
+                        codes_to_ensure.add(normalized_code)
 
                         # 写入 CSV 行
                         merged_file.write(
@@ -728,8 +724,14 @@ class DailyDataService:
                     if progress_callback:
                         progress_callback(i + 1, total, code, "failed")
 
-        # 第二阶段：使用 COPY 批量导入
+        # 第二阶段：先提交缺失的 stocks 主记录，再使用 COPY 批量导入
         try:
+            if codes_to_ensure:
+                with SessionLocal() as db:
+                    for normalized_code in sorted(codes_to_ensure):
+                        ensure_stock_row(db, normalized_code)
+                    db.commit()
+
             with SessionLocal() as db:
                 # 获取原始连接
                 conn = db.connection().connection

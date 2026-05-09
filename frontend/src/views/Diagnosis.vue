@@ -595,7 +595,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const configStore = useConfigStore()
 const { isMobile } = useResponsive()
-const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state'
+const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state:v2'
 const DIAGNOSIS_CHART_CACHE_KEY = 'stocktrade:diagnosis:chart-cache'
 const DIAGNOSIS_CHART_CACHE_TTL_MS = 30 * 60 * 1000
 const AUTO_HISTORY_REFRESH_INTERVAL_MS = 5 * 60 * 1000
@@ -745,6 +745,7 @@ onMounted(() => {
   // 从路由参数获取股票代码
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode) {
+    stockName.value = ''
     searchForm.value.code = routeCode
     searchAndAnalyze()
   }
@@ -761,12 +762,14 @@ onActivated(() => {
 
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode && routeCode !== stockCode.value) {
+    stockName.value = ''
     searchForm.value.code = routeCode
     searchAndAnalyze()
     return
   }
 
   if (stockCode.value) {
+    void loadStockInfo()
     maybeAutoRefreshHistory(true)
   }
 })
@@ -1324,6 +1327,7 @@ async function loadHistoryData(refresh: boolean = false) {
       refresh,
       { signal },
     )
+    stockName.value = data.name || stockName.value
     historyData.value = data.history || []
     historyTotal.value = data.total || 0
     persistDiagnosisState()

@@ -8,6 +8,12 @@ import type {
   CandidatesResponse,
   ConfigItem,
   ConfigResponse,
+  CurrentHotAnalysisResultsResponse,
+  CurrentHotCandidatesResponse,
+  CurrentHotDatesResponse,
+  CurrentHotIntradayAnalysisActionResponse,
+  CurrentHotIntradayAnalysisResponse,
+  CurrentHotIntradayAnalysisStatusResponse,
   DataFreshnessResponse,
   DataStatus,
   DiagnosisAnalyzeTaskResponse,
@@ -217,6 +223,28 @@ export const apiAnalysis = {
   generate: (reviewer: string = 'quant') =>
     api.post<null, { task_id: number }>('/v1/analysis/tomorrow-star/generate', null, { params: { reviewer } }),
 
+  // 获取当前热盘历史日期
+  getCurrentHotDates: (options?: RequestOptions) =>
+    api.get<never, CurrentHotDatesResponse>('/v1/analysis/current-hot/dates', withRequestOptions(options, TIMEOUTS.short)),
+
+  // 获取当前热盘候选列表
+  getCurrentHotCandidates: (date?: string, options?: RequestOptions) =>
+    api.get<never, CurrentHotCandidatesResponse>('/v1/analysis/current-hot/candidates', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { date },
+    }),
+
+  // 获取当前热盘分析结果
+  getCurrentHotResults: (date?: string, options?: RequestOptions) =>
+    api.get<never, CurrentHotAnalysisResultsResponse>('/v1/analysis/current-hot/results', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { date },
+    }),
+
+  // 生成当前热盘
+  generateCurrentHot: (reviewer: string = 'quant') =>
+    api.post<null, { task_id: number }>('/v1/analysis/current-hot/generate', null, { params: { reviewer } }),
+
   // 获取中盘分析状态
   getMiddayStatus: (options?: RequestOptions) =>
     api.get<never, IntradayAnalysisStatusResponse>('/v1/analysis/intraday/status', withRequestOptions(options, TIMEOUTS.short)),
@@ -232,6 +260,22 @@ export const apiAnalysis = {
   // 手动刷新中盘分析
   refreshMidday: () =>
     api.post<null, IntradayAnalysisActionResponse>('/v1/analysis/intraday/generate', null, { timeout: TIMEOUTS.standard }),
+
+  // 获取当前热盘中盘分析状态
+  getCurrentHotMiddayStatus: (options?: RequestOptions) =>
+    api.get<never, CurrentHotIntradayAnalysisStatusResponse>('/v1/analysis/current-hot/intraday/status', withRequestOptions(options, TIMEOUTS.short)),
+
+  // 获取当前热盘中盘分析结果
+  getCurrentHotMiddayCurrent: (options?: RequestOptions) =>
+    api.get<never, CurrentHotIntradayAnalysisResponse>('/v1/analysis/current-hot/intraday/data', withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 手动生成当前热盘中盘分析
+  generateCurrentHotMidday: () =>
+    api.post<null, CurrentHotIntradayAnalysisActionResponse>('/v1/analysis/current-hot/intraday/generate', null, { timeout: TIMEOUTS.standard }),
+
+  // 手动刷新当前热盘中盘分析
+  refreshCurrentHotMidday: () =>
+    api.post<null, CurrentHotIntradayAnalysisActionResponse>('/v1/analysis/current-hot/intraday/generate', null, { timeout: TIMEOUTS.standard }),
 
   // 获取单股诊断历史
   getDiagnosisHistory: (

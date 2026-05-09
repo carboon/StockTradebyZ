@@ -222,7 +222,7 @@ describe('Diagnosis.vue', () => {
       .mockResolvedValue(mockFullKline as any)
     vi.mocked(apiWatchlist.getAll).mockResolvedValue({ items: [] } as any)
     vi.mocked(apiWatchlist.add).mockResolvedValue({} as any)
-    vi.mocked(apiAnalysis.getDiagnosisHistory).mockResolvedValue({ history: mockHistory, total: mockHistory.length } as any)
+    vi.mocked(apiAnalysis.getDiagnosisHistory).mockResolvedValue({ name: '浦发银行', history: mockHistory, total: mockHistory.length } as any)
     vi.mocked(apiAnalysis.getHistoryStatus).mockResolvedValue({ generating: false, needs_refresh: false } as any)
     vi.mocked(apiAnalysis.refreshHistory).mockResolvedValue({ status: 'ready', message: '当前页历史数据已是最新' } as any)
     vi.mocked(apiAnalysis.analyze).mockResolvedValue(mockAnalyzeResponse as any)
@@ -306,6 +306,23 @@ describe('Diagnosis.vue', () => {
     expect(wrapper.vm.historyData[0].prefilter_passed).toBe(true)
     expect(wrapper.vm.historyData[0].signal_type).toBe('trend_start')
     expect(wrapper.vm.historyData[0].tomorrow_star_pass).toBe(true)
+  })
+
+  it('refreshes stockName from diagnosis history responses', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.stockCode = '600000'
+    wrapper.vm.stockName = '海王生物'
+    vi.mocked(apiAnalysis.getDiagnosisHistory).mockResolvedValueOnce({
+      name: 'ST海王',
+      history: mockHistory,
+      total: mockHistory.length,
+    } as any)
+
+    await wrapper.vm.loadHistoryData()
+
+    expect(wrapper.vm.stockName).toBe('ST海王')
   })
 
   it('refreshes only the requested page when history pagination changes', async () => {

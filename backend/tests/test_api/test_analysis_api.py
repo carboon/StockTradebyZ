@@ -452,6 +452,24 @@ def test_get_diagnosis_history_returns_stock_name(test_client_with_db) -> None:
 
 
 @pytest.mark.api
+def test_get_diagnosis_history_refreshes_stock_name_when_db_name_is_stale(test_client_with_db) -> None:
+    stock = Stock(code="000078", name="海王生物", market="SZ", industry="医药商业")
+    test_client_with_db.db.add(stock)
+    test_client_with_db.db.commit()
+
+    refreshed = Stock(code="000078", name="ST海王", market="SZ", industry="医药商业")
+    with patch("app.api.analysis.analysis_service") as mock_service, \
+         patch("app.api.analysis.TushareService.sync_stock_to_db", return_value=refreshed):
+        mock_service.get_stock_history_checks.return_value = ([], 0)
+
+        response = test_client_with_db.get("/api/v1/analysis/diagnosis/000078/history")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "ST海王"
+
+
+@pytest.mark.api
 def test_get_diagnosis_history_padded_code(test_client: TestClient) -> None:
     """
     测试获取单股诊断历史 - 代码自动补零
@@ -726,6 +744,50 @@ def test_get_diagnosis_result_completed(test_client_with_db: Any) -> None:
     assert data["score"] == 4.5
     assert data["verdict"] == "PASS"
     assert data["analysis"]["kdj_j"] == 15.3
+
+
+@pytest.mark.api
+def test_get_diagnosis_result_completed_refreshes_stock_name_when_db_name_is_stale(test_client_with_db: Any) -> None:
+    from app.time_utils import utc_now
+
+    now = utc_now()
+    task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "000078", "reviewer": "quant"},
+        result_json={
+            "check_date": "2026-05-08",
+            "analysis_date": "2026-05-08",
+            "close_price": 3.8,
+            "b1_passed": True,
+            "score": 4.1,
+            "verdict": "PASS",
+            "kdj_j": 12.3,
+            "zx_long_pos": True,
+            "weekly_ma_aligned": True,
+            "volume_healthy": True,
+            "signal_type": "trend_start",
+            "comment": "ok",
+            "scores": {"trend_structure": 4.0},
+        },
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    test_client_with_db.db.add_all([
+        task,
+        Stock(code="000078", name="海王生物", market="SZ", industry="医药商业"),
+    ])
+    test_client_with_db.db.commit()
+
+    refreshed = Stock(code="000078", name="ST海王", market="SZ", industry="医药商业")
+    with patch("app.api.analysis.TushareService.sync_stock_to_db", return_value=refreshed):
+        response = test_client_with_db.get("/api/v1/analysis/diagnosis/000078/result")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "ST海王"
 
 
 @pytest.mark.api

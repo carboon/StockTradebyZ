@@ -59,6 +59,7 @@ cp .env.example deploy/.env
 - `ZHIPUAI_API_KEY`
 - `DASHSCOPE_API_KEY`
 - `GEMINI_API_KEY`
+- `NGINX_BASE_IMAGE`
 - `POSTGRES_PORT`
 - `BACKEND_PORT`
 - `FRONTEND_PORT`
@@ -96,6 +97,14 @@ cp .env.example deploy/.env
 ```bash
 ./deploy/scripts/start.sh prod --build
 ```
+
+如果宿主机访问 Docker Hub 较慢，导致 `nginx:1.27-alpine` 拉取超时，可在 `deploy/.env` 中覆盖基础镜像：
+
+```bash
+NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
+```
+
+也可以改为你自己的私有仓库完整镜像名。
 
 如需宿主机重启后自动拉起同一套生产服务：
 

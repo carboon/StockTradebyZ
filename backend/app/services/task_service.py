@@ -242,6 +242,9 @@ class TaskService:
         "export_results": {"label": "结果导出", "detail": "导出 PASS 图表", "index": 5, "total": 6, "percent": 90},
         "score_review": {"label": "结果导出", "detail": "导出 PASS 图表", "index": 5, "total": 6, "percent": 90},  # 兼容旧名称
 
+        "history_window_star": {"label": "补齐历史窗口", "detail": "生成明日之星历史记录", "index": 6, "total": 6, "percent": 92},
+        "history_window_hot": {"label": "补齐历史窗口", "detail": "生成当前热盘历史记录", "index": 6, "total": 6, "percent": 96},
+
         # 阶段6: 完成（100%）
         "finalize": {"label": "输出推荐", "detail": "生成最终结果", "index": 6, "total": 6, "percent": 100},
         "completed": {"label": "已完成", "detail": "全量初始化完成", "index": 6, "total": 6, "percent": 100},
@@ -254,8 +257,9 @@ class TaskService:
         "daily_batch_fetch": {"label": "抓取日快照", "index": 2, "total": 4, "percent": 20},
         "daily_batch_persist_raw": {"label": "写入原始分片", "index": 3, "total": 4, "percent": 55},
         "daily_batch_load_db": {"label": "批量入库", "index": 4, "total": 4, "percent": 80},
-        "daily_batch_rebuild_star": {"label": "重建明日之星", "index": 5, "total": 5, "percent": 90},
-        "daily_batch_completed": {"label": "批量刷新完成", "index": 5, "total": 5, "percent": 100},
+        "daily_batch_rebuild_star": {"label": "重建明日之星", "index": 5, "total": 6, "percent": 90},
+        "daily_batch_rebuild_hot": {"label": "重建当前热盘", "index": 6, "total": 6, "percent": 95},
+        "daily_batch_completed": {"label": "批量刷新完成", "index": 6, "total": 6, "percent": 100},
         "generating_history": {"label": "生成历史数据", "index": 1, "total": 2, "percent": 50},
         "generating_history_detail": {"label": "生成诊断详情", "index": 1, "total": 2, "percent": 50},
 
@@ -758,12 +762,55 @@ class TaskService:
         except Exception as exc:
             analysis_synced = 0
             print(f"同步分析结果失败: {exc}")
+
+        task.task_stage = "history_window_star"
+        task.progress = 92
+        task.progress_meta_json = self._build_stage_meta(
+            "history_window_star",
+            progress=92,
+            message="正在补齐明日之星历史窗口",
+        )
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
+
+        tomorrow_star_window_synced = await asyncio.to_thread(
+            self._run_tomorrow_star_window_sync,
+            180,
+            reviewer,
+            "full_update",
+        )
+        if tomorrow_star_window_synced.get("failed_dates"):
+            failed_dates = ", ".join(tomorrow_star_window_synced["failed_dates"])
+            raise Exception(f"明日之星历史窗口补齐失败: {failed_dates}")
+        self._invalidate_tomorrow_star_caches()
+
+        task.task_stage = "history_window_hot"
+        task.progress = 96
+        task.progress_meta_json = self._build_stage_meta(
+            "history_window_hot",
+            progress=96,
+            message="正在补齐当前热盘历史窗口",
+        )
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
+
+        current_hot_synced = await asyncio.to_thread(
+            self._run_current_hot_window_sync,
+            180,
+            reviewer,
+        )
+        if current_hot_synced.get("failed_dates"):
+            failed_dates = ", ".join(current_hot_synced["failed_dates"])
+            raise Exception(f"当前热盘历史窗口补齐失败: {failed_dates}")
+
         status = tushare_service.check_data_status()
         task.result_json = {
             "data_status": status,
             "stock_basic_synced": synced_count,
             "candidate_synced": candidate_synced,
             "analysis_synced": analysis_synced,
+            "tomorrow_star_window_synced": tomorrow_star_window_synced,
+            "current_hot_synced": current_hot_synced,
             "stage_metrics": {
                 "durations_seconds": stage_durations,
             },
@@ -885,6 +932,25 @@ class TaskService:
         if not build_result.get("success"):
             raise Exception(build_result.get("error") or build_result.get("status") or f"{trade_date} 明日之星重建失败")
 
+        task.task_stage = "daily_batch_rebuild_hot"
+        task.progress = 95
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_rebuild_hot",
+            progress=95,
+            message=f"重建 {trade_date} 当前热盘",
+        )
+        db.commit()
+        self._record_task_log(task, f"开始重建 {trade_date} 当前热盘", "info", stage="daily_batch_rebuild_hot")
+        await self._publish_ops_task_event(task, "task_progress")
+
+        current_hot_result = await asyncio.to_thread(
+            self._run_current_hot_rebuild_sync,
+            trade_date,
+            "quant",
+        )
+        if current_hot_result.get("status") != "ok":
+            raise Exception(current_hot_result.get("message") or f"{trade_date} 当前热盘重建失败")
+
         TushareService.clear_data_status_cache()
         self._invalidate_tomorrow_star_caches()
         try:
@@ -900,6 +966,7 @@ class TaskService:
             "trade_date": trade_date,
             "source": source,
             "tomorrow_star_rebuild": consistency_result,
+            "current_hot_rebuild": current_hot_result,
             **result,
         }
         task.task_stage = "daily_batch_completed"
@@ -1005,6 +1072,27 @@ class TaskService:
             MarketService.fail_update(message)
             raise Exception(message)
 
+        task.task_stage = "daily_batch_rebuild_hot"
+        task.progress = 95
+        task.progress_meta_json = self._build_stage_meta(
+            "daily_batch_rebuild_hot",
+            progress=95,
+            message=f"重建 {trade_date} 当前热盘",
+        )
+        db.commit()
+        self._record_task_log(task, f"开始重建 {trade_date} 当前热盘", "info", stage="daily_batch_rebuild_hot")
+        await self._publish_ops_task_event(task, "task_progress")
+
+        current_hot_result = await asyncio.to_thread(
+            self._run_current_hot_rebuild_sync,
+            trade_date,
+            "quant",
+        )
+        if current_hot_result.get("status") != "ok":
+            message = str(current_hot_result.get("message") or f"{trade_date} 当前热盘重建失败")
+            MarketService.fail_update(message)
+            raise Exception(message)
+
         latest_trade_date = TushareService(token=token).get_latest_trade_date()
         if latest_trade_date:
             MarketService(token=token).update_cache(latest_trade_date)
@@ -1029,6 +1117,7 @@ class TaskService:
             "source": params["source"],
             "message": message,
             "tomorrow_star_rebuild": consistency_result,
+            "current_hot_rebuild": current_hot_result,
             **result,
         }
         task.task_stage = "daily_batch_completed"
@@ -1054,6 +1143,47 @@ class TaskService:
                 trade_date,
                 source=source,
                 progress_callback=progress_callback,
+            )
+
+    @staticmethod
+    def _run_current_hot_rebuild_sync(
+        trade_date: Optional[str],
+        reviewer: str = "quant",
+    ) -> dict[str, Any]:
+        from app.database import SessionLocal
+        from app.services.current_hot_service import CurrentHotService
+
+        with SessionLocal() as session:
+            return CurrentHotService(session).generate_for_trade_date(trade_date, reviewer=reviewer)
+
+    @staticmethod
+    def _run_tomorrow_star_window_sync(
+        window_size: int = 180,
+        reviewer: str = "quant",
+        source: str = "full_update",
+    ) -> dict[str, Any]:
+        from app.database import SessionLocal
+        from app.services.tomorrow_star_window_service import TomorrowStarWindowService
+
+        with SessionLocal() as session:
+            return TomorrowStarWindowService(session).ensure_window(
+                window_size=window_size,
+                reviewer=reviewer,
+                source=source,
+            )
+
+    @staticmethod
+    def _run_current_hot_window_sync(
+        window_size: int = 180,
+        reviewer: str = "quant",
+    ) -> dict[str, Any]:
+        from app.database import SessionLocal
+        from app.services.current_hot_service import CurrentHotService
+
+        with SessionLocal() as session:
+            return CurrentHotService(session).ensure_window(
+                window_size=window_size,
+                reviewer=reviewer,
             )
 
     @staticmethod

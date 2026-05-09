@@ -1082,6 +1082,100 @@ async def test_run_full_update_with_subprocess(task_service_with_manager):
     assert task.params_json["start_from"] == 3
 
 
+@pytest.mark.service
+@pytest.mark.asyncio
+async def test_run_full_update_syncs_history_windows(task_service):
+    task = Task(
+        task_type="full_update",
+        status="pending",
+        params_json={"reviewer": "quant"},
+    )
+    task_service.db.add(task)
+    task_service.db.commit()
+    task_service.db.refresh(task)
+
+    class _FakeProcess:
+        def __init__(self):
+            self.stdout = MagicMock()
+            self.stdout.readline = AsyncMock(side_effect=[b""])
+
+        wait = AsyncMock(return_value=0)
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    process = _FakeProcess()
+    execution_order: list[str] = []
+    tomorrow_star_payload = {"failed_dates": [], "rebuilt_dates": ["2026-05-07"]}
+    current_hot_payload = {"failed_dates": [], "rebuilt_dates": ["2026-05-07", "2026-05-08"]}
+
+    def fake_star_window(window_size: int, reviewer: str, source: str) -> dict:
+        execution_order.append("tomorrow_star")
+        assert window_size == 180
+        assert reviewer == "quant"
+        assert source == "full_update"
+        return tomorrow_star_payload
+
+    def fake_current_hot_window(window_size: int, reviewer: str) -> dict:
+        execution_order.append("current_hot")
+        assert window_size == 180
+        assert reviewer == "quant"
+        return current_hot_payload
+
+    tushare_instance = MagicMock()
+    tushare_instance.sync_stock_list_to_db.return_value = 12
+    tushare_instance.check_data_status.return_value = {"ok": True}
+    metadata_service = MagicMock()
+
+    with patch("app.services.task_service.asyncio.create_subprocess_exec", return_value=process), patch(
+        "app.services.task_service.asyncio.to_thread",
+        side_effect=fake_to_thread,
+    ), patch.object(task_service, "_publish_ops_task_event", AsyncMock()), patch.object(
+        task_service,
+        "_sync_candidates_from_files",
+        return_value=7,
+    ), patch.object(
+        task_service,
+        "_sync_analysis_results_from_files",
+        return_value=6,
+    ), patch.object(
+        task_service,
+        "_run_tomorrow_star_window_sync",
+        side_effect=fake_star_window,
+    ) as mock_star_window, patch.object(
+        task_service,
+        "_run_current_hot_window_sync",
+        side_effect=fake_current_hot_window,
+    ) as mock_current_hot_window, patch.object(
+        task_service,
+        "_invalidate_tomorrow_star_caches",
+    ) as mock_invalidate, patch(
+        "app.services.tushare_service.TushareService",
+    ) as mock_tushare_cls, patch(
+        "app.services.admin_summary_metadata_service.get_admin_summary_metadata_service",
+        return_value=metadata_service,
+        ):
+            mock_tushare_cls.return_value = tushare_instance
+            await task_service._run_full_update(task, task_service.db)
+
+    task_service.db.commit()
+    task_service.db.refresh(task)
+    task_service.running_tasks.pop(task.id, None)
+
+    mock_star_window.assert_called_once_with(180, "quant", "full_update")
+    mock_current_hot_window.assert_called_once_with(180, "quant")
+    mock_invalidate.assert_called_once()
+    assert execution_order == ["tomorrow_star", "current_hot"]
+    assert task.task_stage == "history_window_hot"
+    assert task.progress == 96
+    assert task.progress_meta_json["stage"] == "history_window_hot"
+    assert task.result_json["stock_basic_synced"] == 12
+    assert task.result_json["candidate_synced"] == 7
+    assert task.result_json["analysis_synced"] == 6
+    assert task.result_json["tomorrow_star_window_synced"] == tomorrow_star_payload
+    assert task.result_json["current_hot_synced"] == current_hot_payload
+
+
 # ============================================
 # 边界条件和错误情况测试
 # ============================================

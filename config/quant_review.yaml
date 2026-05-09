@@ -104,7 +104,7 @@ weekly_context:
   ema_slow: 21
   slope_lookback: 3
 
-# ── 第 4 步前置过滤（先过滤，再评分） ─────────────────────
+# ── 第 4 步前置过滤（只做风险标记，不阻断评分） ─────────────
 prefilter:
   enabled: true
   cache_dir: data/tushare_cache
@@ -140,7 +140,8 @@ prefilter:
     lookback_days: 20
     ema_fast: 20
     ema_slow: 60
-    # 中证500 / 创业板指至少 1 个达标即可开启第 4 步评分。
+    # 中证500 / 创业板指至少 1 个达标即视为 prefilter 通过；
+    # 未通过时仍继续评分，只在结果里标记 blocked。
     min_pass_count: 1
     indexes:
       - ts_code: 000905.SH

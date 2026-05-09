@@ -121,7 +121,12 @@ async def search_stocks(
         }
 
     for item in tushare_matches:
-        items_by_code.setdefault(item["code"], item)
+        existing = items_by_code.get(item["code"], {})
+        merged = dict(existing)
+        for key, value in item.items():
+            if value not in (None, ""):
+                merged[key] = value
+        items_by_code[item["code"]] = merged
 
     ranked_items = sorted(
         items_by_code.values(),
@@ -137,7 +142,11 @@ async def search_stocks(
 async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
     """获取股票基本信息"""
     code = code.zfill(6)
-    stock = db.query(Stock).filter(Stock.code == code).first()
+    stock = None
+    try:
+        stock = TushareService().sync_stock_to_db(db, code)
+    except Exception:
+        stock = db.query(Stock).filter(Stock.code == code).first()
 
     # 检查数据是否存在
     csv_path = ROOT / settings.raw_data_dir / f"{code}.csv"

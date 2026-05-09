@@ -37,6 +37,17 @@ vi.mock('@/api', () => ({
     getCandidates: vi.fn(),
     getResults: vi.fn(),
     generate: vi.fn(),
+    getCurrentHotDates: vi.fn(),
+    getCurrentHotCandidates: vi.fn(),
+    getCurrentHotResults: vi.fn(),
+    getMiddayStatus: vi.fn(),
+    getMiddayCurrent: vi.fn(),
+    generateMidday: vi.fn(),
+    refreshMidday: vi.fn(),
+    getCurrentHotMiddayStatus: vi.fn(),
+    getCurrentHotMiddayCurrent: vi.fn(),
+    generateCurrentHotMidday: vi.fn(),
+    refreshCurrentHotMidday: vi.fn(),
   },
   apiTasks: {
     startIncrementalUpdate: vi.fn(),
@@ -74,10 +85,24 @@ const latestCandidates = [
 ]
 
 const latestResults = [
-  { code: 'A', verdict: 'WATCH', total_score: 4.6, signal_type: 'rebound', comment: '1' },
-  { code: 'B', verdict: 'PASS', total_score: 4.2, signal_type: 'trend_start', comment: '2' },
-  { code: 'C', verdict: 'PASS', total_score: 5.0, signal_type: 'trend_start', comment: '3' },
-  { code: 'D', verdict: 'FAIL', total_score: 4.9, signal_type: 'distribution_risk', comment: '4' },
+  { code: 'A', verdict: 'WATCH', total_score: 4.6, signal_type: 'rebound', comment: '1', prefilter_passed: false, prefilter_summary: '中证 500 / 创业板指环境未达标', prefilter_blocked_by: ['market_regime'] },
+  { code: 'B', verdict: 'PASS', total_score: 4.2, signal_type: 'trend_start', comment: '2', prefilter_passed: true },
+  { code: 'C', verdict: 'PASS', total_score: 5.0, signal_type: 'trend_start', comment: '3', prefilter_passed: true },
+  { code: 'D', verdict: 'FAIL', total_score: 4.9, signal_type: 'distribution_risk', comment: '4', prefilter_passed: false, prefilter_summary: '申万一级行业强度不在前 30%', prefilter_blocked_by: ['industry_strength'] },
+]
+
+const currentHotCandidates = [
+  { code: '688001', name: '华兴源创', kdj_j: 15, close_price: 28.5, board_name: '半导体设备', b1_passed: true },
+  { code: '600001', name: '示例热盘', kdj_j: 12, close_price: 11.2, board_name: '券商', b1_passed: false },
+]
+
+const currentHotResults = [
+  { code: '688001', verdict: 'PASS', total_score: 4.9, signal_type: 'trend_start', comment: 'a', b1_passed: true },
+  { code: '600001', verdict: 'PASS', total_score: 4.8, signal_type: 'trend_start', comment: 'b', b1_passed: false },
+  { code: '000002', verdict: 'WATCH', total_score: 4.7, signal_type: 'rebound', comment: 'c', b1_passed: false },
+  { code: '300003', verdict: 'WATCH', total_score: 4.6, signal_type: 'rebound', comment: 'd', b1_passed: false },
+  { code: '002004', verdict: 'FAIL', total_score: 4.5, signal_type: 'distribution_risk', comment: 'e', b1_passed: false },
+  { code: '688005', verdict: 'WATCH', total_score: 4.4, signal_type: 'rebound', comment: 'f', b1_passed: false },
 ]
 
 function buildIncrementalStatus(overrides: Record<string, unknown> = {}) {
@@ -110,6 +135,8 @@ function mountComponent() {
     global: {
       plugins: [ElementPlus, createPinia()],
       stubs: {
+        'el-tabs': { template: '<div><slot /></div>', props: ['modelValue'] },
+        'el-tab-pane': { template: '<div><slot /></div>' },
         'el-row': { template: '<div><slot /></div>' },
         'el-col': { template: '<div><slot /></div>' },
         'el-card': { template: '<div><slot name="header" /><slot /></div>' },
@@ -117,6 +144,8 @@ function mountComponent() {
         'el-table-column': true,
         'el-button': { template: '<button @click="$emit(\'click\')"><slot /></button>' },
         'el-tag': { template: '<span><slot /></span>' },
+        'el-radio-group': { template: '<div><slot /></div>', props: ['modelValue'] },
+        'el-radio-button': { template: '<span><slot /></span>', props: ['value'] },
         'el-divider': { template: '<hr />' },
         'el-alert': { template: '<div class="el-alert">{{ description }}</div>', props: ['description'] },
         'el-empty': { template: '<div class="el-empty"><slot />{{ description }}</div>', props: ['description'] },
@@ -151,6 +180,20 @@ describe('TomorrowStar.vue', () => {
     vi.mocked(apiAnalysis.getResults).mockResolvedValue({
       results: latestResults,
     } as any)
+    vi.mocked(apiAnalysis.getCurrentHotDates).mockResolvedValue({
+      dates: ['2024-01-15', '2024-01-14'],
+      history: [
+        { date: '2024-01-15', count: 6, pass: 2 },
+        { date: '2024-01-14', count: 4, pass: 1 },
+      ],
+    } as any)
+    vi.mocked(apiAnalysis.getCurrentHotCandidates).mockResolvedValue({
+      pick_date: '2024-01-15',
+      candidates: currentHotCandidates,
+    } as any)
+    vi.mocked(apiAnalysis.getCurrentHotResults).mockResolvedValue({
+      results: currentHotResults,
+    } as any)
     vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
       latest_trade_date: '2024-01-15',
       latest_trade_data_ready: false,
@@ -162,6 +205,38 @@ describe('TomorrowStar.vue', () => {
       running_task_id: null,
       running_task_status: null,
       incremental_update: buildIncrementalStatus(),
+    } as any)
+    vi.mocked(apiAnalysis.getMiddayStatus).mockResolvedValue({
+      has_data: true,
+      status: 'ready',
+      trade_date: '2024-01-15',
+      snapshot_time: '2024-01-15T12:30:00',
+      source_pick_date: '2024-01-15',
+    } as any)
+    vi.mocked(apiAnalysis.getMiddayCurrent).mockResolvedValue({
+      has_data: true,
+      status: 'ready',
+      trade_date: '2024-01-15',
+      snapshot_time: '2024-01-15T12:30:00',
+      source_pick_date: '2024-01-15',
+      items: [{ code: '600000', name: '浦发银行', b1_passed: true, verdict: 'PASS', signal_type: 'trend_start', score: 4.6 }],
+      total: 1,
+    } as any)
+    vi.mocked(apiAnalysis.getCurrentHotMiddayStatus).mockResolvedValue({
+      has_data: true,
+      status: 'ready',
+      trade_date: '2024-01-15',
+      snapshot_time: '2024-01-15T13:00:00',
+      source_pick_date: '2024-01-15',
+    } as any)
+    vi.mocked(apiAnalysis.getCurrentHotMiddayCurrent).mockResolvedValue({
+      has_data: true,
+      status: 'ready',
+      trade_date: '2024-01-15',
+      snapshot_time: '2024-01-15T13:00:00',
+      source_pick_date: '2024-01-15',
+      items: [{ code: '688001', name: '华兴源创', b1_passed: true, verdict: 'PASS', signal_type: 'trend_start', score: 4.9 }],
+      total: 1,
     } as any)
     vi.mocked(apiTasks.getIncrementalStatus).mockResolvedValue(buildIncrementalStatus() as any)
     vi.mocked(apiTasks.startIncrementalUpdate).mockResolvedValue({
@@ -188,20 +263,30 @@ describe('TomorrowStar.vue', () => {
     expect(apiAnalysis.getResults).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
-  it('sorts top analysis results by verdict priority first, then score', async () => {
+  it('sorts top analysis results by trend_start first, then score', async () => {
     const wrapper = mountComponent()
     await flushPromises()
 
     const codes = wrapper.vm.topAnalysisResults.map((item: { code: string }) => item.code)
-    expect(codes).toEqual(['C', 'B', 'A', 'D'])
+    expect(codes).toEqual(['C', 'B', 'D', 'A'])
   })
 
-  it('resolves analysis result names from latest candidates', async () => {
+  it('prefers result names over stale candidate names', async () => {
     const wrapper = mountComponent()
     await flushPromises()
 
-    expect(wrapper.vm.getAnalysisResultName({ code: '600000' })).toBe('浦发银行')
+    wrapper.vm.latestCandidates = [{ code: '600000', name: '海王生物' }]
+    expect(wrapper.vm.getAnalysisResultName({ code: '600000', name: 'ST海王' })).toBe('ST海王')
     expect(wrapper.vm.getAnalysisResultName({ code: '999999' })).toBe('999999')
+  })
+
+  it('returns prefilter label and summary for tomorrow-star analysis rows', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.getAnalysisPrefilterLabel(wrapper.vm.latestAnalysisResults[0].prefilter_passed)).toBe('否')
+    expect(wrapper.vm.getAnalysisPrefilterSummary(wrapper.vm.latestAnalysisResults[0])).toBe('中证 500 / 创业板指环境未达标')
+    expect(wrapper.vm.getAnalysisPrefilterLabel(wrapper.vm.latestAnalysisResults[1].prefilter_passed)).toBe('是')
   })
 
   it('loads date-specific candidates and results when selecting a history row', async () => {
@@ -327,7 +412,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v2', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
       latestCandidates: [{ code: 'cached', kdj_j: 5 }],
       latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
@@ -369,7 +454,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v2', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
       latestCandidates: [{ code: 'cached', kdj_j: 5 }],
       latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
@@ -415,7 +500,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v2', JSON.stringify({
       historyData: [{ date: '2024-01-10', rawDate: '2024-01-10', count: 1, pass: 0, status: 'success' }],
       latestCandidates: [],
       latestAnalysisResults: [],
@@ -455,5 +540,50 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     expect(ElMessage.success).toHaveBeenCalledWith('已刷新 2024-01-15 的数据')
+  })
+
+  it('loads current-hot data and filters sci-tech candidates/results', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.activeTab = 'current-hot'
+    await flushPromises()
+
+    expect(apiAnalysis.getCurrentHotDates).toHaveBeenCalled()
+    expect(wrapper.vm.currentHotLatestCandidates).toHaveLength(2)
+    expect(wrapper.vm.displayCurrentHotAnalysisResults).toHaveLength(5)
+    expect(wrapper.vm.totalCurrentHotAnalysisResults).toBe(6)
+    expect(wrapper.vm.getCurrentHotBoardLabel(wrapper.vm.currentHotLatestCandidates[0])).toBe('半导体设备')
+    expect(wrapper.vm.getBooleanTagLabel(wrapper.vm.currentHotLatestCandidates[0].b1_passed)).toBe('通过')
+    expect(wrapper.vm.getBooleanTagLabel(wrapper.vm.currentHotLatestCandidates[1].b1_passed)).toBe('未过')
+
+    wrapper.vm.currentHotBoardFilter = 'sci-tech'
+    await flushPromises()
+
+    expect(wrapper.vm.displayCurrentHotLatestCandidates.map((item: { code: string }) => item.code)).toEqual(['688001'])
+    expect(wrapper.vm.displayCurrentHotAnalysisResults.map((item: { code: string }) => item.code)).toEqual(['688001', '688005'])
+  })
+
+  it('falls back to code-derived board labels for current-hot candidates', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.getCurrentHotBoardLabel({ code: '688002' })).toBe('科创板')
+    expect(wrapper.vm.getCurrentHotBoardLabel({ code: '600002' })).toBe('其他板块')
+  })
+
+  it('switches midday source to current-hot and loads new intraday api', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.activeTab = 'midday-analysis'
+    await flushPromises()
+
+    wrapper.vm.middaySource = 'current-hot'
+    await flushPromises()
+
+    expect(apiAnalysis.getCurrentHotMiddayStatus).toHaveBeenCalled()
+    expect(apiAnalysis.getCurrentHotMiddayCurrent).toHaveBeenCalled()
+    expect(wrapper.vm.middayRows[0].code).toBe('688001')
   })
 })

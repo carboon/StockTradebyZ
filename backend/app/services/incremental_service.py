@@ -660,8 +660,8 @@ class IncrementalFillService:
                 top5_codes = self._get_top5_codes_for_date(trade_date)
 
                 if not top5_codes:
-                    logger.warning(f"日期 {trade_date} 没有 Top5 股票")
-                    failed += 1
+                    logger.info("日期 %s 没有可补齐的 Top5 股票，跳过", trade_date)
+                    completed += 1
                     continue
 
                 # 为每只 Top5 股票生成历史检查数据
@@ -704,18 +704,40 @@ class IncrementalFillService:
         """获取指定日期的 Top5 股票代码"""
         suggestion_file = ROOT / settings.review_dir / trade_date / "suggestion.json"
 
-        if not suggestion_file.exists():
-            return []
+        if suggestion_file.exists():
+            try:
+                with open(suggestion_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                recommendations = data.get("recommendations", [])
+                codes = [str(r.get("code", "")).zfill(6) for r in recommendations[:5] if r.get("code")]
+                if codes:
+                    return codes
+            except Exception:
+                logger.warning("读取 suggestion.json 失败，回退到数据库: %s", suggestion_file)
 
         try:
-            with open(suggestion_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            recommendations = data.get("recommendations", [])
-            # 取前 5 个
-            return [r.get("code") for r in recommendations[:5] if r.get("code")]
-        except Exception:
+            pick_date = date.fromisoformat(trade_date)
+        except ValueError:
             return []
+
+        threshold = float(settings.min_score_threshold)
+        rows = (
+            self.db.query(AnalysisResult.code)
+            .filter(
+                AnalysisResult.pick_date == pick_date,
+                AnalysisResult.verdict == "PASS",
+                AnalysisResult.total_score.isnot(None),
+                AnalysisResult.total_score >= threshold,
+            )
+            .order_by(
+                AnalysisResult.total_score.desc(),
+                AnalysisResult.id.asc(),
+            )
+            .limit(5)
+            .all()
+        )
+        return [str(code).zfill(6) for code, in rows if str(code or "").strip()]
 
     def _ensure_stock_history(self, code: str, asof_date: str) -> None:
         """确保股票的历史检查数据存在

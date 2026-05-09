@@ -10,7 +10,7 @@ import os
 import math
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -26,6 +26,8 @@ from app.cache import cache
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
 from app.services.analysis_service import analysis_service
+from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysisService
+from app.services.current_hot_service import CurrentHotService
 from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
@@ -36,6 +38,14 @@ from app.schemas import (
     CandidateItem,
     AnalysisResultResponse,
     AnalysisItem,
+    CurrentHotCandidateItem,
+    CurrentHotCandidatesResponse,
+    CurrentHotAnalysisItem,
+    CurrentHotAnalysisResultResponse,
+    CurrentHotDatesResponse,
+    CurrentHotHistoryItem,
+    CurrentHotIntradayAnalysisGenerateResponse,
+    CurrentHotIntradayAnalysisResponse,
     TomorrowStarDatesResponse,
     TomorrowStarHistoryItem,
     TomorrowStarWindowStatusResponse,
@@ -61,6 +71,33 @@ def _safe_json_float(value: Optional[float]) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _signal_sort_priority(signal_type: Optional[str]) -> int:
+    return 0 if signal_type == "trend_start" else 1
+
+
+def _sort_score_desc(value: Optional[float]) -> float:
+    return -(value if value is not None else -9999.0)
+
+
+def _extract_prefilter_fields(details_json: Optional[dict[str, Any]]) -> tuple[Optional[bool], Optional[str], Optional[list[str]]]:
+    if not isinstance(details_json, dict):
+        return None, None, None
+
+    prefilter = details_json.get("prefilter")
+    if not isinstance(prefilter, dict):
+        return None, None, None
+
+    passed_raw = prefilter.get("passed")
+    passed = bool(passed_raw) if isinstance(passed_raw, bool) else None
+
+    summary_raw = prefilter.get("summary")
+    summary = str(summary_raw).strip() if isinstance(summary_raw, str) and summary_raw.strip() else None
+
+    blocked_by_raw = prefilter.get("blocked_by")
+    blocked_by = [str(item) for item in blocked_by_raw] if isinstance(blocked_by_raw, list) and blocked_by_raw else None
+    return passed, summary, blocked_by
 
 
 def _get_latest_history_summary(db: Session, code: str) -> dict | None:
@@ -413,7 +450,8 @@ async def get_analysis_results(
         )
 
     rows = (
-        db.query(AnalysisResult)
+        db.query(AnalysisResult, Stock.name)
+        .outerjoin(Stock, Stock.code == AnalysisResult.code)
         .filter(AnalysisResult.pick_date == target_date)
         .order_by(
             AnalysisResult.total_score.desc().nullslast(),
@@ -422,19 +460,32 @@ async def get_analysis_results(
         .all()
     )
 
-    items = [
-        AnalysisItem(
-            id=row.id,
-            pick_date=target_date,
-            code=row.code,
-            reviewer=row.reviewer,
-            verdict=row.verdict,
-            total_score=_safe_json_float(row.total_score),
-            signal_type=row.signal_type,
-            comment=row.comment,
+    items = []
+    for row, stock_name in rows:
+        prefilter_passed, prefilter_summary, prefilter_blocked_by = _extract_prefilter_fields(row.details_json)
+        items.append(
+            AnalysisItem(
+                id=row.id,
+                pick_date=target_date,
+                code=row.code,
+                name=stock_name,
+                reviewer=row.reviewer,
+                verdict=row.verdict,
+                total_score=_safe_json_float(row.total_score),
+                signal_type=row.signal_type,
+                comment=row.comment,
+                prefilter_passed=prefilter_passed,
+                prefilter_summary=prefilter_summary,
+                prefilter_blocked_by=prefilter_blocked_by,
+            )
         )
-        for row in rows
-    ]
+    items.sort(
+        key=lambda item: (
+            _signal_sort_priority(item.signal_type),
+            _sort_score_desc(item.total_score),
+            item.code,
+        )
+    )
 
     return AnalysisResultResponse(
         pick_date=target_date,
@@ -442,6 +493,152 @@ async def get_analysis_results(
         total=len(items),
         min_score_threshold=4.0,
     )
+
+
+@router.get("/current-hot/dates", response_model=CurrentHotDatesResponse)
+async def get_current_hot_dates(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotDatesResponse:
+    payload = CurrentHotService(db).get_dates(window_size=180)
+    history_items = [
+        CurrentHotHistoryItem(
+            pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
+            date=item["date"],
+            candidate_count=int(item.get("candidate_count", 0) or 0),
+            analysis_count=int(item.get("analysis_count", 0) or 0),
+            trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
+            pass_count=int(item.get("pass_count", 0) or 0),
+            status=item.get("status") or "missing",
+            error_message=item.get("error_message"),
+            is_latest=bool(item.get("is_latest")),
+        )
+        for item in payload.get("history", [])
+    ]
+    latest_date = payload.get("latest_date")
+    return CurrentHotDatesResponse(
+        dates=payload.get("dates", []),
+        history=history_items,
+        latest_date=datetime.strptime(latest_date, "%Y-%m-%d").date() if latest_date else None,
+    )
+
+
+@router.get("/current-hot/candidates", response_model=CurrentHotCandidatesResponse)
+async def get_current_hot_candidates(
+    date: Optional[str] = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotCandidatesResponse:
+    payload = CurrentHotService(db).load_candidates(date, limit=limit)
+    pick_date = payload.get("pick_date")
+    items = [
+        CurrentHotCandidateItem(
+            id=item["id"],
+            pick_date=pick_date,
+            code=item["code"],
+            name=item.get("name"),
+            sector_names=item.get("sector_names") or [],
+            board_group=item.get("board_group"),
+            open_price=item.get("open_price"),
+            close_price=item.get("close_price"),
+            change_pct=item.get("change_pct"),
+            turnover=item.get("turnover"),
+            b1_passed=item.get("b1_passed"),
+            kdj_j=item.get("kdj_j"),
+            consecutive_days=int(item.get("consecutive_days") or 1),
+        )
+        for item in payload.get("candidates", [])
+    ]
+    return CurrentHotCandidatesResponse(
+        pick_date=pick_date,
+        candidates=items,
+        total=int(payload.get("total", 0) or 0),
+    )
+
+
+@router.get("/current-hot/results", response_model=CurrentHotAnalysisResultResponse)
+async def get_current_hot_results(
+    date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotAnalysisResultResponse:
+    payload = CurrentHotService(db).get_results(date)
+    pick_date = payload.get("pick_date")
+    items = [
+        CurrentHotAnalysisItem(
+            id=item["id"],
+            pick_date=pick_date,
+            code=item["code"],
+            name=item.get("name"),
+            sector_names=item.get("sector_names") or [],
+            board_group=item.get("board_group"),
+            reviewer=item.get("reviewer"),
+            b1_passed=item.get("b1_passed"),
+            verdict=item.get("verdict"),
+            total_score=item.get("total_score"),
+            signal_type=item.get("signal_type"),
+            comment=item.get("comment"),
+        )
+        for item in payload.get("results", [])
+    ]
+    return CurrentHotAnalysisResultResponse(
+        pick_date=pick_date,
+        results=items,
+        total=int(payload.get("total", 0) or 0),
+        min_score_threshold=float(payload.get("min_score_threshold", 4.0) or 4.0),
+    )
+
+
+@router.post("/current-hot/generate")
+async def generate_current_hot(
+    date: Optional[str] = Query(default=None, description="交易日"),
+    reviewer: str = Query(default="quant", description="评审者类型"),
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    ensure_tushare_ready()
+    return CurrentHotService(db).generate_for_trade_date(date, reviewer=reviewer)
+
+
+@router.get("/current-hot/intraday/status")
+async def get_current_hot_intraday_status(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
+    service = CurrentHotIntradayAnalysisService(db)
+    status = service.get_status(is_admin=getattr(user, "role", None) == "admin")
+    return {
+        "trade_date": status.trade_date,
+        "source_pick_date": status.source_pick_date,
+        "snapshot_time": status.snapshot_time,
+        "window_open": status.window_open,
+        "has_data": status.has_data,
+        "status": status.status,
+        "message": status.message,
+    }
+
+
+@router.get("/current-hot/intraday/data", response_model=CurrentHotIntradayAnalysisResponse)
+async def get_current_hot_intraday_data(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotIntradayAnalysisResponse:
+    service = CurrentHotIntradayAnalysisService(db)
+    payload = service.get_snapshot_payload(is_admin=getattr(user, "role", None) == "admin")
+    return CurrentHotIntradayAnalysisResponse(**payload)
+
+
+@router.post("/current-hot/intraday/generate", response_model=CurrentHotIntradayAnalysisGenerateResponse)
+async def generate_current_hot_intraday(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> CurrentHotIntradayAnalysisGenerateResponse:
+    ensure_tushare_ready()
+    service = CurrentHotIntradayAnalysisService(db)
+    payload = service.generate_snapshot()
+    return CurrentHotIntradayAnalysisGenerateResponse(**payload)
 
 
 @router.get("/intraday/status")
@@ -517,12 +714,10 @@ async def get_diagnosis_history(
     else:
         history = history_result or []
         total = len(history)
-    stock = db.query(Stock).filter(Stock.code == code).first()
-    if stock is None:
-        try:
-            stock = TushareService().sync_stock_to_db(db, code)
-        except Exception:
-            stock = None
+    try:
+        stock = TushareService().sync_stock_to_db(db, code)
+    except Exception:
+        stock = db.query(Stock).filter(Stock.code == code).first()
 
     return DiagnosisHistoryResponse(
         code=code,
@@ -735,12 +930,10 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
         raise HTTPException(status_code=404, detail="未找到分析任务")
 
     # 获取股票信息
-    stock = db.query(Stock).filter(Stock.code == code).first()
-    if stock is None:
-        try:
-            stock = TushareService().sync_stock_to_db(db, code)
-        except Exception:
-            stock = None
+    try:
+        stock = TushareService().sync_stock_to_db(db, code)
+    except Exception:
+        stock = db.query(Stock).filter(Stock.code == code).first()
 
     # 如果任务还在进行中，返回状态
     if task.status in ("pending", "running"):

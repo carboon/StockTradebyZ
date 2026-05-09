@@ -39,11 +39,51 @@ export interface AnalysisResult {
   id: number
   pick_date: string
   code: string
+  name?: string
   reviewer?: string
   verdict?: 'PASS' | 'WATCH' | 'FAIL'
   total_score?: number
   signal_type?: string
   comment?: string
+  prefilter_passed?: boolean | null
+  prefilter_summary?: string | null
+  prefilter_blocked_by?: string[] | null
+}
+
+export interface CurrentHotCandidate {
+  id: number
+  pick_date: string
+  code: string
+  name?: string
+  sector_names?: string[]
+  board_group?: string | null
+  board?: string | null
+  board_name?: string | null
+  sector_name?: string | null
+  open_price?: number
+  close_price?: number
+  change_pct?: number
+  turnover?: number
+  b1_passed?: boolean | null
+  kdj_j?: number
+}
+
+export interface CurrentHotAnalysisResult {
+  id: number
+  pick_date: string
+  code: string
+  name?: string
+  sector_names?: string[]
+  board_group?: string | null
+  reviewer?: string
+  b1_passed?: boolean | null
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  total_score?: number
+  signal_type?: string
+  comment?: string
+  prefilter_passed?: boolean | null
+  prefilter_summary?: string | null
+  prefilter_blocked_by?: string[] | null
 }
 
 export interface IntradayAnalysisItem {
@@ -333,6 +373,12 @@ export interface TomorrowStarDatesResponse {
   window_status?: TomorrowStarWindowStatusResponse | null
 }
 
+export interface CurrentHotDatesResponse {
+  dates: string[]
+  history: TomorrowStarHistoryItem[]
+  window_status?: TomorrowStarWindowStatusResponse | null
+}
+
 export interface FreshnessResponse {
   latest_trade_date?: string | null
   latest_trade_data_ready?: boolean | null
@@ -352,9 +398,22 @@ export interface CandidatesResponse {
   total: number
 }
 
+export interface CurrentHotCandidatesResponse {
+  pick_date?: string | null
+  candidates: CurrentHotCandidate[]
+  total: number
+}
+
 export interface AnalysisResultsResponse {
   pick_date?: string | null
   results: AnalysisResult[]
+  total: number
+  min_score_threshold: number
+}
+
+export interface CurrentHotAnalysisResultsResponse {
+  pick_date?: string | null
+  results: CurrentHotAnalysisResult[]
   total: number
   min_score_threshold: number
 }
@@ -392,6 +451,10 @@ export interface IntradayAnalysisActionResponse {
   generated_count?: number
   skipped_count?: number
 }
+
+export type CurrentHotIntradayAnalysisStatusResponse = IntradayAnalysisStatusResponse
+export type CurrentHotIntradayAnalysisResponse = IntradayAnalysisResponse
+export type CurrentHotIntradayAnalysisActionResponse = IntradayAnalysisActionResponse
 
 export interface DiagnosisHistoryResponse {
   code: string

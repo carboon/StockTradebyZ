@@ -133,6 +133,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.nginx
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+        NGINX_BASE_IMAGE: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
     container_name: stocktrade-nginx
     profiles:
       - prod

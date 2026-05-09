@@ -90,6 +90,27 @@ def _candidate_consecutive_metrics_migration_satisfied(inspector: Any) -> bool:
     )
 
 
+def _current_hot_tables_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_table(inspector, "current_hot_runs")
+        and _has_table(inspector, "current_hot_candidates")
+        and _has_table(inspector, "current_hot_analysis_results")
+        and _has_table(inspector, "current_hot_intraday_snapshots")
+        and _has_unique_constraint(inspector, "current_hot_runs", "uq_current_hot_runs_pick_date")
+        and _has_unique_constraint(inspector, "current_hot_candidates", "uq_current_hot_candidates_pick_date_code")
+        and _has_unique_constraint(
+            inspector,
+            "current_hot_analysis_results",
+            "uq_current_hot_analysis_results_pick_date_code_reviewer",
+        )
+        and _has_unique_constraint(
+            inspector,
+            "current_hot_intraday_snapshots",
+            "uq_current_hot_intraday_snapshots_trade_date_code",
+        )
+    )
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
@@ -97,6 +118,7 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_steps_completed_column.sql": _task_steps_completed_migration_satisfied,
     "add_raw_data_manifest_tables.sql": _raw_data_manifest_migration_satisfied,
     "add_candidate_consecutive_metrics.sql": _candidate_consecutive_metrics_migration_satisfied,
+    "add_current_hot_tables.sql": _current_hot_tables_migration_satisfied,
 }
 
 

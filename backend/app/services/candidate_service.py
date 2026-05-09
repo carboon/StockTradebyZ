@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+import pandas as pd
 from sqlalchemy import select, func, and_, case, text
 from sqlalchemy.orm import Session
 
@@ -38,6 +39,7 @@ class CandidateService:
         self.db = db or SessionLocal()
         self._owns_session = db is None
         self.tushare_service = TushareService()
+        self._raw_daily_cache: dict[str, dict[date, dict[str, Optional[float]]]] = {}
 
     def __enter__(self):
         return self
@@ -333,10 +335,17 @@ class CandidateService:
 
         candidates = []
         for row in query.all():
+            raw_snapshot = None
+            if row.open_price is None or row.daily_close_price is None:
+                raw_snapshot = self._load_raw_daily_snapshot(str(row.code).zfill(6), target_date)
             close_price = float(row.close_price) if row.close_price is not None else (
-                float(row.daily_close_price) if row.daily_close_price is not None else None
+                float(row.daily_close_price) if row.daily_close_price is not None else (
+                    raw_snapshot.get("close") if raw_snapshot else None
+                )
             )
-            open_price = float(row.open_price) if row.open_price is not None else None
+            open_price = float(row.open_price) if row.open_price is not None else (
+                raw_snapshot.get("open") if raw_snapshot else None
+            )
             change_pct = None
             if open_price is not None and close_price is not None and open_price > 0:
                 change_pct = (close_price - open_price) / open_price * 100
@@ -355,6 +364,30 @@ class CandidateService:
             })
 
         return target_date.isoformat(), candidates
+
+    def _load_raw_daily_snapshot(self, code: str, pick_date: date) -> Optional[dict[str, Optional[float]]]:
+        normalized_code = str(code or "").zfill(6)
+        cached = self._raw_daily_cache.get(normalized_code)
+        if cached is None:
+            csv_path = Path(settings.raw_data_dir) / f"{normalized_code}.csv"
+            if not csv_path.exists():
+                self._raw_daily_cache[normalized_code] = {}
+                return None
+            try:
+                df = pd.read_csv(csv_path, usecols=["date", "open", "close"])
+                df["date"] = pd.to_datetime(df["date"]).dt.date
+                cached = {
+                    trade_date: {
+                        "open": float(open_price) if pd.notna(open_price) else None,
+                        "close": float(close_price) if pd.notna(close_price) else None,
+                    }
+                    for trade_date, open_price, close_price in df.itertuples(index=False, name=None)
+                }
+            except Exception as exc:
+                logger.warning("读取原始行情失败: code=%s error=%s", normalized_code, exc)
+                cached = {}
+            self._raw_daily_cache[normalized_code] = cached
+        return cached.get(pick_date)
 
     def get_latest_candidate_date(self) -> Optional[date]:
         """获取最新候选日期

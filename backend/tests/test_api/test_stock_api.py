@@ -279,6 +279,32 @@ def test_search_stocks_fallback_to_tushare(test_client: TestClient) -> None:
     assert data["items"][0]["market"] == "SH"
 
 
+@pytest.mark.api
+def test_search_stocks_prefers_tushare_name_when_db_name_is_stale(test_client_with_db) -> None:
+    test_client_with_db.db.add(
+        Stock(code="000078", name="海王生物", market="SZ", industry="医药商业")
+    )
+    test_client_with_db.db.commit()
+
+    lookup = pd.DataFrame([
+        {
+            "ts_code": "000078.SZ",
+            "symbol": "000078",
+            "name": "ST海王",
+            "industry": "医药商业",
+            "market": "主板",
+        }
+    ])
+
+    with patch("app.api.stock.TushareService.get_stock_list", return_value=lookup):
+        response = test_client_with_db.get("/api/v1/stock/search?q=海王&limit=1")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"][0]["code"] == "000078"
+    assert data["items"][0]["name"] == "ST海王"
+
+
 # ========================================================================
 # K线数据API测试 (POST /api/v1/stock/kline)
 # ========================================================================

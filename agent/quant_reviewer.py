@@ -31,7 +31,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "pipeline"))
 
 from base_reviewer import BaseReviewer
-from review_prefilter import Step4Prefilter, build_prefilter_block_result
+from review_prefilter import Step4Prefilter
 
 _DEFAULT_CONFIG_PATH = _ROOT / "config" / "quant_review.yaml"
 
@@ -818,9 +818,6 @@ class QuantReviewer(BaseReviewer):
         strategy: str | None = None,
     ) -> dict[str, Any]:
         prefilter = self.prefilter.evaluate(code=code, pick_date=asof_date, price_df=df)
-        if not prefilter.get("passed", True):
-            return build_prefilter_block_result(code=code, strategy=strategy, prefilter=prefilter)
-
         frame = prepare_review_frame(df, self.config)
         result = review_prepared_frame(frame, self.config, code=code, asof_date=asof_date, strategy=strategy)
         result["prefilter"] = prefilter

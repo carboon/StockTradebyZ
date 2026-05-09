@@ -1,7 +1,12 @@
 <template>
   <div class="tomorrow-star-page">
     <el-tabs v-model="activeTab" class="page-tabs">
-      <el-tab-pane label="明日之星" name="tomorrow-star">
+      <el-tab-pane
+        v-for="tab in analysisTabs"
+        :key="tab.name"
+        :label="tab.label"
+        :name="tab.name"
+      >
         <el-alert
           v-if="showInitializationAlert"
           class="page-alert"
@@ -12,8 +17,8 @@
           :description="configStore.initializationMessage"
         />
 
-        <div v-if="showInitializationEmpty" class="page-empty">
-          <el-empty description="明日之星尚无可用数据" :image-size="120">
+        <div v-if="activeShowInitializationEmpty" class="page-empty">
+          <el-empty :description="activeEmptyDescription" :image-size="120">
             <el-button type="primary" @click="router.push('/update')">
               前往任务中心初始化
             </el-button>
@@ -24,7 +29,7 @@
         </div>
 
         <template v-else>
-          <el-card v-if="incrementalUpdate.running" class="update-progress-card" shadow="never">
+          <el-card v-if="tab.name === 'tomorrow-star' && incrementalUpdate.running" class="update-progress-card" shadow="never">
             <div class="progress-content">
               <div class="progress-info">
                 <el-icon class="is-loading"><Loading /></el-icon>
@@ -44,13 +49,13 @@
             </div>
           </el-card>
           <el-alert
-            v-else-if="authStore.isAdmin && incrementalUpdate.status === 'failed'"
+            v-else-if="tab.name === 'tomorrow-star' && authStore.isAdmin && incrementalUpdate.status === 'failed'"
             class="page-alert"
             type="warning"
             :closable="false"
             show-icon
             title="增量更新上次未完成"
-            :description="incrementalUpdate.last_error || incrementalUpdate.message || '可前往任务中心重新发起，系统会尽量从已完成位置继续。'"
+                :description="incrementalUpdate.last_error || incrementalUpdate.message || '可前往任务中心重新发起，系统会尽量从已完成位置继续。'"
           />
 
           <div v-if="isMobile" class="mobile-layout">
@@ -59,8 +64,8 @@
                 <div class="card-header">
                   <div class="title-section">
                     <span>历史信息</span>
-                    <el-tag v-if="selectedDate" size="small" type="info" effect="plain">
-                      已选 {{ viewingDateDisplay }}
+                    <el-tag v-if="activeSelectedDate" size="small" type="info" effect="plain">
+                      已选 {{ activeViewingDateDisplay }}
                     </el-tag>
                   </div>
                 </div>
@@ -70,20 +75,20 @@
                 <span class="tip-item">· 点击日期刷新对应 Top 5</span>
               </div>
 
-              <div v-if="displayHistoryData.length > 0" class="mobile-history-list">
+              <div v-if="activeDisplayHistoryData.length > 0" class="mobile-history-list">
                 <button
-                  v-for="row in displayHistoryData"
+                  v-for="row in activeDisplayHistoryData"
                   :key="row.rawDate"
                   type="button"
                   class="mobile-history-item"
-                  :class="{ active: selectedDate === row.rawDate }"
+                  :class="{ active: activeSelectedDate === row.rawDate }"
                   @click="selectDate(row)"
                 >
                   <div class="mobile-history-item__header">
                     <span class="mobile-history-item__date">{{ row.date }}</span>
                     <div class="mobile-history-item__status">
                       <el-tag
-                        v-if="row.rawDate === latestDate"
+                        v-if="row.rawDate === activeLatestDate"
                         type="success"
                         size="small"
                         class="status-tag"
@@ -110,13 +115,13 @@
 
               <div class="pagination-wrap mobile-pagination">
                 <div class="mobile-pagination__summary">
-                  第 {{ historyPage }} / {{ historyPageCount }} 页
+                  第 {{ activeHistoryPage }} / {{ activeHistoryPageCount }} 页
                 </div>
                 <el-pagination
-                  v-model:current-page="historyPage"
-                  :page-size="historyPageSize"
+                  v-model:current-page="activeHistoryPage"
+                  :page-size="activeHistoryPageSize"
                   layout="prev, pager, next"
-                  :total="totalHistoryCount"
+                  :total="activeTotalHistoryCount"
                   :hide-on-single-page="false"
                   background
                   size="small"
@@ -128,20 +133,30 @@
               <template #header>
                 <div class="card-header">
                   <div class="title-section">
-                    <span>分析结果 Top 5</span>
+                    <span>{{ activeMobileAnalysisTitle }}</span>
                     <el-tag size="small" type="success" class="date-tag">
-                      {{ viewingDateDisplay }}
+                      {{ activeViewingDateDisplay }}
                     </el-tag>
                   </div>
                   <div class="header-actions">
-                    <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
+                    <el-tag v-if="activeShowCachedHint" type="info" size="small" effect="plain">
                       已展示缓存结果
                     </el-tag>
+                    <el-radio-group
+                      v-if="showBoardFilter"
+                      v-model="currentHotBoardFilter"
+                      size="small"
+                      class="board-filter"
+                    >
+                      <el-radio-button value="all">全部</el-radio-button>
+                      <el-radio-button value="sci-tech">科创板</el-radio-button>
+                      <el-radio-button value="others">其他板块</el-radio-button>
+                    </el-radio-group>
                     <el-button
                       type="primary"
                       size="small"
                       :icon="Refresh"
-                      :loading="loadingLatest"
+                      :loading="activeLoadingLatest"
                       @click="refreshCurrentCandidates"
                     >
                       刷新
@@ -151,16 +166,16 @@
               </template>
 
               <div class="table-header-tip mobile-tip">
-                <span class="tip-item">· 仅展示评分最高的 5 只股票</span>
+                <span class="tip-item">{{ activeMobileAnalysisTip }}</span>
               </div>
 
-              <div v-if="topAnalysisResults.length > 0" class="mobile-analysis-list">
+              <div v-if="activeAnalysisRows.length > 0" class="mobile-analysis-list">
                 <button
-                  v-for="row in topAnalysisResults"
+                  v-for="row in activeAnalysisRows"
                   :key="row.code"
                   type="button"
                   class="mobile-analysis-item"
-                  @click="viewStock(row.code)"
+                  @click="viewStock(row.code, activeStockSource)"
                 >
                   <div class="mobile-analysis-item__header">
                     <div>
@@ -175,11 +190,42 @@
                     <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                       {{ getSignalTypeLabel(row.signal_type) }}
                     </el-tag>
-                    <span class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
+                    <el-tooltip
+                      v-if="showAnalysisPrefilter && row.prefilter_passed === false && getAnalysisPrefilterSummary(row)"
+                      :content="getAnalysisPrefilterSummary(row)"
+                      placement="top"
+                    >
+                      <el-tag :type="getAnalysisPrefilterTagType(row.prefilter_passed)" size="small">
+                        前置 {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
+                      </el-tag>
+                    </el-tooltip>
+                    <el-tag
+                      v-else-if="showAnalysisPrefilter"
+                      :type="getAnalysisPrefilterTagType(row.prefilter_passed)"
+                      size="small"
+                    >
+                      前置 {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
+                    </el-tag>
+                    <span v-if="showAnalysisComment" class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
                   </div>
                 </button>
               </div>
-              <el-empty v-else description="暂无 Top 5 分析结果" :image-size="90" />
+              <el-empty v-else :description="activeMobileAnalysisEmptyDescription" :image-size="90" />
+
+              <div v-if="showActiveAnalysisPagination" class="pagination-wrap mobile-pagination">
+                <div class="mobile-pagination__summary">
+                  第 {{ currentHotAnalysisPage }} / {{ currentHotAnalysisPageCount }} 页
+                </div>
+                <el-pagination
+                  v-model:current-page="currentHotAnalysisPage"
+                  :page-size="currentHotAnalysisPageSize"
+                  layout="prev, pager, next"
+                  :total="totalCurrentHotAnalysisResults"
+                  :hide-on-single-page="false"
+                  background
+                  size="small"
+                />
+              </div>
             </el-card>
           </div>
 
@@ -198,12 +244,12 @@
                 </div>
 
                 <el-table
-                  :data="displayHistoryData"
+                  :data="activeDisplayHistoryData"
                   @row-click="selectDate"
                   class="history-table"
                   height="400"
                   highlight-current-row
-                  :current-row-key="selectedDate"
+                  :current-row-key="activeSelectedDate"
                   row-key="rawDate"
                 >
                   <el-table-column prop="date" label="时间" width="120" />
@@ -232,7 +278,7 @@
                     <template #default="{ row }">
                       <div class="history-status-cell">
                         <el-tag
-                          v-if="row.rawDate === latestDate"
+                          v-if="row.rawDate === activeLatestDate"
                           type="success"
                           size="small"
                           class="status-tag"
@@ -253,10 +299,10 @@
 
                 <div class="pagination-wrap">
                   <el-pagination
-                    v-model:current-page="historyPage"
-                    :page-size="historyPageSize"
+                    v-model:current-page="activeHistoryPage"
+                    :page-size="activeHistoryPageSize"
                     layout="total, prev, pager, next"
-                    :total="totalHistoryCount"
+                    :total="activeTotalHistoryCount"
                     :hide-on-single-page="false"
                     background
                     size="small"
@@ -270,20 +316,30 @@
                 <template #header>
                   <div class="card-header">
                     <div class="title-section">
-                      <span>候选股票</span>
+                      <span>{{ activeCandidateTitle }}</span>
                       <el-tag size="small" type="success" class="date-tag">
-                        {{ viewingDateDisplay }}
+                        {{ activeViewingDateDisplay }}
                       </el-tag>
                     </div>
                     <div class="header-actions">
-                      <el-tag v-if="showCachedHint" type="info" size="small" effect="plain">
+                      <el-tag v-if="activeShowCachedHint" type="info" size="small" effect="plain">
                         已展示缓存结果
                       </el-tag>
+                      <el-radio-group
+                        v-if="showBoardFilter"
+                        v-model="currentHotBoardFilter"
+                        size="small"
+                        class="board-filter"
+                      >
+                        <el-radio-button value="all">全部</el-radio-button>
+                        <el-radio-button value="sci-tech">科创板</el-radio-button>
+                        <el-radio-button value="others">其他板块</el-radio-button>
+                      </el-radio-group>
                       <el-button
                         type="primary"
                         size="small"
                         :icon="Refresh"
-                        :loading="loadingLatest"
+                        :loading="activeLoadingLatest"
                         @click="refreshCurrentCandidates"
                       >
                         刷新
@@ -293,12 +349,18 @@
                 </template>
 
                 <div class="table-header-tip">
-                  <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
-                  <span class="tip-item">· 条件：KDJ 低位 + 知行线结构通过 + 周线多头排列 + 最大量日非阴线</span>
+                  <template v-if="tab.name === 'tomorrow-star'">
+                    <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
+                    <span class="tip-item">· 条件：KDJ 低位 + 知行线结构通过 + 周线多头排列 + 最大量日非阴线</span>
+                  </template>
+                  <template v-else>
+                    <span class="tip-item">· 当前热盘关注当日强势活跃标的，右侧支持科创板 / 其他板块过滤</span>
+                    <span class="tip-item">· 点击历史日期可回看对应热力股票池与量化分析结果</span>
+                  </template>
                 </div>
 
                 <el-table
-                  :data="displayLatestCandidates"
+                  :data="activeDisplayLatestCandidates"
                   stripe
                   class="candidates-table"
                   height="400"
@@ -328,14 +390,26 @@
                       {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="consecutive_days" label="连续候选" min-width="110" align="center">
+                  <el-table-column v-if="isCurrentHotTab" label="所属板块" min-width="120" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ getCurrentHotBoardLabel(row) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" label="B1" min-width="100" align="center">
+                    <template #default="{ row }">
+                      <el-tag :type="getBooleanTagType(row.b1_passed)" size="small">
+                        {{ getBooleanTagLabel(row.b1_passed) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-else prop="consecutive_days" label="连续候选" min-width="110" align="center">
                     <template #default="{ row }">
                       {{ (row.consecutive_days || 1) > 1 ? row.consecutive_days : '否' }}
                     </template>
                   </el-table-column>
                   <el-table-column label="操作" width="80" align="center" fixed="right">
                     <template #default="{ row }">
-                      <el-button text type="primary" size="small" @click="viewStock(row.code)">
+                      <el-button text type="primary" size="small" @click="viewStock(row.code, activeStockSource)">
                         详情
                       </el-button>
                     </template>
@@ -344,23 +418,23 @@
 
                 <div class="pagination-wrap">
                   <el-pagination
-                    v-model:current-page="latestCandidatePage"
-                    :page-size="candidatePageSize"
+                    v-model:current-page="activeCandidatePage"
+                    :page-size="activeCandidatePageSize"
                     layout="total, prev, pager, next"
-                    :total="totalLatestCandidates"
+                    :total="activeTotalLatestCandidates"
                     :hide-on-single-page="false"
                     background
                   />
                 </div>
 
-                <el-divider v-if="topAnalysisResults.length > 0" />
-                <div v-if="topAnalysisResults.length > 0" class="analysis-section">
+                <el-divider v-if="showAnalysisSection" />
+                <div v-if="showAnalysisSection" class="analysis-section">
                   <div class="analysis-tip">
-                    <span>对候选股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度</span>
+                    <span>{{ analysisTipText }}</span>
                   </div>
-                  <h4>分析结果 (Top 5)</h4>
+                  <h4>{{ activeAnalysisTitle }}</h4>
                   <el-table
-                    :data="topAnalysisResults"
+                    :data="activeAnalysisRows"
                     stripe
                     size="small"
                     max-height="200"
@@ -385,15 +459,43 @@
                         </el-tag>
                       </template>
                     </el-table-column>
-                    <el-table-column prop="comment" label="评语" show-overflow-tooltip />
+                    <el-table-column v-if="showAnalysisPrefilter" label="前置过滤" width="96" align="center">
+                      <template #default="{ row }">
+                        <el-tooltip
+                          v-if="row.prefilter_passed === false && getAnalysisPrefilterSummary(row)"
+                          :content="getAnalysisPrefilterSummary(row)"
+                          placement="top"
+                        >
+                          <el-tag :type="getAnalysisPrefilterTagType(row.prefilter_passed)" size="small">
+                            {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
+                          </el-tag>
+                        </el-tooltip>
+                        <el-tag v-else :type="getAnalysisPrefilterTagType(row.prefilter_passed)" size="small">
+                          {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column v-if="showAnalysisComment" prop="comment" label="评语" show-overflow-tooltip />
                     <el-table-column label="操作" width="90" align="center">
                       <template #default="{ row }">
-                        <el-button text type="primary" size="small" @click="viewStock(row.code)">
+                        <el-button text type="primary" size="small" @click="viewStock(row.code, activeStockSource)">
                           详情
                         </el-button>
                       </template>
                     </el-table-column>
                   </el-table>
+
+                  <div v-if="showActiveAnalysisPagination" class="pagination-wrap analysis-pagination">
+                    <el-pagination
+                      v-model:current-page="currentHotAnalysisPage"
+                      :page-size="currentHotAnalysisPageSize"
+                      layout="total, prev, pager, next"
+                      :total="totalCurrentHotAnalysisResults"
+                      :hide-on-single-page="false"
+                      background
+                      size="small"
+                    />
+                  </div>
                 </div>
               </el-card>
             </el-col>
@@ -413,6 +515,14 @@
                   </el-tag>
                 </div>
                 <div class="header-actions">
+                  <el-radio-group
+                    v-model="middaySource"
+                    size="small"
+                    class="source-switch"
+                  >
+                    <el-radio-button value="tomorrow-star">明日之星候选</el-radio-button>
+                    <el-radio-button value="current-hot">当前热盘</el-radio-button>
+                  </el-radio-group>
                   <el-tag v-if="middayShowCachedHint" type="info" size="small" effect="plain">
                     已展示缓存结果
                   </el-tag>
@@ -451,9 +561,10 @@
             </div>
 
             <div class="midday-meta midday-meta--mobile">
+              <el-tag size="small" effect="plain">数据源 {{ middaySourceLabel }}</el-tag>
               <el-tag size="small" effect="plain">交易日 {{ middayTradeDateDisplay || '-' }}</el-tag>
               <el-tag size="small" effect="plain">快照 {{ middaySnapshotTimeDisplay || '-' }}</el-tag>
-              <el-tag size="small" effect="plain">来源 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
+              <el-tag size="small" effect="plain">候选日期 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
             </div>
 
             <div v-if="middayRows.length > 0 && middayCanViewData" class="mobile-analysis-list">
@@ -511,6 +622,14 @@
                   </el-tag>
                 </div>
                 <div class="header-actions">
+                  <el-radio-group
+                    v-model="middaySource"
+                    size="small"
+                    class="source-switch"
+                  >
+                    <el-radio-button value="tomorrow-star">明日之星候选</el-radio-button>
+                    <el-radio-button value="current-hot">当前热盘</el-radio-button>
+                  </el-radio-group>
                   <el-tag v-if="middayShowCachedHint" type="info" size="small" effect="plain">
                     已展示缓存结果
                   </el-tag>
@@ -559,9 +678,10 @@
             </div>
 
             <div class="midday-meta">
+              <el-tag size="small" effect="plain">数据源 {{ middaySourceLabel }}</el-tag>
               <el-tag size="small" effect="plain">交易日 {{ middayTradeDateDisplay || '-' }}</el-tag>
               <el-tag size="small" effect="plain">快照 {{ middaySnapshotTimeDisplay || '-' }}</el-tag>
-              <el-tag size="small" effect="plain">来源 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
+              <el-tag size="small" effect="plain">候选日期 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
             </div>
 
             <el-empty v-if="middayShowEmpty" description="暂无数据" :image-size="100">
@@ -651,6 +771,8 @@ import { ElMessage } from 'element-plus'
 import type {
   Candidate,
   AnalysisResult,
+  CurrentHotAnalysisResult,
+  CurrentHotCandidate,
   IncrementalUpdateStatus,
   IntradayAnalysisItem,
   IntradayAnalysisResponse,
@@ -663,6 +785,15 @@ import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import { useResponsive } from '@/composables/useResponsive'
 
+type DataTabKey = 'tomorrow-star' | 'current-hot'
+type MiddaySourceKey = DataTabKey
+type BoardFilter = 'all' | 'sci-tech' | 'others'
+
+const analysisTabs: Array<{ name: DataTabKey; label: string }> = [
+  { name: 'tomorrow-star', label: '明日之星' },
+  { name: 'current-hot', label: '当前热盘' },
+]
+
 const router = useRouter()
 const authStore = useAuthStore()
 const configStore = useConfigStore()
@@ -671,17 +802,26 @@ const activeTab = ref('tomorrow-star')
 
 let loadDataRequestId = 0
 let candidatesRequestId = 0
+let currentHotLoadDataRequestId = 0
+let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache'
+const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v2'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
+const MIDDAY_CACHE_TTL_MS = 60_000
 let incrementalPollTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
 
 const loading = ref(false)
 const loadingLatest = ref(false)
 const checkingFreshness = ref(false)
+const currentHotLoading = ref(false)
+const currentHotLoadingLatest = ref(false)
 const loadingMidday = ref(false)
 const loadingMiddayAction = ref(false)
+const currentHotLoaded = ref(false)
+const currentHotHydratedFromCache = ref(false)
+const currentHotBoardFilter = ref<BoardFilter>('all')
+const middaySource = ref<MiddaySourceKey>('tomorrow-star')
 
 const middayStatus = ref<IntradayAnalysisStatusResponse>({
   has_data: false,
@@ -699,6 +839,11 @@ const middayData = ref<IntradayAnalysisResponse>({
 })
 const middayLoaded = ref(false)
 const middayShowCachedHint = ref(false)
+const middayCache = ref<Partial<Record<MiddaySourceKey, {
+  status: IntradayAnalysisStatusResponse
+  data: IntradayAnalysisResponse
+  timestamp: number
+}>>>({})
 
 type HistoryRow = {
   date: string
@@ -752,6 +897,21 @@ const viewingDate = ref<string | null>(null)
 const candidatesCache = ref<Map<string, { candidates: Candidate[], results: AnalysisResult[], timestamp: number }>>(new Map())
 const CACHE_TTL_MS = 5 * 60 * 1000  // 缓存5分钟
 
+const currentHotHistoryData = ref<HistoryRow[]>([])
+const currentHotSelectedDate = ref<string | null>(null)
+const currentHotLatestDate = ref<string>('')
+const currentHotLatestDataDate = ref<string>('')
+const currentHotLastHistorySignature = ref<string>('')
+const currentHotHistoryPage = ref(1)
+const currentHotLatestCandidates = ref<CurrentHotCandidate[]>([])
+const currentHotAnalysisResults = ref<CurrentHotAnalysisResult[]>([])
+const currentHotCandidatePage = ref(1)
+const currentHotAnalysisPage = ref(1)
+const currentHotCandidatePageSize = 10
+const currentHotAnalysisPageSize = 5
+const currentHotViewingDate = ref<string | null>(null)
+const currentHotCandidatesCache = ref<Map<string, { candidates: CurrentHotCandidate[], results: CurrentHotAnalysisResult[], timestamp: number }>>(new Map())
+
 // 增量更新状态
 const incrementalUpdate = ref<IncrementalUpdateStatus>({
   status: 'idle',
@@ -778,14 +938,27 @@ const incrementalUpdate = ref<IncrementalUpdateStatus>({
 const showCachedHint = computed(() => hydratedFromCache.value && !incrementalUpdate.value.running)
 const showInitializationAlert = computed(() => authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized)
 const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && latestCandidates.value.length === 0)
+const currentHotShowInitializationEmpty = computed(() => showInitializationAlert.value && currentHotHistoryData.value.length === 0 && currentHotLatestCandidates.value.length === 0)
 const middayRows = computed<IntradayAnalysisItem[]>(() => middayData.value.items || [])
 const middayCanViewData = computed(() => Boolean(middayData.value.has_data && middayRows.value.length > 0))
 const middayShowEmpty = computed(() => !loadingMidday.value && !middayCanViewData.value)
 const middayTaskRunning = computed(() => loadingMiddayAction.value)
+const middaySourceLabel = computed(() => middaySource.value === 'current-hot' ? '当前热盘' : '明日之星候选')
 const middayTradeDateDisplay = computed(() => formatDateString(middayData.value.trade_date || middayStatus.value.trade_date || ''))
 const middaySnapshotTimeDisplay = computed(() => formatDateTime(middayData.value.snapshot_time || middayStatus.value.snapshot_time || ''))
 const middaySourcePickDateDisplay = computed(() => formatDateString(middayData.value.source_pick_date || middayStatus.value.source_pick_date || ''))
 const middayEmptyMessage = computed(() => middayData.value.message || middayStatus.value.message || '暂无数据')
+const activeDataTab = computed<DataTabKey>(() => (activeTab.value === 'current-hot' ? 'current-hot' : 'tomorrow-star'))
+const isCurrentHotTab = computed(() => activeDataTab.value === 'current-hot')
+const activeShowInitializationEmpty = computed(() => (isCurrentHotTab.value ? currentHotShowInitializationEmpty.value : showInitializationEmpty.value))
+const activeEmptyDescription = computed(() => (isCurrentHotTab.value ? '当前热盘尚无可用数据' : '明日之星尚无可用数据'))
+const activeShowCachedHint = computed(() => (isCurrentHotTab.value ? currentHotHydratedFromCache.value : showCachedHint.value))
+const activeLoadingLatest = computed(() => (isCurrentHotTab.value ? currentHotLoadingLatest.value : loadingLatest.value))
+const activeCandidateTitle = computed(() => (isCurrentHotTab.value ? '热力股票池' : '候选股票'))
+const activeStockSource = computed<'tomorrow-star' | 'current-hot'>(() => (isCurrentHotTab.value ? 'current-hot' : 'tomorrow-star'))
+const showBoardFilter = computed(() => isCurrentHotTab.value)
+const showAnalysisComment = computed(() => !isCurrentHotTab.value)
+const analysisTipText = '对目标股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度'
 
 // 历史记录分页数据
 const totalHistoryCount = computed(() => historyData.value.length)
@@ -796,6 +969,16 @@ const displayHistoryData = computed(() => {
   }
   const start = (historyPage.value - 1) * historyPageSize.value
   return historyData.value.slice(start, start + historyPageSize.value)
+})
+
+const totalCurrentHotHistoryCount = computed(() => currentHotHistoryData.value.length)
+const currentHotHistoryPageCount = computed(() => Math.max(1, Math.ceil(totalCurrentHotHistoryCount.value / historyPageSize.value)))
+const displayCurrentHotHistoryData = computed(() => {
+  if (currentHotHistoryPage.value > currentHotHistoryPageCount.value) {
+    currentHotHistoryPage.value = currentHotHistoryPageCount.value
+  }
+  const start = (currentHotHistoryPage.value - 1) * historyPageSize.value
+  return currentHotHistoryData.value.slice(start, start + historyPageSize.value)
 })
 
 const totalLatestCandidates = computed(() => latestCandidates.value.length)
@@ -812,6 +995,26 @@ const displayLatestCandidates = computed(() => {
   return sorted.slice(start, start + candidatePageSize)
 })
 
+const currentHotFilteredCandidates = computed(() => {
+  return [...currentHotLatestCandidates.value]
+    .filter((candidate) => matchesBoardFilter(candidate.code, currentHotBoardFilter.value))
+    .sort((a, b) => {
+      const aVal = typeof a.kdj_j === 'number' ? a.kdj_j : Number.POSITIVE_INFINITY
+      const bVal = typeof b.kdj_j === 'number' ? b.kdj_j : Number.POSITIVE_INFINITY
+      if (aVal !== bVal) return aVal - bVal
+      return a.code.localeCompare(b.code)
+    })
+})
+const totalCurrentHotCandidates = computed(() => currentHotFilteredCandidates.value.length)
+const displayCurrentHotLatestCandidates = computed(() => {
+  const pageCount = Math.max(1, Math.ceil(totalCurrentHotCandidates.value / currentHotCandidatePageSize))
+  if (currentHotCandidatePage.value > pageCount) {
+    currentHotCandidatePage.value = pageCount
+  }
+  const start = (currentHotCandidatePage.value - 1) * currentHotCandidatePageSize
+  return currentHotFilteredCandidates.value.slice(start, start + currentHotCandidatePageSize)
+})
+
 // 当前查看的日期显示
 const viewingDateDisplay = computed(() => {
   if (viewingDate.value) {
@@ -820,23 +1023,101 @@ const viewingDateDisplay = computed(() => {
   return latestDate.value ? formatDateString(latestDate.value) : ''
 })
 
-function getVerdictPriority(verdict?: string): number {
-  const priorityMap: Record<string, number> = {
-    PASS: 3,
-    WATCH: 2,
-    FAIL: 1,
+const currentHotViewingDateDisplay = computed(() => {
+  if (currentHotViewingDate.value) {
+    return formatDateString(currentHotViewingDate.value)
   }
-  return priorityMap[verdict || ''] || 0
+  return currentHotLatestDate.value ? formatDateString(currentHotLatestDate.value) : ''
+})
+
+function getSignalPriority(signalType?: string): number {
+  return signalType === 'trend_start' ? 0 : 1
+}
+
+function getScoreSortValue(score?: number): number {
+  return typeof score === 'number' ? -score : 9999
+}
+
+function compareTomorrowStarAnalysisResults(
+  a: { signal_type?: string, total_score?: number, code: string },
+  b: { signal_type?: string, total_score?: number, code: string },
+): number {
+  const signalDiff = getSignalPriority(a.signal_type) - getSignalPriority(b.signal_type)
+  if (signalDiff !== 0) return signalDiff
+
+  const scoreDiff = getScoreSortValue(a.total_score) - getScoreSortValue(b.total_score)
+  if (scoreDiff !== 0) return scoreDiff
+
+  return a.code.localeCompare(b.code)
+}
+
+function compareCurrentHotAnalysisResults(
+  a: { b1_passed?: boolean | null, signal_type?: string, total_score?: number, code: string },
+  b: { b1_passed?: boolean | null, signal_type?: string, total_score?: number, code: string },
+): number {
+  const b1Diff = (a.b1_passed === true ? 0 : 1) - (b.b1_passed === true ? 0 : 1)
+  if (b1Diff !== 0) return b1Diff
+
+  return compareTomorrowStarAnalysisResults(a, b)
 }
 
 const topAnalysisResults = computed(() => {
   return [...latestAnalysisResults.value]
-    .sort((a, b) => {
-      const verdictDiff = getVerdictPriority(b.verdict) - getVerdictPriority(a.verdict)
-      if (verdictDiff !== 0) return verdictDiff
-      return (b.total_score || 0) - (a.total_score || 0)
-    })
+    .sort(compareTomorrowStarAnalysisResults)
     .slice(0, 5)
+})
+
+const currentHotFilteredAnalysisResults = computed(() => {
+  return [...currentHotAnalysisResults.value]
+    .filter((result) => matchesBoardFilter(result.code, currentHotBoardFilter.value))
+    .sort(compareCurrentHotAnalysisResults)
+})
+const totalCurrentHotAnalysisResults = computed(() => currentHotFilteredAnalysisResults.value.length)
+const currentHotAnalysisPageCount = computed(() => Math.max(1, Math.ceil(totalCurrentHotAnalysisResults.value / currentHotAnalysisPageSize)))
+const displayCurrentHotAnalysisResults = computed(() => {
+  if (currentHotAnalysisPage.value > currentHotAnalysisPageCount.value) {
+    currentHotAnalysisPage.value = currentHotAnalysisPageCount.value
+  }
+  const start = (currentHotAnalysisPage.value - 1) * currentHotAnalysisPageSize
+  return currentHotFilteredAnalysisResults.value.slice(start, start + currentHotAnalysisPageSize)
+})
+const activeAnalysisRows = computed(() => (isCurrentHotTab.value ? displayCurrentHotAnalysisResults.value : topAnalysisResults.value))
+const showAnalysisSection = computed(() => (isCurrentHotTab.value ? totalCurrentHotAnalysisResults.value > 0 : topAnalysisResults.value.length > 0))
+const showActiveAnalysisPagination = computed(() => isCurrentHotTab.value && totalCurrentHotAnalysisResults.value > currentHotAnalysisPageSize)
+const activeAnalysisTitle = computed(() => (isCurrentHotTab.value ? '分析结果' : '分析结果 (Top 5)'))
+const activeMobileAnalysisTitle = computed(() => (isCurrentHotTab.value ? '分析结果' : '分析结果 Top 5'))
+const activeMobileAnalysisTip = computed(() => (isCurrentHotTab.value ? '· 分析结果每页展示 5 只股票，可按板块过滤查看' : '· 仅展示评分最高的 5 只股票'))
+const activeMobileAnalysisEmptyDescription = computed(() => (isCurrentHotTab.value ? '暂无分析结果' : '暂无 Top 5 分析结果'))
+const activeDisplayHistoryData = computed(() => (isCurrentHotTab.value ? displayCurrentHotHistoryData.value : displayHistoryData.value))
+const showAnalysisPrefilter = computed(() => !isCurrentHotTab.value)
+const activeSelectedDate = computed(() => (isCurrentHotTab.value ? currentHotSelectedDate.value : selectedDate.value))
+const activeLatestDate = computed(() => (isCurrentHotTab.value ? currentHotLatestDate.value : latestDate.value))
+const activeViewingDateDisplay = computed(() => (isCurrentHotTab.value ? currentHotViewingDateDisplay.value : viewingDateDisplay.value))
+const activeDisplayLatestCandidates = computed(() => (isCurrentHotTab.value ? displayCurrentHotLatestCandidates.value : displayLatestCandidates.value))
+const activeTotalLatestCandidates = computed(() => (isCurrentHotTab.value ? totalCurrentHotCandidates.value : totalLatestCandidates.value))
+const activeCandidatePageSize = computed(() => (isCurrentHotTab.value ? currentHotCandidatePageSize : candidatePageSize))
+const activeHistoryPageSize = computed(() => historyPageSize.value)
+const activeTotalHistoryCount = computed(() => (isCurrentHotTab.value ? totalCurrentHotHistoryCount.value : totalHistoryCount.value))
+const activeHistoryPageCount = computed(() => (isCurrentHotTab.value ? currentHotHistoryPageCount.value : historyPageCount.value))
+const activeHistoryPage = computed({
+  get: () => (isCurrentHotTab.value ? currentHotHistoryPage.value : historyPage.value),
+  set: (value: number) => {
+    if (isCurrentHotTab.value) {
+      currentHotHistoryPage.value = value
+      return
+    }
+    historyPage.value = value
+  },
+})
+const activeCandidatePage = computed({
+  get: () => (isCurrentHotTab.value ? currentHotCandidatePage.value : latestCandidatePage.value),
+  set: (value: number) => {
+    if (isCurrentHotTab.value) {
+      currentHotCandidatePage.value = value
+      return
+    }
+    latestCandidatePage.value = value
+  },
 })
 
 function beginRequest(key: string): AbortSignal {
@@ -856,6 +1137,16 @@ function finishRequest(key: string, signal?: AbortSignal) {
 function cancelAllPageRequests() {
   requestControllers.forEach((controller) => controller.abort())
   requestControllers.clear()
+}
+
+function isSciTechBoardCode(code?: string | null): boolean {
+  return /^688\d{3}$/.test(String(code || ''))
+}
+
+function matchesBoardFilter(code: string, filter: BoardFilter): boolean {
+  if (filter === 'all') return true
+  const isSciTechBoard = isSciTechBoardCode(code)
+  return filter === 'sci-tech' ? isSciTechBoard : !isSciTechBoard
 }
 
 function normalizeHistoryStatus(status?: string | null): HistoryRow['status'] {
@@ -1026,7 +1317,7 @@ async function loadData(skipLatestLoad: boolean = false) {
             rawDate: formatDateString(date),
             count: candidates.length,
             pass: passCount,
-            consecutiveCandidateCount: candidates.filter((candidate) => (candidate.consecutive_days || 1) >= 2).length,
+            consecutiveCandidateCount: '-',
             status: 'success',
             analysisCount: results.length,
             errorMessage: null,
@@ -1160,7 +1451,244 @@ async function loadLatestCandidates() {
   }
 }
 
+async function loadCurrentHotData(skipLatestLoad: boolean = false) {
+  if (currentHotLoading.value) return
+
+  const requestId = ++currentHotLoadDataRequestId
+  const signal = beginRequest('currentHotLoadData')
+  const previousSelectedDate = currentHotSelectedDate.value
+  const previousViewingDate = currentHotViewingDate.value
+  currentHotLoading.value = true
+  try {
+    const datesData = await apiAnalysis.getCurrentHotDates({ signal })
+    if (requestId !== currentHotLoadDataRequestId) return
+
+    const dates = datesData.dates || []
+    const history = datesData.history || []
+    const windowStatus = datesData.window_status || null
+
+    currentHotLatestDate.value = dates.length > 0
+      ? formatDateString(windowStatus?.latest_date || dates[0])
+      : formatDateString(windowStatus?.latest_date || '')
+
+    if (history.length > 0 || windowStatus) {
+      currentHotHistoryData.value = normalizeHistoryRows(dates, history, windowStatus)
+    } else {
+      const historyPromises = dates.map(async (date: string) => {
+        try {
+          const [candidatesData, resultsData] = await Promise.all([
+            apiAnalysis.getCurrentHotCandidates(date, { signal }),
+            apiAnalysis.getCurrentHotResults(date, { signal }),
+          ])
+          const candidates = candidatesData.candidates || []
+          const results = resultsData.results || []
+          const passCount = results.filter((r) => r.signal_type === 'trend_start').length
+
+          return {
+            date: formatDateString(date),
+            rawDate: formatDateString(date),
+            count: candidates.length,
+            pass: passCount,
+            consecutiveCandidateCount: '-',
+            status: 'success',
+            analysisCount: results.length,
+            errorMessage: null,
+            isLatest: formatDateString(date) === currentHotLatestDate.value,
+          } satisfies HistoryRow
+        } catch {
+          return {
+            date: formatDateString(date),
+            rawDate: formatDateString(date),
+            count: '-',
+            pass: '-',
+            consecutiveCandidateCount: '-',
+            status: 'missing',
+            analysisCount: '-',
+            errorMessage: null,
+            isLatest: formatDateString(date) === currentHotLatestDate.value,
+          } satisfies HistoryRow
+        }
+      })
+
+      currentHotHistoryData.value = await Promise.all(historyPromises)
+      if (requestId !== currentHotLoadDataRequestId) return
+    }
+
+    currentHotLastHistorySignature.value = buildHistorySignature(dates, currentHotHistoryData.value)
+    currentHotHydratedFromCache.value = false
+    currentHotLoaded.value = true
+
+    if (dates.length === 0) {
+      currentHotSelectedDate.value = null
+      currentHotViewingDate.value = null
+      currentHotLatestCandidates.value = []
+      currentHotAnalysisResults.value = []
+      currentHotLatestDataDate.value = ''
+      persistTomorrowStarCache()
+      return
+    }
+
+    const hasPreviousSelectedDate = !!previousSelectedDate && currentHotHistoryData.value.some((item) => item.rawDate === previousSelectedDate)
+    currentHotSelectedDate.value = hasPreviousSelectedDate ? previousSelectedDate : currentHotLatestDate.value
+
+    const hasPreviousViewingDate = !!previousViewingDate && currentHotHistoryData.value.some((item) => item.rawDate === previousViewingDate)
+    currentHotViewingDate.value = hasPreviousViewingDate ? previousViewingDate : currentHotLatestDate.value
+
+    if (!skipLatestLoad && requestId === currentHotLoadDataRequestId) {
+      await loadCurrentHotLatestCandidates()
+    }
+
+    persistTomorrowStarCache()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to load current-hot data:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘数据失败'))
+  } finally {
+    finishRequest('currentHotLoadData', signal)
+    if (requestId === currentHotLoadDataRequestId) {
+      currentHotLoading.value = false
+    }
+  }
+}
+
+async function loadCurrentHotLatestCandidates() {
+  const requestId = ++currentHotCandidatesRequestId
+  const signal = beginRequest('currentHotLatestCandidates')
+  currentHotLoadingLatest.value = true
+  try {
+    const candidatesData = await apiAnalysis.getCurrentHotCandidates(undefined, { signal })
+    if (requestId !== currentHotCandidatesRequestId) return
+    const candidates = candidatesData.candidates || []
+    currentHotLatestCandidates.value = candidates
+    currentHotCandidatePage.value = 1
+    currentHotAnalysisPage.value = 1
+
+    if (candidatesData.pick_date) {
+      const newPickDate = formatDate(candidatesData.pick_date)
+      currentHotLatestDataDate.value = newPickDate
+      currentHotViewingDate.value = newPickDate
+
+      if (newPickDate && newPickDate !== currentHotLatestDate.value) {
+        await loadCurrentHotData(true)
+        if (requestId !== currentHotCandidatesRequestId) return
+        try {
+          const resultsData = await apiAnalysis.getCurrentHotResults(undefined, { signal })
+          if (requestId !== currentHotCandidatesRequestId) return
+          currentHotAnalysisResults.value = resultsData.results || []
+          currentHotCandidatesCache.value.set(newPickDate, {
+            candidates,
+            results: resultsData.results || [],
+            timestamp: Date.now(),
+          })
+        } catch {
+          currentHotAnalysisResults.value = []
+        }
+        persistTomorrowStarCache()
+        return
+      }
+    } else {
+      currentHotLatestDataDate.value = ''
+    }
+
+    try {
+      const resultsData = await apiAnalysis.getCurrentHotResults(undefined, { signal })
+      if (requestId !== currentHotCandidatesRequestId) return
+      currentHotAnalysisResults.value = resultsData.results || []
+      if (currentHotLatestDataDate.value) {
+        currentHotCandidatesCache.value.set(currentHotLatestDataDate.value, {
+          candidates,
+          results: resultsData.results || [],
+          timestamp: Date.now(),
+        })
+      }
+    } catch {
+      currentHotAnalysisResults.value = []
+    }
+
+    persistTomorrowStarCache()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to load current-hot candidates:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘候选股票失败'))
+  } finally {
+    finishRequest('currentHotLatestCandidates', signal)
+    currentHotLoadingLatest.value = false
+  }
+}
+
+async function selectCurrentHotDate(row: HistoryRow) {
+  currentHotSelectedDate.value = row.rawDate
+  currentHotViewingDate.value = row.rawDate
+  currentHotCandidatePage.value = 1
+  currentHotAnalysisPage.value = 1
+  persistTomorrowStarCache()
+
+  if (row.status !== 'success') {
+    currentHotLatestCandidates.value = []
+    currentHotAnalysisResults.value = []
+    currentHotLatestDataDate.value = row.rawDate
+    if (row.status === 'running') {
+      ElMessage.info(`${row.rawDate} 正在生成中，稍后再查看`)
+    } else if (row.status === 'failed') {
+      ElMessage.warning(isInitializationPendingError({ message: row.errorMessage || '' }) ? '系统尚未完成初始化' : (row.errorMessage || `${row.rawDate} 生成失败`))
+    } else {
+      ElMessage.info(`${row.rawDate} 暂无可展示结果`)
+    }
+    persistTomorrowStarCache()
+    return
+  }
+
+  const cached = currentHotCandidatesCache.value.get(row.rawDate)
+  const now = Date.now()
+  if (cached && (now - cached.timestamp) < CACHE_TTL_MS) {
+    currentHotLatestCandidates.value = cached.candidates
+    currentHotAnalysisResults.value = cached.results
+    currentHotLatestDataDate.value = row.rawDate
+    persistTomorrowStarCache()
+    return
+  }
+
+  const requestId = ++currentHotCandidatesRequestId
+  const signal = beginRequest('currentHotLatestCandidates')
+  currentHotLoadingLatest.value = true
+  try {
+    const [candidatesData, resultsData] = await Promise.all([
+      apiAnalysis.getCurrentHotCandidates(row.rawDate, { signal }),
+      apiAnalysis.getCurrentHotResults(row.rawDate, { signal }),
+    ])
+    if (requestId !== currentHotCandidatesRequestId) return
+
+    const candidates = candidatesData.candidates || []
+    const results = resultsData.results || []
+
+    currentHotLatestCandidates.value = candidates
+    currentHotAnalysisResults.value = results
+    currentHotLatestDataDate.value = row.rawDate
+    currentHotCandidatePage.value = 1
+    currentHotAnalysisPage.value = 1
+
+    currentHotCandidatesCache.value.set(row.rawDate, {
+      candidates,
+      results,
+      timestamp: now,
+    })
+    persistTomorrowStarCache()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to load current-hot selected date data:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘数据失败'))
+  } finally {
+    finishRequest('currentHotLatestCandidates', signal)
+    currentHotLoadingLatest.value = false
+  }
+}
+
 async function selectDate(row: HistoryRow) {
+  if (activeDataTab.value === 'current-hot') {
+    await selectCurrentHotDate(row)
+    return
+  }
+
   selectedDate.value = row.rawDate
   viewingDate.value = row.rawDate
   latestCandidatePage.value = 1
@@ -1231,6 +1759,11 @@ async function selectDate(row: HistoryRow) {
 }
 
 async function refreshCurrentCandidates() {
+  if (activeDataTab.value === 'current-hot') {
+    await refreshCurrentHotCandidates()
+    return
+  }
+
   if (loading.value) {
     console.log('正在刷新中，忽略此次刷新请求')
     return
@@ -1279,6 +1812,54 @@ async function refreshCurrentCandidates() {
       finishRequest('latestCandidates', signal)
       loadingLatest.value = false
     }
+  }
+}
+
+async function refreshCurrentHotCandidates() {
+  if (currentHotLoading.value) {
+    return
+  }
+
+  currentHotCandidatesCache.value.clear()
+  await loadCurrentHotData(true)
+
+  const dateToRefresh = currentHotViewingDate.value || currentHotLatestDate.value
+  if (!dateToRefresh) return
+
+  const requestId = ++currentHotCandidatesRequestId
+  const signal = beginRequest('currentHotLatestCandidates')
+  currentHotLoadingLatest.value = true
+  try {
+    const [candidatesData, resultsData] = await Promise.all([
+      apiAnalysis.getCurrentHotCandidates(dateToRefresh, { signal }),
+      apiAnalysis.getCurrentHotResults(dateToRefresh, { signal }),
+    ])
+    if (requestId !== currentHotCandidatesRequestId) return
+
+    const candidates = candidatesData.candidates || []
+    const results = resultsData.results || []
+
+    currentHotLatestCandidates.value = candidates
+    currentHotAnalysisResults.value = results
+    currentHotLatestDataDate.value = dateToRefresh
+    currentHotCandidatePage.value = 1
+    currentHotAnalysisPage.value = 1
+
+    currentHotCandidatesCache.value.set(dateToRefresh, {
+      candidates,
+      results,
+      timestamp: Date.now(),
+    })
+
+    persistTomorrowStarCache()
+    ElMessage.success(`已刷新 ${dateToRefresh} 的当前热盘数据`)
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to refresh current-hot candidates:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '刷新当前热盘失败'))
+  } finally {
+    finishRequest('currentHotLatestCandidates', signal)
+    currentHotLoadingLatest.value = false
   }
 }
 
@@ -1396,15 +1977,35 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
 async function loadMiddayData(forceRefresh: boolean = false) {
   if (loadingMidday.value && !forceRefresh) return
 
+  const source = middaySource.value
+  const cached = middayCache.value[source]
+  if (!forceRefresh && cached && (Date.now() - cached.timestamp) < MIDDAY_CACHE_TTL_MS) {
+    middayStatus.value = cached.status
+    middayData.value = cached.data
+    middayLoaded.value = true
+    middayShowCachedHint.value = true
+    return
+  }
+
   const signal = beginRequest('middayData')
   loadingMidday.value = true
   try {
-    const [status, data] = await Promise.all([
-      apiAnalysis.getMiddayStatus({ signal }),
-      apiAnalysis.getMiddayCurrent({ signal }),
-    ])
+    const [status, data] = source === 'current-hot'
+      ? await Promise.all([
+        apiAnalysis.getCurrentHotMiddayStatus({ signal }),
+        apiAnalysis.getCurrentHotMiddayCurrent({ signal }),
+      ])
+      : await Promise.all([
+        apiAnalysis.getMiddayStatus({ signal }),
+        apiAnalysis.getMiddayCurrent({ signal }),
+      ])
     middayStatus.value = status
     middayData.value = data
+    middayCache.value[source] = {
+      status,
+      data,
+      timestamp: Date.now(),
+    }
     middayLoaded.value = true
     middayShowCachedHint.value = false
   } catch (error) {
@@ -1426,9 +2027,19 @@ async function runMiddayAdminAction(action: 'generate' | 'refresh') {
 
   loadingMiddayAction.value = true
   try {
+    const isCurrentHotSource = middaySource.value === 'current-hot'
     const response = action === 'refresh'
-      ? await apiAnalysis.refreshMidday()
-      : await apiAnalysis.generateMidday()
+      ? (
+        isCurrentHotSource
+          ? await apiAnalysis.refreshCurrentHotMidday()
+          : await apiAnalysis.refreshMidday()
+      )
+      : (
+        isCurrentHotSource
+          ? await apiAnalysis.generateCurrentHotMidday()
+          : await apiAnalysis.generateMidday()
+      )
+    middayCache.value[middaySource.value] = undefined
     ElMessage.success(response.message || (action === 'refresh' ? '中盘分析已刷新' : '中盘分析已生成'))
     await loadMiddayData(true)
   } catch (error) {
@@ -1439,23 +2050,71 @@ async function runMiddayAdminAction(action: 'generate' | 'refresh') {
   }
 }
 
-function viewStock(code: string, source: 'tomorrow-star' | 'midday-analysis' = 'tomorrow-star') {
+function viewStock(code: string, source: 'tomorrow-star' | 'current-hot' | 'midday-analysis' = 'tomorrow-star') {
   router.push({ path: '/diagnosis', query: { code, source, days: '30' } })
 }
 
-function getAnalysisResultName(result: AnalysisResult): string {
-  const matchedCandidate = latestCandidates.value.find((candidate) => candidate.code === result.code)
+function getAnalysisResultName(result: AnalysisResult | CurrentHotAnalysisResult): string {
+  if ('name' in result && typeof result.name === 'string' && result.name.trim()) {
+    return result.name.trim()
+  }
+  const candidates = isCurrentHotTab.value ? currentHotLatestCandidates.value : latestCandidates.value
+  const matchedCandidate = candidates.find((candidate) => candidate.code === result.code)
   if (typeof matchedCandidate?.name === 'string' && matchedCandidate.name.trim()) {
     return matchedCandidate.name.trim()
   }
   return result.code
 }
 
-function getAnalysisResultComment(result: AnalysisResult): string {
+function getAnalysisResultComment(result: AnalysisResult | CurrentHotAnalysisResult): string {
   if (typeof result.comment === 'string' && result.comment.trim()) {
     return result.comment.trim()
   }
   return '点击查看单股诊断'
+}
+
+type AnalysisPrefilterLike = {
+  prefilter_passed?: boolean | null
+  prefilter_summary?: string | null
+  prefilter_blocked_by?: string[] | null
+}
+
+function getAnalysisPrefilterTagType(value?: boolean | null): string {
+  if (value === true) return 'success'
+  if (value === false) return 'danger'
+  return 'info'
+}
+
+function getAnalysisPrefilterLabel(value?: boolean | null): string {
+  if (value === true) return '是'
+  if (value === false) return '否'
+  return '-'
+}
+
+function getAnalysisPrefilterSummary(result: AnalysisPrefilterLike): string {
+  if (typeof result.prefilter_summary === 'string' && result.prefilter_summary.trim()) {
+    return result.prefilter_summary.trim()
+  }
+  if (Array.isArray(result.prefilter_blocked_by) && result.prefilter_blocked_by.length > 0) {
+    return result.prefilter_blocked_by.join(' / ')
+  }
+  if (result.prefilter_passed === false) {
+    return '前置过滤未通过'
+  }
+  return ''
+}
+
+function getCurrentHotBoardLabel(candidate: CurrentHotCandidate): string {
+  if (Array.isArray(candidate.sector_names) && candidate.sector_names.length > 0) {
+    return candidate.sector_names.join(' / ')
+  }
+  const label = [candidate.board_name, candidate.board, candidate.sector_name]
+    .find((item) => typeof item === 'string' && item.trim())
+  if (typeof label === 'string' && label.trim()) {
+    return label.trim()
+  }
+  if (candidate.board_group === 'kechuang') return '科创板'
+  return isSciTechBoardCode(candidate.code) ? '科创板' : '其他板块'
 }
 
 function formatDate(date: string | Date): string {
@@ -1619,6 +2278,18 @@ function persistTomorrowStarCache() {
     latestCandidatePage: latestCandidatePage.value,
     lastHistorySignature: lastHistorySignature.value,
     freshnessVersion: freshnessVersion.value,
+    currentHotHistoryData: currentHotHistoryData.value,
+    currentHotLatestCandidates: currentHotLatestCandidates.value,
+    currentHotAnalysisResults: currentHotAnalysisResults.value,
+    currentHotSelectedDate: currentHotSelectedDate.value,
+    currentHotViewingDate: currentHotViewingDate.value,
+    currentHotLatestDate: currentHotLatestDate.value,
+    currentHotLatestDataDate: currentHotLatestDataDate.value,
+    currentHotHistoryPage: currentHotHistoryPage.value,
+    currentHotCandidatePage: currentHotCandidatePage.value,
+    currentHotAnalysisPage: currentHotAnalysisPage.value,
+    currentHotLastHistorySignature: currentHotLastHistorySignature.value,
+    currentHotBoardFilter: currentHotBoardFilter.value,
     cachedAt: Date.now(),
   }
 
@@ -1653,6 +2324,27 @@ function hydrateTomorrowStarCache() {
     latestCandidatePage.value = Math.max(1, Number(payload.latestCandidatePage) || 1)
     lastHistorySignature.value = payload.lastHistorySignature || ''
     freshnessVersion.value = payload.freshnessVersion || ''
+    currentHotHistoryData.value = (payload.currentHotHistoryData || []).map((item: any) => ({
+      ...item,
+      rawDate: formatDateString(item.rawDate || item.date || ''),
+      date: formatDateString(item.rawDate || item.date || ''),
+      status: normalizeHistoryStatus(item.status),
+      consecutiveCandidateCount: typeof item.consecutiveCandidateCount === 'number' ? item.consecutiveCandidateCount : '-',
+      analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
+      errorMessage: item.errorMessage || null,
+      isLatest: Boolean(item.isLatest),
+    }))
+    currentHotLatestCandidates.value = payload.currentHotLatestCandidates || []
+    currentHotAnalysisResults.value = payload.currentHotAnalysisResults || []
+    currentHotSelectedDate.value = payload.currentHotSelectedDate || null
+    currentHotViewingDate.value = payload.currentHotViewingDate || null
+    currentHotLatestDate.value = payload.currentHotLatestDate || ''
+    currentHotLatestDataDate.value = payload.currentHotLatestDataDate || ''
+    currentHotHistoryPage.value = Math.max(1, Number(payload.currentHotHistoryPage) || 1)
+    currentHotCandidatePage.value = Math.max(1, Number(payload.currentHotCandidatePage) || 1)
+    currentHotAnalysisPage.value = Math.max(1, Number(payload.currentHotAnalysisPage) || 1)
+    currentHotLastHistorySignature.value = payload.currentHotLastHistorySignature || ''
+    currentHotBoardFilter.value = payload.currentHotBoardFilter || 'all'
 
     // 防止旧缓存把某一天的右侧结果挂到另一日期上。
     if (
@@ -1665,7 +2357,20 @@ function hydrateTomorrowStarCache() {
       latestCandidatePage.value = 1
     }
 
+    if (
+      currentHotViewingDate.value
+      && currentHotLatestDataDate.value
+      && currentHotViewingDate.value !== currentHotLatestDataDate.value
+    ) {
+      currentHotLatestCandidates.value = []
+      currentHotAnalysisResults.value = []
+      currentHotCandidatePage.value = 1
+      currentHotAnalysisPage.value = 1
+    }
+
     hydratedFromCache.value = historyData.value.length > 0 || latestCandidates.value.length > 0
+    currentHotHydratedFromCache.value = currentHotHistoryData.value.length > 0 || currentHotLatestCandidates.value.length > 0
+    currentHotLoaded.value = currentHotHydratedFromCache.value
   } catch {
     sessionStorage.removeItem(TOMORROW_STAR_CACHE_KEY)
   }
@@ -1700,13 +2405,34 @@ onActivated(() => {
   void checkIncrementalStatus()
   if (activeTab.value === 'midday-analysis') {
     void loadMiddayData(true)
+  } else if (activeTab.value === 'current-hot') {
+    if (currentHotLoaded.value) {
+      void loadCurrentHotData(true)
+    } else {
+      void loadCurrentHotData()
+    }
   }
 })
 
 watch(activeTab, (value) => {
   if (value === 'midday-analysis' && !middayLoaded.value) {
     void loadMiddayData()
+    return
   }
+  if (value === 'current-hot' && !currentHotLoaded.value) {
+    void loadCurrentHotData()
+  }
+})
+
+watch(middaySource, () => {
+  if (activeTab.value === 'midday-analysis') {
+    void loadMiddayData()
+  }
+})
+
+watch(currentHotBoardFilter, () => {
+  currentHotCandidatePage.value = 1
+  currentHotAnalysisPage.value = 1
 })
 
 onDeactivated(() => {
@@ -1819,7 +2545,17 @@ $space-lg: 32px;
     .header-actions {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
       gap: $space-xs;
+    }
+  }
+
+  .board-filter,
+  .source-switch {
+    :deep(.el-radio-group__item),
+    :deep(.el-radio-button__inner) {
+      border-radius: 4px;
     }
   }
 
@@ -2094,6 +2830,15 @@ $space-lg: 32px;
         display: block;
         margin-right: 0;
       }
+    }
+
+    .card-header {
+      align-items: flex-start;
+    }
+
+    .board-filter,
+    .source-switch {
+      width: 100%;
     }
   }
 

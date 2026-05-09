@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AnalysisResult, Candidate, StockDaily, TomorrowStarRun
+from app.models import AnalysisResult, Candidate, Stock, StockDaily, Task, TomorrowStarRun
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
 
@@ -69,6 +69,7 @@ class TomorrowStarWindowService:
     DEFAULT_SOURCE = "bootstrap"
     DEFAULT_STRATEGY_VERSION = "v1"
     LOCK_KEY = 902180
+    ACTIVE_TASK_TYPES = ("full_update", "incremental_update", "tomorrow_star")
 
     def __init__(self, db: Optional[Session] = None):
         self.db = db or SessionLocal()
@@ -110,6 +111,39 @@ class TomorrowStarWindowService:
             .limit(1)
         ).scalar()
         return row.isoformat() if row else None
+
+    def _has_active_generation_task(self) -> bool:
+        active_task = (
+            self.db.query(Task.id)
+            .filter(
+                Task.task_type.in_(self.ACTIVE_TASK_TYPES),
+                Task.status.in_(("pending", "running")),
+            )
+            .order_by(Task.created_at.desc())
+            .first()
+        )
+        return active_task is not None
+
+    def _resolve_display_status(
+        self,
+        run: Optional[TomorrowStarRun],
+        *,
+        candidate_count: int,
+        analysis_count: int,
+        has_active_task: bool,
+    ) -> str:
+        if run is None:
+            return "success" if candidate_count > 0 and analysis_count > 0 else "missing"
+
+        status = str(run.status or "").strip().lower() or "missing"
+        if status == "success":
+            return "success"
+        if status in {"running", "pending"}:
+            if candidate_count > 0 and analysis_count > 0:
+                return "success"
+            if not has_active_task:
+                return "missing"
+        return status
 
     @staticmethod
     def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -188,6 +222,47 @@ class TomorrowStarWindowService:
                 "blocked_by": blocked_by_counts,
             },
         }
+
+    @staticmethod
+    def _infer_market(code: str) -> str:
+        normalized = str(code or "").strip().split(".")[0].zfill(6)
+        if normalized.startswith(("600", "601", "603", "605", "688", "689")):
+            return "SH"
+        if normalized.startswith(("430", "8", "920")):
+            return "BJ"
+        return "SZ"
+
+    def _ensure_stock_rows(self, codes: list[str]) -> None:
+        normalized_codes = sorted(
+            {
+                str(code or "").strip().split(".")[0].zfill(6)
+                for code in codes
+                if str(code or "").strip()
+            }
+        )
+        if not normalized_codes:
+            return
+
+        try:
+            TushareService().sync_stock_names_to_db(self.db, normalized_codes)
+        except Exception:
+            logger.warning("sync_stock_names_to_db failed for codes=%s", normalized_codes[:10])
+
+        existing_codes = {
+            code
+            for code, in self.db.query(Stock.code).filter(Stock.code.in_(normalized_codes)).all()
+        }
+        for code in normalized_codes:
+            if code in existing_codes:
+                continue
+            self.db.add(
+                Stock(
+                    code=code,
+                    name=code,
+                    market=self._infer_market(code),
+                )
+            )
+        self.db.flush()
 
     def _sync_candidate_files_for_date(self, trade_date: str, *, write_latest: bool) -> int:
         if str(ROOT / "pipeline") not in sys.path:
@@ -365,11 +440,7 @@ class TomorrowStarWindowService:
             return 0
 
         codes = [path.stem.zfill(6) for path in stock_files if path.stem.isdigit()]
-        if codes:
-            try:
-                TushareService().sync_stock_names_to_db(self.db, codes)
-            except Exception:
-                logger.warning("sync_stock_names_to_db failed for %s", trade_date)
+        self._ensure_stock_rows(codes)
 
         self.db.query(AnalysisResult).filter(AnalysisResult.pick_date == pick_dt).delete(synchronize_session=False)
         rows: list[AnalysisResult] = []
@@ -415,11 +486,7 @@ class TomorrowStarWindowService:
     ) -> dict[str, int]:
         pick_dt = date.fromisoformat(trade_date)
         codes = sorted({str(event.get("code", "")).zfill(6) for event in events if event.get("code")})
-        if codes:
-            try:
-                TushareService().sync_stock_names_to_db(self.db, codes)
-            except Exception:
-                logger.warning("sync_stock_names_to_db failed for %s", trade_date)
+        self._ensure_stock_rows(codes)
 
         self.db.query(Candidate).filter(Candidate.pick_date == pick_dt).delete(synchronize_session=False)
         self.db.query(AnalysisResult).filter(AnalysisResult.pick_date == pick_dt).delete(synchronize_session=False)
@@ -620,6 +687,7 @@ class TomorrowStarWindowService:
             .all()
         }
 
+        has_active_task = self._has_active_generation_task()
         items: list[dict[str, Any]] = []
         ready_count = missing_count = running_count = failed_count = pending_count = 0
         for pick_date_text in target_dates:
@@ -628,13 +696,12 @@ class TomorrowStarWindowService:
             analysis_count = analysis_counts.get(pick_date_text, 0)
             trend_start_count = trend_counts.get(pick_date_text, 0)
             consecutive_candidate_count = consecutive_counts.get(pick_date_text, 0)
-
-            if run is not None:
-                status = run.status
-            elif candidate_count > 0 and analysis_count > 0:
-                status = "success"
-            else:
-                status = "missing"
+            status = self._resolve_display_status(
+                run,
+                candidate_count=candidate_count,
+                analysis_count=analysis_count,
+                has_active_task=has_active_task,
+            )
 
             if status == "success":
                 ready_count += 1
