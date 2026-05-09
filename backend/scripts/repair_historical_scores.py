@@ -126,6 +126,46 @@ def selected_scopes(scope: str) -> list[str]:
     return [scope]
 
 
+def build_trade_date_batches(trade_dates: Iterable[str]) -> list[list[str]]:
+    normalized_dates = normalize_dates(trade_dates)
+    if len(normalized_dates) <= 1:
+        return [normalized_dates]
+
+    start = date.fromisoformat(normalized_dates[0])
+    end = date.fromisoformat(normalized_dates[-1])
+    with SessionLocal() as db:
+        rows = (
+            db.query(StockDaily.trade_date)
+            .distinct()
+            .filter(StockDaily.trade_date >= start, StockDaily.trade_date <= end)
+            .order_by(StockDaily.trade_date.asc())
+            .all()
+        )
+
+    trade_calendar = [trade_date.isoformat() for trade_date, in rows if trade_date]
+    if not trade_calendar:
+        return [normalized_dates]
+
+    selected_set = set(normalized_dates)
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    for trade_date in trade_calendar:
+        if trade_date in selected_set:
+            current_batch.append(trade_date)
+            continue
+        if current_batch:
+            batches.append(current_batch)
+            current_batch = []
+
+    if current_batch:
+        batches.append(current_batch)
+
+    covered_dates = {item for batch in batches for item in batch}
+    uncovered_dates = [trade_date for trade_date in normalized_dates if trade_date not in covered_dates]
+    batches.extend([[trade_date] for trade_date in uncovered_dates])
+    return batches or [normalized_dates]
+
+
 def build_tomorrow_star_issues(snapshot: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     candidate_count = int(snapshot.get("candidate_count", 0) or 0)
@@ -353,14 +393,14 @@ def repair_tomorrow_star(trade_dates: list[str], reviewer: str, window_size: int
     results: list[dict[str, object]] = []
     with SessionLocal() as db:
         service = TomorrowStarWindowService(db)
-        for trade_date in trade_dates:
-            result = service.rebuild_trade_date(
-                trade_date,
+        for trade_date_batch in build_trade_date_batches(trade_dates):
+            batch_results = service.rebuild_trade_dates(
+                trade_date_batch,
                 reviewer=reviewer,
                 source="manual_repair",
                 window_size=window_size,
             )
-            results.append({"scope": "tomorrow-star", **result})
+            results.extend({"scope": "tomorrow-star", **result} for result in batch_results)
     return results
 
 

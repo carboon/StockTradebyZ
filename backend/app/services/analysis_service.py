@@ -4,6 +4,7 @@ Analysis Service
 股票分析服务，集成现有 Selector 和 quant_reviewer
 优先使用数据库；测试和迁移场景下兼容 CSV 回退。
 """
+import os
 import sys
 from datetime import date as date_class, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from app.config import settings
 from app.services.analysis_cache import analysis_cache
+from app.services.daily_data_service import DailyDataService
 from app.services.kline_service import get_daily_data
 from app.database import SessionLocal
 from app.models import AnalysisResult, DailyB1Check, DailyB1CheckDetail, StockDaily
@@ -66,6 +68,49 @@ class AnalysisService:
             return df.sort_values("date").reset_index(drop=True)
 
         return self._load_stock_data_from_csv(code, days)
+
+    def _get_min_quant_review_bars(self) -> int:
+        """返回量化复核所需的最小样本数。"""
+        try:
+            agent_dir = ROOT / "agent"
+            pipeline_dir = ROOT / "pipeline"
+            if str(agent_dir) not in sys.path:
+                sys.path.insert(0, str(agent_dir))
+            if str(pipeline_dir) not in sys.path:
+                sys.path.insert(0, str(pipeline_dir))
+
+            from quant_reviewer import min_bars_required
+
+            return max(60, int(min_bars_required(self._load_quant_review_config())))
+        except Exception:
+            return 250
+
+    def _ensure_analysis_history_window(self, code: str, *, days: int = 365) -> bool:
+        """单股诊断前确保本地至少具备可评分的历史窗口。"""
+        min_days = self._get_min_quant_review_bars()
+        window_days = max(int(days), min_days)
+        current_frame = self.load_stock_data(code, days=window_days)
+        if current_frame is not None and len(current_frame) >= min_days:
+            return False
+
+        token = os.environ.get("TUSHARE_TOKEN") or settings.tushare_token
+        if not token:
+            return False
+
+        daily_service = DailyDataService(token=token)
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=window_days * 2)
+        fetched = daily_service.fetch_daily_data(
+            code,
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+        )
+        if fetched is None or fetched.empty:
+            return False
+
+        daily_service.save_daily_data(fetched)
+        refreshed_frame = self.load_stock_data(code, days=window_days)
+        return refreshed_frame is not None and len(refreshed_frame) >= min_days
 
     def _load_stock_data_from_csv(self, code: str, days: int) -> Optional[pd.DataFrame]:
         """兼容旧数据目录结构，从 CSV 读取股票数据。"""
@@ -916,6 +961,10 @@ class AnalysisService:
             分析结果字典，包含缓存状态标识 _cached
         """
         import json
+
+        history_repaired = self._ensure_analysis_history_window(code)
+        if history_repaired:
+            use_cache = False
 
         # 先执行 B1 检查以确定交易日
         b1_result = self.check_b1_strategy(code)

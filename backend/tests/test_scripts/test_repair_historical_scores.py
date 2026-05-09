@@ -138,3 +138,49 @@ def test_build_current_hot_issues_ignores_non_success_run_when_rows_are_complete
     }
 
     assert repair_historical_scores.build_current_hot_issues(snapshot) == []
+
+
+def test_repair_tomorrow_star_uses_batch_rebuild_entry(monkeypatch):
+    calls: list[list[str]] = []
+
+    class _FakeSession:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    class _FakeService:
+        def __init__(self, db):
+            self.db = db
+
+        def rebuild_trade_dates(self, trade_dates, *, reviewer, source, window_size):
+            calls.append(list(trade_dates))
+            return [
+                {
+                    "success": True,
+                    "status": "success",
+                    "pick_date": trade_date,
+                    "candidate_count": 1,
+                    "analysis_count": 1,
+                    "trend_start_count": 1,
+                }
+                for trade_date in trade_dates
+            ]
+
+    monkeypatch.setattr(repair_historical_scores, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(repair_historical_scores, "TomorrowStarWindowService", _FakeService)
+    monkeypatch.setattr(
+        repair_historical_scores,
+        "build_trade_date_batches",
+        lambda trade_dates: [["2024-01-02", "2024-01-03"]],
+    )
+
+    results = repair_historical_scores.repair_tomorrow_star(
+        ["2024-01-02", "2024-01-03"],
+        reviewer="quant",
+        window_size=180,
+    )
+
+    assert calls == [["2024-01-02", "2024-01-03"]]
+    assert [item["pick_date"] for item in results] == ["2024-01-02", "2024-01-03"]

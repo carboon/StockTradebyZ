@@ -204,6 +204,9 @@ class TaskService:
     _background_async_tasks: Dict[int, asyncio.Task] = {}
     _cancelled_tasks: set[int] = set()
     _progress_commit_interval_seconds = 2.0
+    RETRYABLE_SINGLE_ANALYSIS_COMMENTS = {
+        "样本不足，无法完成第 4 步程序化复核。",
+    }
 
     # 全量更新步骤定义（断点续传支持）
     # 优化后的6阶段流程
@@ -436,10 +439,17 @@ class TaskService:
             .order_by(Task.created_at.desc(), Task.id.desc())
             .first()
         )
-        if completed_task:
+        if completed_task and not self._should_retry_single_analysis_task(completed_task):
             return completed_task
 
         return None
+
+    @classmethod
+    def _should_retry_single_analysis_task(cls, task: Any) -> bool:
+        """样本不足这类可修复结果，不复用当日已完成任务。"""
+        result = task.result_json or {}
+        comment = str(result.get("comment") or "").strip()
+        return comment in cls.RETRYABLE_SINGLE_ANALYSIS_COMMENTS
 
     def _get_active_generate_history_task(self, code: str) -> Optional[Any]:
         """返回指定股票的活跃历史生成任务（pending/running）。

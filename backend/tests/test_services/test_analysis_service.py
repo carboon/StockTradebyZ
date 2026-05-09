@@ -6,7 +6,7 @@ Analysis Service Tests
 import json
 import sys
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -531,6 +531,94 @@ def test_single_stock_analysis_persists_result_by_check_date(analysis_service, t
             assert saved["analysis_date"] == "2024-01-15"
             assert saved["pick_date"] == "2024-01-15"
             assert saved["close_price"] == 10.8
+
+
+@pytest.mark.service
+def test_ensure_analysis_history_window_backfills_insufficient_local_data(analysis_service):
+    short_df = pd.DataFrame({
+        "date": pd.to_datetime(["2026-05-08"]),
+        "open": [10.0],
+        "high": [10.2],
+        "low": [9.8],
+        "close": [10.1],
+        "volume": [100000],
+    })
+    enough_dates = pd.date_range(start="2025-01-01", periods=260, freq="B")
+    enough_df = pd.DataFrame({
+        "date": enough_dates,
+        "open": np.linspace(10.0, 15.0, len(enough_dates)),
+        "high": np.linspace(10.2, 15.2, len(enough_dates)),
+        "low": np.linspace(9.8, 14.8, len(enough_dates)),
+        "close": np.linspace(10.1, 15.1, len(enough_dates)),
+        "volume": np.linspace(100000, 200000, len(enough_dates)),
+    })
+    fetched_df = pd.DataFrame({
+        "code": ["601992"],
+        "trade_date": [datetime(2026, 5, 8).date() - timedelta(days=1)],
+        "open": [10.0],
+        "high": [10.2],
+        "low": [9.8],
+        "close": [10.1],
+        "volume": [100000],
+    })
+
+    with patch.object(analysis_service, "_get_min_quant_review_bars", return_value=250), \
+         patch.object(analysis_service, "load_stock_data", side_effect=[short_df, enough_df]), \
+         patch.dict("os.environ", {"TUSHARE_TOKEN": "test-token"}, clear=False), \
+         patch("app.services.analysis_service.DailyDataService.fetch_daily_data", return_value=fetched_df) as mock_fetch, \
+         patch("app.services.analysis_service.DailyDataService.save_daily_data", return_value=260) as mock_save:
+        repaired = analysis_service._ensure_analysis_history_window("601992")
+
+    assert repaired is True
+    assert mock_fetch.call_count == 1
+    mock_save.assert_called_once_with(fetched_df)
+
+
+@pytest.mark.service
+def test_analyze_stock_bypasses_cache_after_history_repair(analysis_service, tmp_path):
+    test_root = tmp_path / "test_history_repair_bypass_cache"
+    review_dir = test_root / "review"
+
+    stale_result = {
+        "code": "601992",
+        "total_score": 1.0,
+        "score": 1.0,
+        "verdict": "FAIL",
+        "comment": "样本不足，无法完成第 4 步程序化复核。",
+        "analysis_date": "2024-01-15",
+        "pick_date": "2024-01-15",
+    }
+
+    with patch("app.services.analysis_service.settings") as mock_settings, \
+         patch("app.services.analysis_service.ROOT", test_root), \
+         patch("app.services.analysis_cache.settings") as cache_settings, \
+         patch("app.services.analysis_cache.ROOT", test_root), \
+         patch.object(analysis_service, "_ensure_analysis_history_window", return_value=True), \
+         patch.object(analysis_service, "check_b1_strategy", return_value={
+             "code": "601992",
+             "b1_passed": True,
+             "check_date": "2024-01-15",
+             "close_price": 10.8,
+         }), \
+         patch.object(analysis_service, "_quant_review", return_value={
+             "score": 4.6,
+             "verdict": "PASS",
+             "comment": "趋势健康",
+             "signal_type": "trend_start",
+         }):
+        mock_settings.review_dir = review_dir
+        mock_settings.raw_data_dir = test_root / "raw"
+        cache_settings.review_dir = review_dir
+
+        from app.services.analysis_cache import analysis_cache
+        analysis_cache.clear_memory_cache()
+        analysis_cache.save_analysis_result("601992", "2024-01-15", stale_result)
+
+        result = analysis_service.analyze_stock("601992", reviewer="quant", use_cache=True)
+
+    assert result["_cached"] is False
+    assert result["score"] == 4.6
+    assert result["verdict"] == "PASS"
 
 
 @pytest.mark.service

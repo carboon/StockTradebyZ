@@ -11,5 +11,6 @@
 7. [tomorrow-star-180d-plan.md](tomorrow-star-180d-plan.md)
 8. [mobile-adaptation-development-plan.md](mobile-adaptation-development-plan.md) - 移动端改造实施计划
 9. [mobile-adaptation-test-plan.md](mobile-adaptation-test-plan.md) - 模拟器、Playwright、真机测试方案
+10. [repair-tools.md](repair-tools.md) - 修复工具手册：历史评分修复、基础日线修复、单股诊断自愈说明
 
 历史迁移、过渡方案、阶段性执行记录已经清理。

@@ -290,6 +290,100 @@ def test_maintain_trade_date_rebuilds_inconsistent_candidate_and_analysis_rows(t
     assert (tmp_path / "review" / "2024-01-03" / "000002.json").exists()
 
 
+def test_rebuild_trade_dates_batches_backtest_and_consecutive_recalc_once(test_db, tmp_path, monkeypatch, mocker):
+    monkeypatch.setattr(settings, "candidates_dir", tmp_path / "candidates")
+    monkeypatch.setattr(settings, "review_dir", tmp_path / "review")
+
+    dates = [date(2024, 1, 2), date(2024, 1, 3)]
+    test_db.add_all([
+        Stock(code="000001", name="PingAn"),
+        Stock(code="000002", name="Vanke"),
+    ])
+    for trade_date in dates:
+        test_db.add(StockDaily(code="000001", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100))
+        test_db.add(StockDaily(code="000002", trade_date=trade_date, open=20, close=21, high=22, low=19, volume=200))
+    test_db.commit()
+
+    events_df = pd.DataFrame(
+        [
+            {
+                "pick_date": "2024-01-02",
+                "code": "000001",
+                "strategy": "b1",
+                "close": 10.8,
+                "turnover_n": 120000.0,
+                "kdj_j": 10.1,
+                "verdict": "WATCH",
+                "total_score": 3.7,
+                "signal_type": "watch",
+                "comment": "watch",
+                "details_json": {"signal_type": "watch"},
+            },
+            {
+                "pick_date": "2024-01-03",
+                "code": "000001",
+                "strategy": "b1",
+                "close": 11.0,
+                "turnover_n": 123456.0,
+                "kdj_j": 12.3,
+                "verdict": "PASS",
+                "total_score": 4.2,
+                "signal_type": "trend_start",
+                "comment": "ok",
+                "details_json": {"signal_type": "trend_start"},
+            },
+            {
+                "pick_date": "2024-01-03",
+                "code": "000002",
+                "strategy": "b1",
+                "close": 21.0,
+                "turnover_n": 223456.0,
+                "kdj_j": 8.8,
+                "verdict": "WATCH",
+                "total_score": 3.6,
+                "signal_type": "watch",
+                "comment": "watch",
+                "details_json": {"signal_type": "watch"},
+            },
+        ]
+    )
+    run_backtest_mock = mocker.patch("pipeline.backtest_quant.run_backtest", return_value=(events_df, {"date_range": {}}))
+    recalc_mock = mocker.patch.object(
+        CandidateService,
+        "recalculate_consecutive_metrics",
+        wraps=CandidateService.recalculate_consecutive_metrics,
+    )
+    mocker.patch("app.services.tushare_service.TushareService.sync_stock_names_to_db", return_value=None)
+
+    results = TomorrowStarWindowService(test_db).rebuild_trade_dates(
+        ["2024-01-02", "2024-01-03"],
+        source="manual_repair",
+        window_size=2,
+    )
+
+    assert run_backtest_mock.call_count == 1
+    assert run_backtest_mock.call_args.kwargs["start_date"] == "2024-01-02"
+    assert run_backtest_mock.call_args.kwargs["end_date"] == "2024-01-03"
+    assert recalc_mock.call_count == 1
+    assert [item["pick_date"] for item in results] == ["2024-01-02", "2024-01-03"]
+    assert all(item["success"] is True for item in results)
+
+    run_day_1 = test_db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == date(2024, 1, 2)).one()
+    run_day_2 = test_db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == date(2024, 1, 3)).one()
+    assert run_day_1.candidate_count == 1
+    assert run_day_1.analysis_count == 1
+    assert run_day_1.consecutive_candidate_count == 0
+    assert run_day_2.candidate_count == 2
+    assert run_day_2.analysis_count == 2
+    assert run_day_2.trend_start_count == 1
+    assert run_day_2.consecutive_candidate_count == 1
+
+    latest_payload = json.loads((tmp_path / "candidates" / "candidates_latest.json").read_text(encoding="utf-8"))
+    assert latest_payload["pick_date"] == "2024-01-03"
+    assert (tmp_path / "candidates" / "candidates_2024-01-02.json").exists()
+    assert (tmp_path / "candidates" / "candidates_2024-01-03.json").exists()
+
+
 def test_ensure_window_repairs_latest_candidate_and_review_files(test_db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "candidates_dir", tmp_path / "candidates")
     monkeypatch.setattr(settings, "review_dir", tmp_path / "review")

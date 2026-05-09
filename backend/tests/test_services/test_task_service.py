@@ -231,6 +231,30 @@ async def test_create_single_analysis_reuses_completed_same_day(task_service):
 
 @pytest.mark.service
 @pytest.mark.asyncio
+async def test_create_single_analysis_recreates_retryable_completed_task(task_service):
+    existing_task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "601992", "reviewer": "quant"},
+        started_at=utc_now(),
+        completed_at=utc_now(),
+        result_json={"verdict": "FAIL", "score": 1.0, "comment": "样本不足，无法完成第 4 步程序化复核。"},
+    )
+    task_service.db.add(existing_task)
+    task_service.db.commit()
+
+    with patch("app.services.task_service.asyncio.create_task") as mock_create_task:
+        result = await task_service.create_task("single_analysis", {"code": "601992", "reviewer": "quant"})
+
+        assert result["task_id"] != existing_task.id
+        assert result["existing"] is False
+        assert task_service.db.query(Task).count() == 2
+        mock_create_task.assert_called_once()
+
+
+@pytest.mark.service
+@pytest.mark.asyncio
 async def test_create_tomorrow_star(task_service):
     """
     测试创建明日之星任务

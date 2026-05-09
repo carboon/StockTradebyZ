@@ -426,6 +426,68 @@ class TomorrowStarWindowService:
             or 0
         )
 
+    def _refresh_run_counts_for_dates(self, trade_dates: list[str]) -> None:
+        normalized_dates = sorted(
+            {
+                date.fromisoformat(str(trade_date).strip()).isoformat()
+                for trade_date in trade_dates
+                if str(trade_date).strip()
+            }
+        )
+        if not normalized_dates:
+            return
+
+        pick_dates = [date.fromisoformat(item) for item in normalized_dates]
+        candidate_counts = {
+            pick_date.isoformat(): int(count or 0)
+            for pick_date, count in self.db.query(Candidate.pick_date, func.count(Candidate.id))
+            .filter(Candidate.pick_date.in_(pick_dates))
+            .group_by(Candidate.pick_date)
+            .all()
+        }
+        analysis_counts = {
+            pick_date.isoformat(): int(count or 0)
+            for pick_date, count in self.db.query(AnalysisResult.pick_date, func.count(AnalysisResult.id))
+            .filter(AnalysisResult.pick_date.in_(pick_dates))
+            .group_by(AnalysisResult.pick_date)
+            .all()
+        }
+        trend_counts = {
+            pick_date.isoformat(): int(count or 0)
+            for pick_date, count in self.db.query(AnalysisResult.pick_date, func.count(AnalysisResult.id))
+            .filter(
+                AnalysisResult.pick_date.in_(pick_dates),
+                AnalysisResult.signal_type == "trend_start",
+            )
+            .group_by(AnalysisResult.pick_date)
+            .all()
+        }
+        consecutive_counts = {
+            pick_date.isoformat(): int(count or 0)
+            for pick_date, count in self.db.query(Candidate.pick_date, func.count(Candidate.id))
+            .filter(
+                Candidate.pick_date.in_(pick_dates),
+                Candidate.consecutive_days >= 2,
+            )
+            .group_by(Candidate.pick_date)
+            .all()
+        }
+        run_map = {
+            run.pick_date.isoformat(): run
+            for run in self.db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date.in_(pick_dates)).all()
+        }
+
+        for trade_date in normalized_dates:
+            run = run_map.get(trade_date)
+            if run is None:
+                continue
+            run.candidate_count = candidate_counts.get(trade_date, 0)
+            run.analysis_count = analysis_counts.get(trade_date, 0)
+            run.trend_start_count = trend_counts.get(trade_date, 0)
+            run.consecutive_candidate_count = consecutive_counts.get(trade_date, 0)
+
+        self.db.flush()
+
     def _sync_analysis_results_for_date(self, trade_date: str, reviewer: str) -> int:
         review_dir = ROOT / "data" / "review" / trade_date
         if not review_dir.exists():
@@ -483,6 +545,7 @@ class TomorrowStarWindowService:
         started_at: datetime,
         status: str = "success",
         error_message: Optional[str] = None,
+        recalculate_consecutive: bool = True,
     ) -> dict[str, int]:
         pick_dt = date.fromisoformat(trade_date)
         codes = sorted({str(event.get("code", "")).zfill(6) for event in events if event.get("code")})
@@ -527,9 +590,6 @@ class TomorrowStarWindowService:
             self.db.add_all(analysis_rows)
         self.db.flush()
 
-        from app.services.candidate_service import CandidateService
-        CandidateService.recalculate_consecutive_metrics(self.db, commit=False)
-
         run = self._upsert_run(
             trade_date,
             status=status,
@@ -543,12 +603,18 @@ class TomorrowStarWindowService:
         run.candidate_count = len(candidate_rows)
         run.analysis_count = len(analysis_rows)
         run.trend_start_count = sum(1 for event in events if event.get("signal_type") == "trend_start")
-        run.consecutive_candidate_count = int(
-            self.db.query(func.count(Candidate.id))
-            .filter(Candidate.pick_date == pick_dt, Candidate.consecutive_days >= 2)
-            .scalar()
-            or 0
-        )
+        if recalculate_consecutive:
+            from app.services.candidate_service import CandidateService
+
+            CandidateService.recalculate_consecutive_metrics(self.db, commit=False)
+            run.consecutive_candidate_count = int(
+                self.db.query(func.count(Candidate.id))
+                .filter(Candidate.pick_date == pick_dt, Candidate.consecutive_days >= 2)
+                .scalar()
+                or 0
+            )
+        else:
+            run.consecutive_candidate_count = 0
         self.db.flush()
         return {
             "candidate_count": run.candidate_count,
@@ -600,6 +666,7 @@ class TomorrowStarWindowService:
             }
 
         built_dates: list[str] = []
+        should_recalculate_each_date = len(trade_dates) <= 1
         for trade_date in trade_dates:
             counts = self._replace_trade_date_payload(
                 trade_date,
@@ -608,6 +675,7 @@ class TomorrowStarWindowService:
                 source=source,
                 window_size=window_size,
                 started_at=started_at,
+                recalculate_consecutive=should_recalculate_each_date,
             )
             built_dates.append(trade_date)
             logger.info(
@@ -617,6 +685,11 @@ class TomorrowStarWindowService:
                 counts["analysis_count"],
                 counts["trend_start_count"],
             )
+        if not should_recalculate_each_date and built_dates:
+            from app.services.candidate_service import CandidateService
+
+            CandidateService.recalculate_consecutive_metrics(self.db, commit=False)
+            self._refresh_run_counts_for_dates(built_dates)
         self.db.commit()
         return {"success": True, "built_dates": built_dates, "failed_dates": []}
 
@@ -960,6 +1033,96 @@ class TomorrowStarWindowService:
             self.db.commit()
             logger.exception("rebuild_trade_date failed: %s", trade_date)
             return {"success": False, "status": "failed", "pick_date": trade_date, "error": str(exc)}
+        finally:
+            self._unlock_advisory()
+
+    def rebuild_trade_dates(
+        self,
+        trade_dates: list[str],
+        *,
+        reviewer: str = DEFAULT_REVIEWER,
+        source: str = DEFAULT_SOURCE,
+        window_size: int = DEFAULT_WINDOW_SIZE,
+    ) -> list[dict[str, Any]]:
+        normalized_dates = sorted(
+            {
+                date.fromisoformat(str(trade_date).strip()).isoformat()
+                for trade_date in trade_dates
+                if str(trade_date).strip()
+            }
+        )
+        if not normalized_dates:
+            return []
+
+        if not self._try_advisory_lock():
+            return [
+                {"success": False, "status": "locked", "pick_date": trade_date}
+                for trade_date in normalized_dates
+            ]
+
+        try:
+            rebuild_result = self._build_window_via_backtest(
+                normalized_dates,
+                reviewer=reviewer,
+                source=source,
+                window_size=window_size,
+            )
+            self.reconcile_run_rows(window_size, reviewer=reviewer, source=source)
+
+            latest_trade_date = self._get_latest_trade_date()
+            pick_dates = [date.fromisoformat(item) for item in normalized_dates]
+            run_map = {
+                row.pick_date.isoformat(): row
+                for row in self.db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date.in_(pick_dates)).all()
+            }
+
+            for trade_date in normalized_dates:
+                self._sync_trade_date_artifacts(
+                    trade_date,
+                    reviewer=reviewer,
+                    write_latest=(trade_date == latest_trade_date),
+                )
+
+            failed_dates = set(rebuild_result.get("failed_dates", []))
+            return [
+                {
+                    "success": trade_date not in failed_dates,
+                    "status": "failed" if trade_date in failed_dates else "success",
+                    "pick_date": trade_date,
+                    "candidate_count": int(getattr(run_map.get(trade_date), "candidate_count", 0) or 0),
+                    "analysis_count": int(getattr(run_map.get(trade_date), "analysis_count", 0) or 0),
+                    "trend_start_count": int(getattr(run_map.get(trade_date), "trend_start_count", 0) or 0),
+                }
+                for trade_date in normalized_dates
+            ]
+        except Exception as exc:
+            self.db.rollback()
+            failed_results: list[dict[str, Any]] = []
+            for trade_date in normalized_dates:
+                run = self._upsert_run(
+                    trade_date,
+                    status="failed",
+                    reviewer=reviewer,
+                    source=source,
+                    window_size=window_size,
+                    error_message=str(exc)[:4000],
+                    finished_at=utc_now(),
+                )
+                self._refresh_run_counts(run)
+                failed_results.append(
+                    {
+                        "success": False,
+                        "status": "failed",
+                        "pick_date": trade_date,
+                        "error": str(exc),
+                        "candidate_count": int(getattr(run, "candidate_count", 0) or 0),
+                        "analysis_count": int(getattr(run, "analysis_count", 0) or 0),
+                        "trend_start_count": int(getattr(run, "trend_start_count", 0) or 0),
+                    }
+                )
+            self.db.commit()
+            logger.exception("rebuild_trade_dates failed: %s", normalized_dates)
+            return failed_results
         finally:
             self._unlock_advisory()
 
