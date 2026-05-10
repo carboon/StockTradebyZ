@@ -133,7 +133,7 @@ describe('api/index.ts', () => {
     expect(mockGet).toHaveBeenNthCalledWith(1, '/v1/analysis/tomorrow-star/candidates', {
       signal,
       timeout: 20000,
-      params: { date: '2024-01-15' },
+      params: { date: '2024-01-15', limit: 2000 },
     })
     expect(mockGet).toHaveBeenNthCalledWith(2, '/v1/analysis/tomorrow-star/results', {
       signal,
@@ -143,7 +143,7 @@ describe('api/index.ts', () => {
     expect(mockGet).toHaveBeenNthCalledWith(3, '/v1/analysis/current-hot/candidates', {
       signal,
       timeout: 20000,
-      params: { date: '2024-01-15' },
+      params: { date: '2024-01-15', limit: 2000 },
     })
     expect(mockGet).toHaveBeenNthCalledWith(4, '/v1/analysis/current-hot/results', {
       signal,

@@ -197,7 +197,7 @@ describe('Watchlist.vue', () => {
   })
 
   it('hydrates cached watchlist immediately and refreshes in background', async () => {
-    window.localStorage.setItem('stocktrade:watchlist:state', JSON.stringify({
+    window.localStorage.setItem('stocktrade:watchlist:state:guest', JSON.stringify({
       selectedStockId: 1,
       watchlist: watchlistItems,
       analysisHistory: analysisRows,
@@ -241,13 +241,13 @@ describe('Watchlist.vue', () => {
     expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.any(Object))
     expect(apiWatchlist.getAnalysis).toHaveBeenCalledWith(1, expect.any(Object))
 
-    const saved = JSON.parse(window.localStorage.getItem('stocktrade:watchlist:state') || '{}')
+    const saved = JSON.parse(window.localStorage.getItem('stocktrade:watchlist:state:guest') || '{}')
     expect(saved.selectedStockId).toBe(1)
     expect(saved.watchlist).toHaveLength(2)
   })
 
   it('clears selected detail state when the selected stock disappears after refresh', async () => {
-    window.localStorage.setItem('stocktrade:watchlist:state', JSON.stringify({
+    window.localStorage.setItem('stocktrade:watchlist:state:guest', JSON.stringify({
       selectedStockId: 1,
       watchlist: watchlistItems,
       analysisHistory: analysisRows,

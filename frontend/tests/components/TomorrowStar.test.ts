@@ -80,8 +80,8 @@ function mockStatus({ initialized = true } = {}) {
 }
 
 const latestCandidates = [
-  { code: '600000', name: '浦发银行', kdj_j: 25, close_price: 10.5 },
-  { code: '000001', name: '平安银行', kdj_j: 12, close_price: 12.2 },
+  { code: '600000', name: '浦发银行', kdj_j: 25, close_price: 10.5, turnover_rate: 1.2, volume_ratio: 1.1 },
+  { code: '000001', name: '平安银行', kdj_j: 12, close_price: 12.2, turnover_rate: 0.8, volume_ratio: 0.9 },
 ]
 
 const latestResults = [
@@ -92,8 +92,8 @@ const latestResults = [
 ]
 
 const currentHotCandidates = [
-  { code: '688001', name: '华兴源创', kdj_j: 15, close_price: 28.5, board_name: '半导体设备', b1_passed: true },
-  { code: '600001', name: '示例热盘', kdj_j: 12, close_price: 11.2, board_name: '券商', b1_passed: false },
+  { code: '688001', name: '华兴源创', kdj_j: 15, close_price: 28.5, board_name: '半导体设备', b1_passed: true, turnover_rate: 4.2, volume_ratio: 1.6 },
+  { code: '600001', name: '示例热盘', kdj_j: 12, close_price: 11.2, board_name: '券商', b1_passed: false, turnover_rate: 2.1, volume_ratio: 1.2 },
 ]
 
 const currentHotResults = [
@@ -452,9 +452,9 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v2', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v9', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
-      latestCandidates: [{ code: 'cached', kdj_j: 5 }],
+      latestCandidates: [{ code: 'cached', kdj_j: 5, turnover_rate: 1.3 }],
       latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
       selectedDate: '2024-01-10',
       viewingDate: '2024-01-10',
@@ -494,9 +494,9 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v2', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v9', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
-      latestCandidates: [{ code: 'cached', kdj_j: 5 }],
+      latestCandidates: [{ code: 'cached', kdj_j: 5, turnover_rate: 1.3 }],
       latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
       selectedDate: '2024-01-10',
       viewingDate: '2024-01-10',
@@ -540,7 +540,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v2', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v9', JSON.stringify({
       historyData: [{ date: '2024-01-10', rawDate: '2024-01-10', count: 1, pass: 0, status: 'success' }],
       latestCandidates: [],
       latestAnalysisResults: [],
@@ -591,8 +591,10 @@ describe('TomorrowStar.vue', () => {
 
     expect(apiAnalysis.getCurrentHotDates).toHaveBeenCalled()
     expect(wrapper.vm.currentHotLatestCandidates).toHaveLength(2)
-    expect(wrapper.vm.displayCurrentHotAnalysisResults).toHaveLength(5)
-    expect(wrapper.vm.totalCurrentHotAnalysisResults).toBe(6)
+    expect(wrapper.vm.displayCurrentHotLatestCandidates).toHaveLength(2)
+    expect(wrapper.vm.totalCurrentHotCandidates).toBe(2)
+    expect(wrapper.vm.displayCurrentHotLatestCandidates[0].total_score).toBe(4.9)
+    expect(wrapper.vm.displayCurrentHotLatestCandidates[0].signal_type).toBe('trend_start')
     expect(wrapper.vm.getCurrentHotBoardLabel(wrapper.vm.currentHotLatestCandidates[0])).toBe('半导体设备')
     expect(wrapper.vm.getBooleanTagLabel(wrapper.vm.currentHotLatestCandidates[0].b1_passed)).toBe('通过')
     expect(wrapper.vm.getBooleanTagLabel(wrapper.vm.currentHotLatestCandidates[1].b1_passed)).toBe('未过')
@@ -601,7 +603,6 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     expect(wrapper.vm.displayCurrentHotLatestCandidates.map((item: { code: string }) => item.code)).toEqual(['688001'])
-    expect(wrapper.vm.displayCurrentHotAnalysisResults.map((item: { code: string }) => item.code)).toEqual(['688001', '688005'])
   })
 
   it('falls back to code-derived board labels for current-hot candidates', async () => {

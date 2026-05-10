@@ -62,7 +62,7 @@ type RequestOptions = {
   timeoutMs?: number
 }
 
-export class AppRequestError extends Error {
+class AppRequestError extends Error {
   status?: number
   code?: string
 
@@ -510,5 +510,3 @@ export const apiAuth = {
   adminGetUsage: (userId: number) =>
     api.get<never, UsageStatsResponse>(`/v1/auth/admin/usage/${userId}`),
 }
-
-export default api

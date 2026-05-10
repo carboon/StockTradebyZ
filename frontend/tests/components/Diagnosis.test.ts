@@ -263,7 +263,7 @@ describe('Diagnosis.vue', () => {
     expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith(
       '600000',
-      180,
+      120,
       1,
       10,
       false,
@@ -330,6 +330,7 @@ describe('Diagnosis.vue', () => {
     await flushPromises()
 
     wrapper.vm.stockCode = '600000'
+    vi.mocked(apiAnalysis.getDiagnosisHistory).mockClear()
     vi.mocked(apiAnalysis.refreshHistory).mockResolvedValueOnce({
       status: 'updated',
       message: '当前页历史数据已刷新',
@@ -341,9 +342,9 @@ describe('Diagnosis.vue', () => {
 
     await wrapper.vm.handleHistoryPageChange(2)
 
-    expect(apiAnalysis.refreshHistory).toHaveBeenCalledWith(
+    expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith(
       '600000',
-      180,
+      120,
       2,
       10,
       false,

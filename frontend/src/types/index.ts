@@ -169,7 +169,7 @@ export interface B1Check {
   detail_updated_at?: string | null
 }
 
-export interface DiagnosisHistoryDetailPayload {
+interface DiagnosisHistoryDetailPayload {
   score_details?: Record<string, any> | null
   rules?: Record<string, any> | null
   details?: Record<string, any> | null
@@ -321,7 +321,7 @@ export interface TradeDateRevalidationResponse {
 }
 
 // K线数据
-export interface KLineDataPoint {
+interface KLineDataPoint {
   date: string
   open: number
   high: number
@@ -414,7 +414,7 @@ export interface TomorrowStarHistoryItem {
   } | null
 }
 
-export interface TomorrowStarWindowStatusItem {
+interface TomorrowStarWindowStatusItem {
   pick_date?: string
   date?: string
   status?: 'pending' | 'running' | 'success' | 'failed' | 'missing' | string
@@ -574,7 +574,7 @@ export interface DiagnosisHistoryStatusResponse {
   generated_at?: string
 }
 
-export interface DiagnosisAnalysisDetails {
+interface DiagnosisAnalysisDetails {
   kdj_j?: number
   zx_long_pos?: boolean
   weekly_ma_aligned?: boolean
@@ -591,24 +591,6 @@ export interface DiagnosisAnalysisDetails {
   signal_type?: string
   signal_reasoning?: string
   comment?: string
-}
-
-export interface DiagnosisAnalyzeResponse {
-  code: string
-  name?: string
-  current_price?: number
-  b1_passed?: boolean
-  score?: number
-  verdict?: 'PASS' | 'WATCH' | 'FAIL'
-  analysis: DiagnosisAnalysisDetails
-  kline_data?: {
-    dates: string[]
-    open: number[]
-    high: number[]
-    low: number[]
-    close: number[]
-    volume: number[]
-  } | null
 }
 
 export interface DiagnosisAnalyzeTaskResponse {
@@ -683,7 +665,7 @@ export interface TaskLogListResponse {
   total: number
 }
 
-export interface TaskOverviewCard {
+interface TaskOverviewCard {
   key: string
   label: string
   value: string
@@ -691,7 +673,7 @@ export interface TaskOverviewCard {
   meta?: string | null
 }
 
-export interface TaskAlertItem {
+interface TaskAlertItem {
   level: string
   title: string
   message: string
@@ -707,7 +689,7 @@ export interface TaskRunningResponse {
   total: number
 }
 
-export interface TaskEnvironmentSection {
+interface TaskEnvironmentSection {
   key: string
   label: string
   items: Record<string, any>
@@ -807,7 +789,7 @@ export interface ApiKeyCreateResponse {
   name: string | null
 }
 
-export interface UsageStatsItem {
+interface UsageStatsItem {
   date: string
   total_calls: number
   endpoints: Record<string, number>
@@ -832,7 +814,7 @@ export interface UserListItem {
 // 管理员总览摘要类型
 // =====================
 
-export interface AdminSummaryCard {
+interface AdminSummaryCard {
   key: string
   label: string
   value: string
@@ -842,7 +824,7 @@ export interface AdminSummaryCard {
   action_route?: string | null
 }
 
-export interface AdminSummaryTaskInfo {
+interface AdminSummaryTaskInfo {
   id?: number | null
   task_type?: string | null
   status: string
@@ -853,14 +835,14 @@ export interface AdminSummaryTaskInfo {
   progress_meta_json?: TaskProgressMeta | null
 }
 
-export interface AdminSummaryDataGap {
+interface AdminSummaryDataGap {
   has_gap: boolean
   gap_days?: number | null
   latest_local_date?: string | null
   latest_trade_date?: string | null
 }
 
-export interface AdminPipelineStageSummary {
+interface AdminPipelineStageSummary {
   key: string
   label: string
   status: 'success' | 'warning' | 'danger' | 'info'

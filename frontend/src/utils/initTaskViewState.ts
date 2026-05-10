@@ -1,4 +1,4 @@
-export type InitTaskViewTab = 'tasks' | 'logs' | 'status' | 'dashboard'
+type InitTaskViewTab = 'tasks' | 'logs' | 'status' | 'dashboard'
 
 export interface InitTaskViewState {
   activeTab?: InitTaskViewTab

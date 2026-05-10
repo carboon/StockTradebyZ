@@ -45,6 +45,7 @@ vi.mock('@/api', () => ({
     clearTasks: vi.fn(),
     startUpdate: vi.fn(),
     startIncrementalUpdate: vi.fn(),
+    startDailyBatchUpdate: vi.fn(),
     getOverview: vi.fn(),
   },
   apiConfig: {
@@ -315,10 +316,10 @@ describe('Update.vue', () => {
     expect(ElMessage.success).toHaveBeenCalledWith('任务已取消')
   })
 
-  it('starts incremental update from the latest-trade-day action', async () => {
-    vi.mocked(apiTasks.startIncrementalUpdate).mockResolvedValue({
+  it('starts daily batch update from the latest-trade-day action', async () => {
+    vi.mocked(apiTasks.startDailyBatchUpdate).mockResolvedValue({
       success: true,
-      message: '增量更新已启动',
+      message: '最新交易日数据更新已启动',
       running: false,
     } as any)
 
@@ -328,9 +329,9 @@ describe('Update.vue', () => {
     await wrapper.vm.startDataUpdate()
     await flushPromises()
 
-    expect(apiTasks.startIncrementalUpdate).toHaveBeenCalledTimes(1)
+    expect(apiTasks.startDailyBatchUpdate).toHaveBeenCalledTimes(1)
     expect(apiTasks.startUpdate).not.toHaveBeenCalled()
-    expect(ElMessage.success).toHaveBeenCalledWith('增量更新已启动')
+    expect(ElMessage.success).toHaveBeenCalledWith('最新交易日数据更新已启动')
   })
 
   it('shows failed incremental warning when last run was interrupted', async () => {
