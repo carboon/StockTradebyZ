@@ -1,5 +1,5 @@
 """
-Tomorrow Star 180-day rolling window maintenance service.
+Tomorrow Star 120-day rolling window maintenance service.
 """
 from __future__ import annotations
 
@@ -64,12 +64,12 @@ class TomorrowStarWindowSummary:
 
 
 class TomorrowStarWindowService:
-    DEFAULT_WINDOW_SIZE = 180
+    DEFAULT_WINDOW_SIZE = 120
     DEFAULT_REVIEWER = "quant"
     DEFAULT_SOURCE = "bootstrap"
     DEFAULT_STRATEGY_VERSION = "v1"
     LOCK_KEY = 902180
-    ACTIVE_TASK_TYPES = ("full_update", "incremental_update", "tomorrow_star")
+    ACTIVE_TASK_TYPES = ("full_update", "incremental_update", "tomorrow_star", "recent_120_rebuild")
 
     def __init__(self, db: Optional[Session] = None):
         self.db = db or SessionLocal()
@@ -134,6 +134,10 @@ class TomorrowStarWindowService:
     ) -> str:
         if run is None:
             return "success" if candidate_count > 0 and analysis_count > 0 else "missing"
+
+        # 检查市场环境阻断
+        if run.meta_json and run.meta_json.get("market_regime_blocked"):
+            return "market_regime_blocked"
 
         status = str(run.status or "").strip().lower() or "missing"
         if status == "success":
@@ -279,7 +283,7 @@ class TomorrowStarWindowService:
             .all()
         )
         run = CandidateRun(
-            run_date=datetime.now().date().isoformat(),
+            run_date=utc_now().date().isoformat(),
             pick_date=trade_date,
             candidates=[
                 PipelineCandidate(
@@ -377,6 +381,10 @@ class TomorrowStarWindowService:
         error_message: Optional[str] = None,
         started_at: Optional[datetime] = None,
         finished_at: Optional[datetime] = None,
+        candidate_count: Optional[int] = None,
+        analysis_count: Optional[int] = None,
+        trend_start_count: Optional[int] = None,
+        consecutive_candidate_count: Optional[int] = None,
     ) -> TomorrowStarRun:
         pick_dt = date.fromisoformat(pick_date_text)
         run = self.db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == pick_dt).first()
@@ -400,6 +408,15 @@ class TomorrowStarWindowService:
             run.started_at = started_at
         if finished_at is not None:
             run.finished_at = finished_at
+        # 如果提供了具体数量，直接设置；否则稍后通过 _refresh_run_counts 计算
+        if candidate_count is not None:
+            run.candidate_count = candidate_count
+        if analysis_count is not None:
+            run.analysis_count = analysis_count
+        if trend_start_count is not None:
+            run.trend_start_count = trend_start_count
+        if consecutive_candidate_count is not None:
+            run.consecutive_candidate_count = consecutive_candidate_count
         return run
 
     def _refresh_run_counts(self, run: TomorrowStarRun) -> None:
@@ -623,6 +640,127 @@ class TomorrowStarWindowService:
             "consecutive_candidate_count": run.consecutive_candidate_count,
         }
 
+    def _check_market_regime_before_generation(
+        self,
+        trade_dates: list[str],
+        reviewer: str,
+    ) -> dict[str, Any]:
+        """在候选生成前检查市场环境。
+
+        Returns:
+            包含以下字段的字典：
+            - valid_dates: 市场环境良好的日期列表
+            - skipped_dates: 市场环境不佳的日期列表
+            - regime_info: 每个日期的市场环境信息
+        """
+        from review_prefilter import Step4Prefilter
+        from quant_reviewer import load_config
+
+        review_cfg = load_config()
+        prefilter = Step4Prefilter(review_cfg)
+
+        valid_dates = []
+        skipped_dates = []
+        regime_info: dict[str, dict[str, Any]] = {}
+
+        for trade_date in trade_dates:
+            result = prefilter.check_market_regime_only(trade_date)
+            regime_info[trade_date] = result
+
+            if result.get("passed", True):
+                valid_dates.append(trade_date)
+            else:
+                skipped_dates.append(trade_date)
+                logger.info(
+                    "市场环境检查未通过 %s: %s",
+                    trade_date,
+                    result.get("summary", ""),
+                )
+
+        return {
+            "valid_dates": valid_dates,
+            "skipped_dates": skipped_dates,
+            "regime_info": regime_info,
+        }
+
+    def _replace_trade_date_with_market_regime_blocked(
+        self,
+        trade_date: str,
+        regime_info: dict[str, Any],
+        *,
+        reviewer: str,
+        source: str,
+        window_size: int,
+        started_at: datetime,
+    ) -> dict[str, int]:
+        """当市场环境不佳时，清空候选/分析数据并记录市场环境信息。
+
+        Args:
+            trade_date: 交易日期
+            regime_info: 市场环境检查结果
+            reviewer: 复核者
+            source: 来源
+            window_size: 窗口大小
+            started_at: 开始时间
+
+        Returns:
+            包含候选数、分析数等统计信息的字典
+        """
+        pick_dt = date.fromisoformat(trade_date)
+
+        # 清空该日期的候选数据
+        deleted_candidates = (
+            self.db.query(Candidate)
+            .filter(Candidate.pick_date == pick_dt)
+            .delete()
+        )
+
+        # 清空该日期的分析数据
+        deleted_analysis = (
+            self.db.query(AnalysisResult)
+            .filter(AnalysisResult.pick_date == pick_dt)
+            .delete()
+        )
+
+        # 更新运行记录
+        run = self._upsert_run(
+            trade_date,
+            status="success",
+            reviewer=reviewer,
+            source=source,
+            window_size=window_size,
+            candidate_count=0,
+            analysis_count=0,
+            trend_start_count=0,
+            consecutive_candidate_count=0,
+            started_at=started_at,
+            finished_at=utc_now(),
+            error_message=None,
+        )
+
+        # 在运行记录的 meta_json 中保存市场环境信息
+        run.meta_json = {
+            **(run.meta_json or {}),
+            "market_regime_blocked": True,
+            "market_regime_info": regime_info,
+        }
+        self.db.flush()
+
+        logger.info(
+            "市场环境不佳 %s: 清空候选(%d)和分析(%d), 原因: %s",
+            trade_date,
+            deleted_candidates,
+            deleted_analysis,
+            regime_info.get("summary", ""),
+        )
+
+        return {
+            "candidate_count": 0,
+            "analysis_count": 0,
+            "trend_start_count": 0,
+            "consecutive_candidate_count": 0,
+        }
+
     def _build_window_via_backtest(
         self,
         trade_dates: list[str],
@@ -635,6 +773,11 @@ class TomorrowStarWindowService:
             return {"success": True, "built_dates": [], "failed_dates": []}
 
         from pipeline.backtest_quant import run_backtest
+
+        # 提前检查市场环境，避免在恶劣环境下进行无意义的计算
+        market_regime_check = self._check_market_regime_before_generation(trade_dates, reviewer)
+        skipped_dates = market_regime_check["skipped_dates"]
+        valid_dates = market_regime_check["valid_dates"]
 
         started_at = utc_now()
         for trade_date in trade_dates:
@@ -650,8 +793,30 @@ class TomorrowStarWindowService:
             )
         self.db.commit()
 
-        start_date = min(trade_dates)
-        end_date = max(trade_dates)
+        # 对于市场环境不佳的日期，直接记录为空结果
+        for trade_date in skipped_dates:
+            regime_info = market_regime_check["regime_info"].get(trade_date, {})
+            self._replace_trade_date_with_market_regime_blocked(
+                trade_date,
+                regime_info,
+                reviewer=reviewer,
+                source=source,
+                window_size=window_size,
+                started_at=started_at,
+            )
+
+        # 如果没有有效日期，直接返回
+        if not valid_dates:
+            self.db.commit()
+            return {
+                "success": True,
+                "built_dates": skipped_dates,
+                "failed_dates": [],
+                "market_regime_skipped": skipped_dates,
+            }
+
+        start_date = min(valid_dates)
+        end_date = max(valid_dates)
         events_df, _summary = run_backtest(
             start_date=start_date,
             end_date=end_date,
@@ -759,6 +924,7 @@ class TomorrowStarWindowService:
             .group_by(Candidate.pick_date)
             .all()
         }
+        tomorrow_star_counts = self._get_tomorrow_star_counts(pick_dates)
 
         has_active_task = self._has_active_generation_task()
         items: list[dict[str, Any]] = []
@@ -769,12 +935,25 @@ class TomorrowStarWindowService:
             analysis_count = analysis_counts.get(pick_date_text, 0)
             trend_start_count = trend_counts.get(pick_date_text, 0)
             consecutive_candidate_count = consecutive_counts.get(pick_date_text, 0)
+            tomorrow_star_count = tomorrow_star_counts.get(pick_date_text, 0)
+
+            # 检查市场环境阻断
+            is_market_regime_blocked = False
+            market_regime_info = None
+            if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+                is_market_regime_blocked = True
+                market_regime_info = run.meta_json.get("market_regime_info", {})
+
             status = self._resolve_display_status(
                 run,
                 candidate_count=candidate_count,
                 analysis_count=analysis_count,
                 has_active_task=has_active_task,
             )
+
+            # 市场环境阻断时，状态显示为 success 但候选为0
+            if is_market_regime_blocked and status == "success":
+                status = "market_regime_blocked"
 
             if status == "success":
                 ready_count += 1
@@ -797,6 +976,7 @@ class TomorrowStarWindowService:
                     "analysis_count": analysis_count,
                     "trend_start_count": trend_start_count,
                     "consecutive_candidate_count": consecutive_candidate_count,
+                    "tomorrow_star_count": tomorrow_star_count,
                     "status": status,
                     "error_message": run.error_message if run else None,
                     "is_latest": pick_date_text == latest_date,
@@ -804,6 +984,8 @@ class TomorrowStarWindowService:
                     "source": run.source if run else None,
                     "started_at": run.started_at.isoformat() if run and run.started_at else None,
                     "finished_at": run.finished_at.isoformat() if run and run.finished_at else None,
+                    "market_regime_blocked": is_market_regime_blocked,
+                    "market_regime_info": market_regime_info,
                 }
             )
 
@@ -836,6 +1018,60 @@ class TomorrowStarWindowService:
             return False
 
         return True
+
+    @staticmethod
+    def _extract_prefilter_passed(details_json: Optional[dict[str, Any]]) -> Optional[bool]:
+        if not isinstance(details_json, dict):
+            return None
+        prefilter = details_json.get("prefilter")
+        if not isinstance(prefilter, dict):
+            return None
+        value = prefilter.get("passed")
+        return value if isinstance(value, bool) else None
+
+    @staticmethod
+    def _extract_tomorrow_star_pass(details_json: Optional[dict[str, Any]]) -> Optional[bool]:
+        if not isinstance(details_json, dict):
+            return None
+        direct = details_json.get("tomorrow_star_pass")
+        if isinstance(direct, bool):
+            return direct
+        rules = details_json.get("rules")
+        if isinstance(rules, dict) and isinstance(rules.get("tomorrow_star_pass"), bool):
+            return rules["tomorrow_star_pass"]
+        details = details_json.get("details")
+        if isinstance(details, dict) and isinstance(details.get("tomorrow_star_pass"), bool):
+            return details["tomorrow_star_pass"]
+        return None
+
+    @classmethod
+    def _is_tomorrow_star_analysis(cls, row: AnalysisResult) -> bool:
+        explicit = cls._extract_tomorrow_star_pass(row.details_json)
+        if explicit is not None:
+            return explicit
+        prefilter_passed = cls._extract_prefilter_passed(row.details_json)
+        if prefilter_passed is None:
+            return False
+        return bool(
+            prefilter_passed
+            and row.verdict == "PASS"
+            and row.signal_type == "trend_start"
+        )
+
+    def _get_tomorrow_star_counts(self, pick_dates: list[date]) -> dict[str, int]:
+        if not pick_dates:
+            return {}
+        counts: dict[str, int] = {}
+        rows = (
+            self.db.query(AnalysisResult)
+            .filter(AnalysisResult.pick_date.in_(pick_dates))
+            .all()
+        )
+        for row in rows:
+            if self._is_tomorrow_star_analysis(row):
+                key = row.pick_date.isoformat()
+                counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def reconcile_run_rows(
         self,
@@ -1224,7 +1460,7 @@ def ensure_tomorrow_star_window(
     reviewer: str = TomorrowStarWindowService.DEFAULT_REVIEWER,
     source: str = TomorrowStarWindowService.DEFAULT_SOURCE,
 ) -> dict[str, Any]:
-    """在线程内创建独立 service，执行 180 日窗口补齐。"""
+    """在线程内创建独立 service，执行 120 日窗口补齐。"""
     with TomorrowStarWindowService() as service:
         return service.ensure_window(window_size=window_size, reviewer=reviewer, source=source)
 

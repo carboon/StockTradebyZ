@@ -39,6 +39,8 @@ import type {
   TaskListResponse,
   TaskLogListResponse,
   TaskOverviewResponse,
+  Recent120IntegrityResponse,
+  TradeDateRevalidationResponse,
   TaskRunningResponse,
   TaskResponse,
   TomorrowStarDatesResponse,
@@ -213,7 +215,7 @@ export const apiAnalysis = {
 
   // 获取候选列表
   getCandidates: (date?: string, options?: RequestOptions) =>
-    api.get<never, CandidatesResponse>('/v1/analysis/tomorrow-star/candidates', { ...withRequestOptions(options, TIMEOUTS.standard), params: { date } }),
+    api.get<never, CandidatesResponse>('/v1/analysis/tomorrow-star/candidates', { ...withRequestOptions(options, TIMEOUTS.standard), params: { date, limit: 2000 } }),
 
   // 获取分析结果
   getResults: (date?: string, options?: RequestOptions) =>
@@ -231,7 +233,7 @@ export const apiAnalysis = {
   getCurrentHotCandidates: (date?: string, options?: RequestOptions) =>
     api.get<never, CurrentHotCandidatesResponse>('/v1/analysis/current-hot/candidates', {
       ...withRequestOptions(options, TIMEOUTS.standard),
-      params: { date },
+      params: { date, limit: 2000 },
     }),
 
   // 获取当前热盘分析结果
@@ -280,7 +282,7 @@ export const apiAnalysis = {
   // 获取单股诊断历史
   getDiagnosisHistory: (
     code: string,
-    days: number = 180,
+    days: number = 120,
     page: number = 1,
     pageSize: number = 10,
     refresh: boolean = false,
@@ -294,7 +296,7 @@ export const apiAnalysis = {
   // 获取历史数据生成状态
   getHistoryStatus: (
     code: string,
-    days: number = 180,
+    days: number = 120,
     page: number = 1,
     pageSize: number = 10,
     options?: RequestOptions,
@@ -307,7 +309,7 @@ export const apiAnalysis = {
   // 重新刷新单股诊断历史数据
   refreshHistory: (
     code: string,
-    days: number = 180,
+    days: number = 120,
     page: number = 1,
     pageSize: number = 10,
     force: boolean = false,
@@ -409,6 +411,22 @@ export const apiTasks = {
   // 启动按交易日批量更新
   startDailyBatchUpdate: (tradeDate?: string) =>
     api.post<null, DailyBatchUpdateResponse>('/v1/tasks/start-daily-batch', null, { params: { trade_date: tradeDate } }),
+
+  // 启动近120交易日完整重建
+  startRecent120Rebuild: () =>
+    api.post<null, DailyBatchUpdateResponse>('/v1/tasks/start-recent-120-rebuild', null, { timeout: TIMEOUTS.short }),
+
+  // 检查近120交易日数据完整性
+  checkRecent120Integrity: () =>
+    api.get<never, Recent120IntegrityResponse>('/v1/tasks/data-integrity/recent-120', { timeout: TIMEOUTS.standard }),
+
+  // 指定交易日只读重验证
+  revalidateTradeDate: (tradeDate: string) =>
+    api.post<null, TradeDateRevalidationResponse>(
+      '/v1/tasks/data-integrity/revalidate-date',
+      null,
+      { params: { trade_date: tradeDate }, timeout: TIMEOUTS.long },
+    ),
 
   // 获取增量更新状态
   // 仅作为兼容兜底状态源；任务展示优先使用 running/tasks 接口

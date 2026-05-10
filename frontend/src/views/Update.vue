@@ -36,6 +36,18 @@
                 >
                   查询最新数据时效
                 </el-button>
+                <el-button
+                  :loading="checkingIntegrity"
+                  @click="checkRecent120Integrity"
+                >
+                  检查数据完整性
+                </el-button>
+                <el-button
+                  :loading="revalidatingDate"
+                  @click="promptRevalidateTradeDate"
+                >
+                  指定日期重验证
+                </el-button>
               </div>
               <div v-if="hasActiveBackgroundWork" class="running-hint">
                 <el-icon class="is-loading"><Loading /></el-icon>
@@ -934,6 +946,8 @@ const startingUpdate = ref(false)
 const startingFullUpdate = ref(false)
 const checkingData = ref(false)
 const checkingFreshness = ref(false)
+const checkingIntegrity = ref(false)
+const revalidatingDate = ref(false)
 const diagnosticsLoading = ref(false)
 const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
 
@@ -1873,15 +1887,101 @@ async function startDataUpdate() {
 async function startFullUpdate() {
   startingFullUpdate.value = true
   try {
-    const result = await apiTasks.startUpdate('quant', false, 1, true)
-    ElMessage.success(`全量初始化任务已启动 #${result.task.id}`)
-    await focusTask(result.task, 'logs')
+    const result = await apiTasks.startRecent120Rebuild()
+    if (!result.success) {
+      ElMessage.error(result.message || '近120交易日重建启动失败')
+      await reloadAll()
+      return
+    }
+    ElMessage.success(result.message || '近120交易日完整重建已启动')
+    if (result.task) {
+      await focusTask(result.task, 'logs')
+    }
     await reloadAll()
   } catch (error: any) {
     console.error('startFullUpdate failed:', error)
-    ElMessage.error(isInitializationPendingError(error) ? '系统尚未完成初始化' : (error.message || '启动失败'))
+    ElMessage.error(isInitializationPendingError(error) ? getUserSafeErrorMessage(error, '系统尚未完成初始化') : getUserSafeErrorMessage(error, '启动失败'))
   } finally {
     startingFullUpdate.value = false
+  }
+}
+
+async function checkRecent120Integrity() {
+  checkingIntegrity.value = true
+  try {
+    const res = await apiTasks.checkRecent120Integrity()
+    const issuePreview = (res.issues || [])
+      .slice(0, 12)
+      .map((item) => `<li><strong>${item.trade_date}</strong>：${item.issues.join('、')}</li>`)
+      .join('')
+    const lines = [
+      `<strong>检查结果：</strong>${res.success ? '通过' : '存在问题'}`,
+      `<strong>窗口：</strong>${res.date_range?.join(' ~ ') || '-'} / ${res.date_count || 0} 个交易日`,
+      `<strong>问题日期：</strong>${res.summary?.issue_dates ?? 0}`,
+      `<strong>说明：</strong>${res.message || '-'}`,
+    ]
+    if (issuePreview) {
+      lines.push(`<strong>问题样例：</strong><ul>${issuePreview}</ul>`)
+    }
+    await ElMessageBox.alert(lines.join('<br/>'), '近120交易日数据完整性', {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '关闭',
+    })
+  } catch (error: any) {
+    console.error('checkRecent120Integrity failed:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '完整性检查失败'))
+  } finally {
+    checkingIntegrity.value = false
+  }
+}
+
+async function promptRevalidateTradeDate() {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入交易日，格式 YYYY-MM-DD', '指定日期重验证', {
+      confirmButtonText: '开始验证',
+      cancelButtonText: '取消',
+      inputPattern: /^\d{4}-\d{2}-\d{2}$/,
+      inputErrorMessage: '日期格式必须是 YYYY-MM-DD',
+    })
+    await revalidateTradeDate(value)
+  } catch (error: any) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('promptRevalidateTradeDate failed:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '指定日期重验证失败'))
+  }
+}
+
+async function revalidateTradeDate(tradeDate: string) {
+  revalidatingDate.value = true
+  try {
+    const res = await apiTasks.revalidateTradeDate(tradeDate)
+    const summaryLines = Object.entries(res.summary || {})
+      .map(([key, value]) => `<li>${key}: ${value ?? '-'}</li>`)
+      .join('')
+    const issueLines = (res.issues || []).map((item) => `<li>${item}</li>`).join('')
+    const sampleLines = (res.sample_recomputed_current_hot || [])
+      .slice(0, 8)
+      .map((item) => `<li>${item.code}: B1=${item.b1_passed ?? '-'} / 信号=${item.signal_type || '-'} / 分=${item.score ?? '-'}</li>`)
+      .join('')
+    const mismatchLines = (res.current_hot_mismatches || [])
+      .slice(0, 8)
+      .map((item) => `<li>${item.code}: ${(item.fields || []).join('、')}</li>`)
+      .join('')
+    const lines = [
+      `<strong>交易日：</strong>${res.trade_date}`,
+      `<strong>结果：</strong>${res.success ? '通过' : '存在差异'}`,
+      `<strong>说明：</strong>${res.message || '-'}`,
+      summaryLines ? `<strong>统计：</strong><ul>${summaryLines}</ul>` : '',
+      issueLines ? `<strong>问题：</strong><ul>${issueLines}</ul>` : '',
+      mismatchLines ? `<strong>持久化差异样例：</strong><ul>${mismatchLines}</ul>` : '',
+      sampleLines ? `<strong>当前热盘样例重算：</strong><ul>${sampleLines}</ul>` : '',
+    ].filter(Boolean)
+    await ElMessageBox.alert(lines.join('<br/>'), '指定日期重验证结果', {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '关闭',
+    })
+  } finally {
+    revalidatingDate.value = false
   }
 }
 
@@ -2250,7 +2350,7 @@ function goToConfig() {
 }
 
 function isBootstrapTask(task: Task | null | undefined) {
-  return Boolean(task && task.task_type === 'full_update')
+  return Boolean(task && ['full_update', 'recent_120_rebuild'].includes(task.task_type))
 }
 
 function isDailyUpdateTask(task: Task | null | undefined) {
@@ -2325,6 +2425,7 @@ function getTaskTypeLabel(taskType: string | null | undefined): string {
   if (!taskType) return '-'
   const labels: Record<string, string> = {
     full_update: '全量更新',
+    recent_120_rebuild: '近120交易日重建',
     daily_batch_update: '按交易日批量刷新',
     incremental_update: '增量更新',
     single_analysis: '单股分析',
@@ -2366,6 +2467,8 @@ function getStageLabel(stage?: string | null): string {
     score_review: '结果导出',       // 兼容旧名称
     finalize: '输出推荐',
     daily_batch_refresh: '按交易日批量刷新',
+    recent_120_rebuild: '近120交易日重建',
+    diagnosis_cache_prewarm: '预热诊断缓存',
     incremental_update: '增量更新',
     completed: '已完成',
     failed: '执行失败',
@@ -2546,8 +2649,8 @@ function buildWebSocketUrl(path: string) {
 
 <style scoped lang="scss">
 .ops-page {
-  padding: 20px;
-  max-width: 1400px;
+  padding: 16px;
+  max-width: none;
   margin: 0 auto;
 
   .page-header {

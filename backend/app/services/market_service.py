@@ -103,7 +103,7 @@ class MarketService:
     def _normalize_end_date(end_date: Optional[str]) -> str:
         if end_date:
             return end_date.replace("-", "")
-        return datetime.now().strftime("%Y%m%d")
+        return utc_now().strftime("%Y%m%d")
 
     @staticmethod
     def _display_trade_date(compact_trade_date: str) -> str:
@@ -167,7 +167,7 @@ class MarketService:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": INCREMENTAL_CHECKPOINT_VERSION,
-            "updated_at": datetime.now().isoformat(),
+            "updated_at": utc_now().isoformat(),
             "end_date": end_date,
             "raw_dir": str(raw_dir.resolve()),
             "total": len(codes),
@@ -374,8 +374,9 @@ class MarketService:
         """
         try:
             # 获取最近的交易日日历
-            today = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+            now = utc_now()
+            today = now.strftime("%Y%m%d")
+            start_date = (now - timedelta(days=10)).strftime("%Y%m%d")
 
             acquire_tushare_slot("trade_cal")
             df = self.pro.trade_cal(
@@ -426,7 +427,7 @@ class MarketService:
     def update_cache(self, latest_date: str):
         """更新缓存"""
         self._cache["latest_trade_date"] = latest_date
-        self._cache["updated_at"] = datetime.now().isoformat()
+        self._cache["updated_at"] = utc_now().isoformat()
         self._save_cache()
 
     def get_local_latest_date(self) -> Optional[str]:

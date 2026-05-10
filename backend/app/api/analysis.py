@@ -24,10 +24,11 @@ from app.api.rate_limit import single_analysis_rate_limit, history_generation_ra
 from app.api.tasks import _cleanup_stale_active_tasks, _raise_initialization_in_progress
 from app.cache import cache
 from app.database import get_db
-from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, Task
+from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, StockDaily, Task
 from app.services.analysis_service import analysis_service
 from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysisService
 from app.services.current_hot_service import CurrentHotService
+from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
@@ -61,6 +62,15 @@ from app.schemas import (
 router = APIRouter()
 
 ROOT = Path(__file__).parent.parent.parent.parent
+
+
+def _parse_date_or_none(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _safe_json_float(value: Optional[float]) -> Optional[float]:
@@ -100,6 +110,43 @@ def _extract_prefilter_fields(details_json: Optional[dict[str, Any]]) -> tuple[O
     return passed, summary, blocked_by
 
 
+def _extract_tomorrow_star_pass(details_json: Optional[dict[str, Any]]) -> Optional[bool]:
+    if not isinstance(details_json, dict):
+        return None
+
+    direct = details_json.get("tomorrow_star_pass")
+    if isinstance(direct, bool):
+        return direct
+
+    rules = details_json.get("rules")
+    if isinstance(rules, dict) and isinstance(rules.get("tomorrow_star_pass"), bool):
+        return rules["tomorrow_star_pass"]
+
+    details = details_json.get("details")
+    if isinstance(details, dict) and isinstance(details.get("tomorrow_star_pass"), bool):
+        return details["tomorrow_star_pass"]
+
+    return None
+
+
+def _extract_tomorrow_star_pass_from_detail(detail: Optional[DailyB1CheckDetail]) -> Optional[bool]:
+    if detail is None or not isinstance(detail.rules_json, dict):
+        return None
+    value = detail.rules_json.get("tomorrow_star_pass")
+    return value if isinstance(value, bool) else None
+
+
+def _derive_analysis_tomorrow_star_pass(
+    *,
+    prefilter_passed: Optional[bool],
+    verdict: Optional[str],
+    signal_type: Optional[str],
+) -> Optional[bool]:
+    if prefilter_passed is None:
+        return None
+    return bool(prefilter_passed and verdict == "PASS" and signal_type == "trend_start")
+
+
 def _get_latest_history_summary(db: Session, code: str) -> dict | None:
     latest_row = (
         db.query(DailyB1Check, DailyB1CheckDetail)
@@ -127,6 +174,10 @@ def _get_latest_history_summary(db: Session, code: str) -> dict | None:
         "zx_long_pos": item.zx_long_pos,
         "weekly_ma_aligned": item.weekly_ma_aligned,
         "volume_healthy": item.volume_healthy,
+        "active_pool_rank": item.active_pool_rank,
+        "turnover_rate": item.turnover_rate,
+        "volume_ratio": item.volume_ratio,
+        "in_active_pool": detail.rules_json.get("in_active_pool") if detail and isinstance(detail.rules_json, dict) else None,
         "signal_type": score_details.get("signal_type"),
     }
 
@@ -144,7 +195,7 @@ async def get_tomorrow_star_dates(
     user=Depends(require_user),
 ) -> TomorrowStarDatesResponse:
     """获取明日之星历史日期列表"""
-    summary = TomorrowStarWindowService(db).get_window_status(window_size=180)
+    summary = TomorrowStarWindowService(db).get_window_status(window_size=TomorrowStarWindowService.DEFAULT_WINDOW_SIZE)
     history_items = [
         TomorrowStarHistoryItem(
             pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
@@ -155,9 +206,12 @@ async def get_tomorrow_star_dates(
             analysis_count=int(item.get("analysis_count", 0) or 0),
             trend_start_count=int(item.get("trend_start_count", 0) or 0),
             consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
+            tomorrow_star_count=int(item.get("tomorrow_star_count", 0) or 0),
             status=item.get("status") or "missing",
             error_message=item.get("error_message"),
             is_latest=bool(item.get("is_latest")),
+            market_regime_blocked=bool(item.get("market_regime_blocked")),
+            market_regime_info=item.get("market_regime_info"),
         )
         for item in summary.items
     ]
@@ -185,7 +239,7 @@ async def get_tomorrow_star_window_status(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> TomorrowStarWindowStatusResponse:
-    summary = TomorrowStarWindowService(db).get_window_status(window_size=180)
+    summary = TomorrowStarWindowService(db).get_window_status(window_size=TomorrowStarWindowService.DEFAULT_WINDOW_SIZE)
     history_items = [
         TomorrowStarHistoryItem(
             pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
@@ -196,9 +250,12 @@ async def get_tomorrow_star_window_status(
             analysis_count=int(item.get("analysis_count", 0) or 0),
             trend_start_count=int(item.get("trend_start_count", 0) or 0),
             consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
+            tomorrow_star_count=int(item.get("tomorrow_star_count", 0) or 0),
             status=item.get("status") or "missing",
             error_message=item.get("error_message"),
             is_latest=bool(item.get("is_latest")),
+            market_regime_blocked=bool(item.get("market_regime_blocked")),
+            market_regime_info=item.get("market_regime_info"),
         )
         for item in summary.items
     ]
@@ -346,13 +403,33 @@ async def get_candidates(
 ) -> CandidatesResponse:
     """获取候选股票列表（只读数据库持久化结果）"""
     from app.services.candidate_service import CandidateService
+    from app.models import TomorrowStarRun
     import pandas as pd
 
     requested_date = analysis_service._normalize_pick_date(date)
-    cache_key = build_candidates_cache_key(requested_date, limit)
+    cache_key = f"{build_candidates_cache_key(requested_date, limit)}:market-metrics-v3"
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         return CandidatesResponse(**cached_result)
+
+    # 检查是否因市场环境被阻断
+    target_date = _parse_date_or_none(requested_date)
+    if target_date:
+        run = db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == target_date).first()
+        if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+            regime_info = run.meta_json.get("market_regime_info", {})
+            return CandidatesResponse(
+                pick_date=target_date,
+                candidates=[],
+                total=0,
+                status="market_regime_blocked",
+                message=f"市场环境不佳: {regime_info.get('summary', '未知原因')}",
+                market_regime_info={
+                    "passed": regime_info.get("passed", False),
+                    "summary": regime_info.get("summary", ""),
+                    "details": regime_info.get("details", []),
+                },
+            )
 
     try:
         persisted_pick_date, persisted_candidates = CandidateService(db).load_candidates(requested_date, limit=limit)
@@ -375,6 +452,9 @@ async def get_candidates(
                         close_price=c.get("close"),
                         change_pct=c.get("change_pct"),
                         turnover=float(c["turnover_n"]) if c.get("turnover_n") is not None else None,
+                        turnover_rate=c.get("turnover_rate"),
+                        volume_ratio=c.get("volume_ratio"),
+                        active_pool_rank=c.get("active_pool_rank"),
                         b1_passed=c.get("b1_passed"),
                         kdj_j=c.get("kdj_j"),
                         consecutive_days=int(c.get("consecutive_days") or 1),
@@ -391,6 +471,30 @@ async def get_candidates(
             cache.set(cache_key, response.model_dump(mode="json"), ttl=180)
             return response
 
+        # 没有持久化候选数据，检查是否因市场环境被阻断
+        check_date = _parse_date_or_none(requested_date)
+
+        market_regime_info = None
+        if check_date:
+            run = db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == check_date).first()
+            if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+                regime_info = run.meta_json.get("market_regime_info", {})
+                market_regime_info = {
+                    "passed": regime_info.get("passed", False),
+                    "summary": regime_info.get("summary", ""),
+                    "details": regime_info.get("details", []),
+                }
+
+        if market_regime_info:
+            return CandidatesResponse(
+                pick_date=check_date,
+                candidates=[],
+                total=0,
+                status="market_regime_blocked",
+                message=f"市场环境不佳: {market_regime_info['summary']}",
+                market_regime_info=market_regime_info,
+            )
+
         running_task = (
             db.query(Task)
             .filter(
@@ -401,7 +505,7 @@ async def get_candidates(
             .first()
         )
         response = CandidatesResponse(
-            pick_date=pd.Timestamp(requested_date).date() if requested_date else None,
+            pick_date=check_date,
             candidates=[],
             total=0,
             status="not_ready",
@@ -424,6 +528,8 @@ async def get_analysis_results(
     user=Depends(require_user),
 ) -> AnalysisResultResponse:
     """获取指定日期的分析结果"""
+    from app.models import TomorrowStarRun
+
     normalized_date = analysis_service._normalize_pick_date(date)
     target_date = None
     if normalized_date:
@@ -449,9 +555,50 @@ async def get_analysis_results(
             min_score_threshold=4.0,
         )
 
+    # 检查是否因市场环境被阻断
+    run = db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == target_date).first()
+    if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+        regime_info = run.meta_json.get("market_regime_info", {})
+        return AnalysisResultResponse(
+            pick_date=target_date,
+            results=[],
+            total=0,
+            min_score_threshold=4.0,
+            status="market_regime_blocked",
+            message=f"市场环境不佳: {regime_info.get('summary', '未知原因')}",
+            market_regime_info={
+                "passed": regime_info.get("passed", False),
+                "summary": regime_info.get("summary", ""),
+                "details": regime_info.get("details", []),
+            },
+        )
+
     rows = (
-        db.query(AnalysisResult, Stock.name)
+        db.query(
+            AnalysisResult,
+            Stock.name,
+            DailyB1Check.turnover_rate.label("b1_turnover_rate"),
+            DailyB1Check.volume_ratio.label("b1_volume_ratio"),
+            StockDaily.turnover_rate.label("daily_turnover_rate"),
+            StockDaily.volume_ratio.label("daily_volume_ratio"),
+            DailyB1CheckDetail,
+        )
         .outerjoin(Stock, Stock.code == AnalysisResult.code)
+        .outerjoin(
+            DailyB1Check,
+            (DailyB1Check.code == AnalysisResult.code)
+            & (DailyB1Check.check_date == AnalysisResult.pick_date),
+        )
+        .outerjoin(
+            DailyB1CheckDetail,
+            (DailyB1CheckDetail.code == AnalysisResult.code)
+            & (DailyB1CheckDetail.check_date == AnalysisResult.pick_date),
+        )
+        .outerjoin(
+            StockDaily,
+            (StockDaily.code == AnalysisResult.code)
+            & (StockDaily.trade_date == AnalysisResult.pick_date),
+        )
         .filter(AnalysisResult.pick_date == target_date)
         .order_by(
             AnalysisResult.total_score.desc().nullslast(),
@@ -461,8 +608,19 @@ async def get_analysis_results(
     )
 
     items = []
-    for row, stock_name in rows:
+    for row, stock_name, b1_turnover_rate, b1_volume_ratio, daily_turnover_rate, daily_volume_ratio, detail in rows:
         prefilter_passed, prefilter_summary, prefilter_blocked_by = _extract_prefilter_fields(row.details_json)
+        details_turnover_rate = row.details_json.get("turnover_rate") if isinstance(row.details_json, dict) else None
+        details_volume_ratio = row.details_json.get("volume_ratio") if isinstance(row.details_json, dict) else None
+        tomorrow_star_pass = _extract_tomorrow_star_pass(row.details_json)
+        if tomorrow_star_pass is None:
+            tomorrow_star_pass = _extract_tomorrow_star_pass_from_detail(detail)
+        if tomorrow_star_pass is None:
+            tomorrow_star_pass = _derive_analysis_tomorrow_star_pass(
+                prefilter_passed=prefilter_passed,
+                verdict=row.verdict,
+                signal_type=row.signal_type,
+            )
         items.append(
             AnalysisItem(
                 id=row.id,
@@ -474,6 +632,17 @@ async def get_analysis_results(
                 total_score=_safe_json_float(row.total_score),
                 signal_type=row.signal_type,
                 comment=row.comment,
+                turnover_rate=(
+                    _safe_json_float(details_turnover_rate)
+                    if details_turnover_rate is not None
+                    else (_safe_json_float(b1_turnover_rate) or _safe_json_float(daily_turnover_rate))
+                ),
+                volume_ratio=(
+                    _safe_json_float(details_volume_ratio)
+                    if details_volume_ratio is not None
+                    else (_safe_json_float(b1_volume_ratio) or _safe_json_float(daily_volume_ratio))
+                ),
+                tomorrow_star_pass=tomorrow_star_pass,
                 prefilter_passed=prefilter_passed,
                 prefilter_summary=prefilter_summary,
                 prefilter_blocked_by=prefilter_blocked_by,
@@ -500,7 +669,7 @@ async def get_current_hot_dates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotDatesResponse:
-    payload = CurrentHotService(db).get_dates(window_size=180)
+    payload = CurrentHotService(db).get_dates(window_size=CurrentHotService.DEFAULT_WINDOW_SIZE)
     history_items = [
         CurrentHotHistoryItem(
             pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
@@ -508,6 +677,7 @@ async def get_current_hot_dates(
             candidate_count=int(item.get("candidate_count", 0) or 0),
             analysis_count=int(item.get("analysis_count", 0) or 0),
             trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            b1_pass_count=int(item.get("b1_pass_count", 0) or 0),
             consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
             pass_count=int(item.get("pass_count", 0) or 0),
             status=item.get("status") or "missing",
@@ -545,8 +715,14 @@ async def get_current_hot_candidates(
             close_price=item.get("close_price"),
             change_pct=item.get("change_pct"),
             turnover=item.get("turnover"),
+            turnover_rate=item.get("turnover_rate"),
+            volume_ratio=item.get("volume_ratio"),
             b1_passed=item.get("b1_passed"),
             kdj_j=item.get("kdj_j"),
+            verdict=item.get("verdict"),
+            total_score=item.get("total_score"),
+            signal_type=item.get("signal_type"),
+            comment=item.get("comment"),
             consecutive_days=int(item.get("consecutive_days") or 1),
         )
         for item in payload.get("candidates", [])
@@ -580,6 +756,8 @@ async def get_current_hot_results(
             total_score=item.get("total_score"),
             signal_type=item.get("signal_type"),
             comment=item.get("comment"),
+            turnover_rate=item.get("turnover_rate"),
+            volume_ratio=item.get("volume_ratio"),
         )
         for item in payload.get("results", [])
     ]
@@ -683,95 +861,95 @@ async def generate_intraday_analysis(
 @router.get("/diagnosis/{code}/history", response_model=DiagnosisHistoryResponse)
 async def get_diagnosis_history(
     code: str,
-    days: int = 180,
+    days: int = analysis_service.HISTORY_WINDOW_DAYS,
     page: int = 1,
     page_size: int = 10,
     refresh: bool = Query(default=False, description="是否同步补齐当前页历史数据"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> DiagnosisHistoryResponse:
-    """获取单股诊断历史（只读模式）
-
-    只返回已生成的历史数据，不触发后台生成任务。
-    如果历史数据不存在，返回 data_ready=False 状态。
-    """
+    """获取单股诊断历史，优先读取 Redis 缓存，缺失时回源并补齐缓存。"""
     code = code.zfill(6)
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), days, 50))
-    if refresh:
-        refresh_result = analysis_service.ensure_history_page(
+    days = max(1, min(int(days), analysis_service.HISTORY_WINDOW_DAYS))
+
+    try:
+        payload = diagnosis_history_cache_service.get_page(
             code,
             days=days,
             page=page,
             page_size=page_size,
-            force=True,
+            force=refresh,
+            generate_if_missing=True,
         )
-        if not refresh_result.get("success"):
-            raise HTTPException(status_code=500, detail=refresh_result.get("error", "刷新历史数据失败"))
-    history_result = analysis_service.get_stock_history_checks(code, days, page, page_size)
-    if isinstance(history_result, tuple) and len(history_result) == 2:
-        history, total = history_result
-    else:
-        history = history_result or []
-        total = len(history)
-    try:
-        stock = TushareService().sync_stock_to_db(db, code)
-    except Exception:
-        stock = db.query(Stock).filter(Stock.code == code).first()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取诊断历史失败: {exc}") from exc
 
     return DiagnosisHistoryResponse(
         code=code,
-        name=stock.name if stock else None,
-        history=[B1CheckItem.model_validate(h) for h in history],
-        total=total,
+        name=payload.get("name"),
+        history=[B1CheckItem.model_validate(h) for h in payload.get("history", [])],
+        total=int(payload.get("total") or 0),
         page=page,
         page_size=page_size,
-        data_ready=total > 0,
-        message="暂无历史数据，请先执行历史数据生成任务" if total == 0 else None,
+        trend_start_dates=payload.get("trend_start_dates") or [],
+        tomorrow_star_dates=payload.get("tomorrow_star_dates") or [],
+        data_ready=int(payload.get("generated_count") or len(payload.get("history", []))) > 0,
+        message="暂无历史数据，请先执行历史数据生成任务"
+        if int(payload.get("generated_count") or len(payload.get("history", []))) == 0
+        else None,
     )
 
 
 @router.post("/diagnosis/{code}/generate-history")
 async def generate_diagnosis_history(
     code: str,
-    days: int = Query(default=180, description="生成最近N个交易日的历史数据"),
+    days: int = Query(default=analysis_service.HISTORY_WINDOW_DAYS, description="生成最近N个交易日的历史数据"),
     page: int = Query(default=1, description="当前页码"),
     page_size: int = Query(default=10, description="当前页大小"),
     force: bool = Query(default=False, description="是否强制刷新当前页"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
-    """同步刷新当前页单股诊断历史数据。"""
+    """同步刷新单股诊断历史数据，并更新 Redis 缓存。"""
     code = code.zfill(6)
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), days, 50))
-    result = analysis_service.ensure_history_page(
+    result = analysis_service.generate_stock_history_checks(
+        code,
+        days=days,
+        clean=True,
+    ) if force else analysis_service.ensure_history_page(
         code,
         days=days,
         page=page,
         page_size=page_size,
-        force=force,
+        force=False,
     )
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "刷新历史数据失败"))
+    diagnosis_history_cache_service.invalidate(code)
+    cached_payload = diagnosis_history_cache_service.ensure_cached(code, days=days, force=True, generate_if_missing=False)
 
     return {
         "code": code,
-        "status": "updated" if result.get("updated") else "ready",
+        "status": "updated" if result.get("updated") or result.get("generated_count") else "ready",
         "page": page,
         "page_size": page_size,
         "generated_count": result.get("generated_count", 0),
         "generated_dates": result.get("generated_dates", []),
         "latest_trade_date": result.get("latest_trade_date"),
         "latest_history_date": result.get("latest_history_date"),
-        "message": "当前页历史数据已刷新" if result.get("updated") else "当前页历史数据已是最新",
+        "total": cached_payload.get("total", 0),
+        "message": "诊断历史数据已刷新" if result.get("updated") or result.get("generated_count") else "诊断历史数据已是最新",
     }
 
 
 @router.get("/diagnosis/{code}/history-status")
 async def get_history_status(
     code: str,
-    days: int = 180,
+    days: int = analysis_service.HISTORY_WINDOW_DAYS,
     page: int = 1,
     page_size: int = 10,
     db: Session = Depends(get_db),
@@ -974,6 +1152,10 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
             "zx_long_pos": latest_history.get("zx_long_pos"),
             "weekly_ma_aligned": latest_history.get("weekly_ma_aligned"),
             "volume_healthy": latest_history.get("volume_healthy"),
+            "active_pool_rank": latest_history.get("active_pool_rank"),
+            "turnover_rate": latest_history.get("turnover_rate"),
+            "volume_ratio": latest_history.get("volume_ratio"),
+            "in_active_pool": latest_history.get("in_active_pool"),
             "signal_type": latest_history.get("signal_type"),
         }
 
@@ -991,6 +1173,10 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
             "zx_long_pos": result_json.get("zx_long_pos"),
             "weekly_ma_aligned": result_json.get("weekly_ma_aligned"),
             "volume_healthy": result_json.get("volume_healthy"),
+            "active_pool_rank": result_json.get("active_pool_rank"),
+            "turnover_rate": result_json.get("turnover_rate"),
+            "volume_ratio": result_json.get("volume_ratio"),
+            "in_active_pool": result_json.get("in_active_pool"),
             "scores": result_json.get("scores"),
             "trend_reasoning": result_json.get("trend_reasoning"),
             "position_reasoning": result_json.get("position_reasoning"),

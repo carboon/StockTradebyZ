@@ -6,6 +6,7 @@ Analysis Service
 """
 import os
 import sys
+import logging
 from datetime import date as date_class, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -25,19 +26,22 @@ from app.services.kline_service import get_daily_data
 from app.database import SessionLocal
 from app.models import AnalysisResult, DailyB1Check, DailyB1CheckDetail, StockDaily
 
+logger = logging.getLogger(__name__)
+
 
 class AnalysisService:
     """股票分析服务"""
 
     # 策略版本，用于缓存失效
     STRATEGY_VERSION = analysis_cache.STRATEGY_VERSION
-    HISTORY_WINDOW_DAYS = 180
+    HISTORY_WINDOW_DAYS = 120
     DETAIL_VERSION = "v1"
 
     def __init__(self):
         self._selector = None
         self._reviewer = None
         self._history_active_pool_cache: dict[tuple[str, str, int, int], dict[pd.Timestamp, set[str]]] = {}
+        self._history_active_pool_rank_cache: dict[tuple[str, str, int, int, tuple[str, ...]], dict[str, dict[pd.Timestamp, int]]] = {}
 
     def load_stock_data(self, code: str, days: int = 365) -> Optional[pd.DataFrame]:
         """加载股票数据。
@@ -52,8 +56,12 @@ class AnalysisService:
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=days * 2)  # 多取一些，过滤交易日
 
-        with SessionLocal() as db:
-            df = get_daily_data(db, code, start_date, end_date)
+        try:
+            with SessionLocal() as db:
+                df = get_daily_data(db, code, start_date, end_date)
+        except Exception as exc:
+            logger.warning("Database stock data load failed, falling back to CSV: %s", exc)
+            df = None
 
         if df is not None and not df.empty:
             # 标准化列名
@@ -89,15 +97,19 @@ class AnalysisService:
         """单股诊断前确保本地至少具备可评分的历史窗口。"""
         min_days = self._get_min_quant_review_bars()
         window_days = max(int(days), min_days)
-        current_frame = self.load_stock_data(code, days=window_days)
+        try:
+            current_frame = self.load_stock_data(code, days=window_days)
+        except Exception as exc:
+            logger.warning("Analysis history window check failed while loading local data: %s", exc)
+            current_frame = None
         if current_frame is not None and len(current_frame) >= min_days:
             return False
 
         token = os.environ.get("TUSHARE_TOKEN") or settings.tushare_token
-        if not token:
+        if not isinstance(token, str) or not token.strip():
             return False
 
-        daily_service = DailyDataService(token=token)
+        daily_service = DailyDataService(token=token.strip())
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=window_days * 2)
         fetched = daily_service.fetch_daily_data(
@@ -208,6 +220,9 @@ class AnalysisService:
         """兼容旧版历史文件，补齐新增字段。"""
         normalized = dict(record)
         normalized.setdefault("in_active_pool", None)
+        normalized.setdefault("active_pool_rank", None)
+        normalized.setdefault("turnover_rate", None)
+        normalized.setdefault("volume_ratio", None)
         normalized.setdefault("prefilter_passed", None)
         normalized.setdefault("tomorrow_star_pass", None)
 
@@ -259,6 +274,16 @@ class AnalysisService:
             return bool(recent_vol >= ma_vol * 0.5)
         return None
 
+    @staticmethod
+    def _extract_market_metric(row: pd.Series, key: str) -> Optional[float]:
+        value = row.get(key)
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def _build_active_pool_sets(
         self,
         *,
@@ -283,6 +308,9 @@ class AnalysisService:
         pipeline_dir = ROOT / "pipeline"
         if str(pipeline_dir) not in sys.path:
             sys.path.insert(0, str(pipeline_dir))
+        agent_dir = ROOT / "agent"
+        if str(agent_dir) not in sys.path:
+            sys.path.insert(0, str(agent_dir))
 
         from pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
         from select_stock import load_raw_data
@@ -305,6 +333,128 @@ class AnalysisService:
         }
         self._history_active_pool_cache[cache_key] = pool_sets
         return pool_sets
+
+    def _build_active_pool_rankings(
+        self,
+        *,
+        start_ts: pd.Timestamp,
+        end_ts: pd.Timestamp,
+        preselect_cfg: dict[str, Any],
+        target_codes: set[str],
+    ) -> dict[str, dict[pd.Timestamp, int]]:
+        """构建目标股票在各交易日的全市场活跃度排名。"""
+        normalized_codes = tuple(sorted({str(code or "").zfill(6) for code in target_codes if str(code or "").strip()}))
+        if not normalized_codes:
+            return {}
+
+        global_cfg = preselect_cfg.get("global", {})
+        top_m = int(global_cfg.get("top_m", 2000))
+        n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
+        cache_key = (
+            start_ts.strftime("%Y-%m-%d"),
+            end_ts.strftime("%Y-%m-%d"),
+            top_m,
+            n_turnover_days,
+            normalized_codes,
+        )
+        cached = self._history_active_pool_rank_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        requested_codes = set(normalized_codes)
+        for existing_key, cached_rankings in self._history_active_pool_rank_cache.items():
+            if existing_key[:4] != cache_key[:4]:
+                continue
+            existing_codes = set(existing_key[4])
+            if not requested_codes.issubset(existing_codes):
+                continue
+            subset = {
+                code: cached_rankings.get(code, {})
+                for code in normalized_codes
+            }
+            self._history_active_pool_rank_cache[cache_key] = subset
+            return subset
+
+        pipeline_dir = ROOT / "pipeline"
+        if str(pipeline_dir) not in sys.path:
+            sys.path.insert(0, str(pipeline_dir))
+        agent_dir = ROOT / "agent"
+        if str(agent_dir) not in sys.path:
+            sys.path.insert(0, str(agent_dir))
+
+        from pipeline_core import MarketDataPreparer
+        from select_stock import load_raw_data
+
+        raw_data = load_raw_data(str(ROOT / settings.raw_data_dir), end_date=end_ts.strftime("%Y-%m-%d"))
+        preparer = MarketDataPreparer(
+            start_date=start_ts,
+            end_date=end_ts,
+            warmup_bars=n_turnover_days,
+            n_turnover_days=n_turnover_days,
+            selector=None,
+            n_jobs=4,
+        )
+        prepared = preparer.prepare_base_only(raw_data)
+
+        turnover_by_date: dict[pd.Timestamp, list[tuple[float, str]]] = {}
+        for code, df in prepared.items():
+            normalized_code = str(code or "").zfill(6)
+            for dt, val in df["turnover_n"].items():
+                if start_ts <= dt <= end_ts:
+                    turnover_by_date.setdefault(dt, []).append((float(val), normalized_code))
+
+        rankings: dict[str, dict[pd.Timestamp, int]] = {code: {} for code in normalized_codes}
+        target_code_set = set(normalized_codes)
+        for dt, items in turnover_by_date.items():
+            if not items:
+                continue
+            sorted_items = sorted(items, key=lambda item: item[0], reverse=True)
+            remaining = set(target_code_set)
+            for rank, (_, code) in enumerate(sorted_items, start=1):
+                if code in remaining:
+                    rankings[code][dt] = rank
+                    remaining.remove(code)
+                    if not remaining:
+                        break
+
+        self._history_active_pool_rank_cache[cache_key] = rankings
+        return rankings
+
+    def _safe_build_active_pool_sets(
+        self,
+        *,
+        start_ts: pd.Timestamp,
+        end_ts: pd.Timestamp,
+        preselect_cfg: dict[str, Any],
+    ) -> Optional[dict[pd.Timestamp, set[str]]]:
+        try:
+            return self._build_active_pool_sets(
+                start_ts=start_ts,
+                end_ts=end_ts,
+                preselect_cfg=preselect_cfg,
+            )
+        except Exception as exc:
+            logger.warning("Active pool membership calculation failed: %s", exc, exc_info=True)
+            return None
+
+    def _safe_build_active_pool_rankings(
+        self,
+        *,
+        start_ts: pd.Timestamp,
+        end_ts: pd.Timestamp,
+        preselect_cfg: dict[str, Any],
+        target_codes: set[str],
+    ) -> Optional[dict[str, dict[pd.Timestamp, int]]]:
+        try:
+            return self._build_active_pool_rankings(
+                start_ts=start_ts,
+                end_ts=end_ts,
+                preselect_cfg=preselect_cfg,
+                target_codes=target_codes,
+            )
+        except Exception as exc:
+            logger.warning("Active pool ranking calculation failed: %s", exc, exc_info=True)
+            return None
 
     def _normalize_pick_date(self, pick_date: Optional[str]) -> Optional[str]:
         """将日期统一规范为 YYYY-MM-DD。"""
@@ -383,6 +533,7 @@ class AnalysisService:
             },
             "rules_json": {
                 "in_active_pool": record.get("in_active_pool"),
+                "active_pool_rank": record.get("active_pool_rank"),
                 "b1_passed": record.get("b1_passed"),
                 "prefilter_passed": record.get("prefilter_passed"),
                 "prefilter_blocked_by": record.get("prefilter_blocked_by"),
@@ -398,6 +549,8 @@ class AnalysisService:
                 "zx_long_pos": record.get("zx_long_pos"),
                 "weekly_ma_aligned": record.get("weekly_ma_aligned"),
                 "volume_healthy": record.get("volume_healthy"),
+                "turnover_rate": record.get("turnover_rate"),
+                "volume_ratio": record.get("volume_ratio"),
             },
         }
 
@@ -412,7 +565,7 @@ class AnalysisService:
             prepared["change_pct"] = prepared["close"].pct_change() * 100
         return prepared
 
-    def get_recent_trade_dates(self, code: str, days: int = 180) -> list[str]:
+    def get_recent_trade_dates(self, code: str, days: int = HISTORY_WINDOW_DAYS) -> list[str]:
         days = max(1, min(int(days), self.HISTORY_WINDOW_DAYS))
         code = code.zfill(6)
 
@@ -444,7 +597,7 @@ class AnalysisService:
         self,
         code: str,
         *,
-        days: int = 180,
+        days: int = HISTORY_WINDOW_DAYS,
         page: int = 1,
         page_size: int = 10,
     ) -> tuple[list[str], int]:
@@ -472,7 +625,7 @@ class AnalysisService:
         self,
         code: str,
         *,
-        days: int = 180,
+        days: int = HISTORY_WINDOW_DAYS,
         page: int = 1,
         page_size: int = 10,
     ) -> dict[str, Any]:
@@ -555,11 +708,17 @@ class AnalysisService:
             pd.Timestamp(item).normalize(): item
             for item in sorted(set(target_dates))
         }
-        active_pool_sets = self._build_active_pool_sets(
+        active_pool_sets = self._safe_build_active_pool_sets(
             start_ts=min(target_ts_map.keys()),
             end_ts=max(target_ts_map.keys()),
             preselect_cfg=preselect_cfg,
         )
+        active_pool_rankings = self._safe_build_active_pool_rankings(
+            start_ts=min(target_ts_map.keys()),
+            end_ts=max(target_ts_map.keys()),
+            preselect_cfg=preselect_cfg,
+            target_codes={code},
+        ) or {}
 
         generated_count = 0
         generated_dates: list[str] = []
@@ -591,7 +750,10 @@ class AnalysisService:
                     kdj_j = float(last_row["J"]) if pd.notna(last_row.get("J")) else None
                     zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
                     weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
-                    in_active_pool = code in active_pool_sets.get(row_ts, set())
+                    active_pool_rank = active_pool_rankings.get(code, {}).get(row_ts)
+                    in_active_pool = None if active_pool_sets is None else code in active_pool_sets.get(row_ts, set())
+                    turnover_rate = self._extract_market_metric(last_row, "turnover_rate")
+                    volume_ratio = self._extract_market_metric(last_row, "volume_ratio")
 
                     prefilter_passed: Optional[bool] = None
                     prefilter_blocked_by: Optional[list[str]] = None
@@ -629,6 +791,9 @@ class AnalysisService:
                         "weekly_ma_aligned": weekly_ma_aligned,
                         "volume_healthy": self._calculate_volume_health(df_prepared),
                         "in_active_pool": in_active_pool,
+                        "active_pool_rank": active_pool_rank,
+                        "turnover_rate": turnover_rate,
+                        "volume_ratio": volume_ratio,
                         "b1_passed": b1_passed,
                         "prefilter_passed": prefilter_passed,
                         "prefilter_blocked_by": prefilter_blocked_by,
@@ -656,6 +821,9 @@ class AnalysisService:
                     existing_check.weekly_ma_aligned = record["weekly_ma_aligned"]
                     existing_check.volume_healthy = record["volume_healthy"]
                     existing_check.b1_passed = record["b1_passed"]
+                    existing_check.active_pool_rank = record["active_pool_rank"]
+                    existing_check.turnover_rate = record["turnover_rate"]
+                    existing_check.volume_ratio = record["volume_ratio"]
                     existing_check.score = record["score"]
                     existing_check.notes = record["notes"]
 
@@ -697,7 +865,7 @@ class AnalysisService:
         self,
         code: str,
         *,
-        days: int = 180,
+        days: int = HISTORY_WINDOW_DAYS,
         page: int = 1,
         page_size: int = 10,
         force: bool = False,
@@ -918,6 +1086,8 @@ class AnalysisService:
             close_price = None
             if "close" in last_row and pd.notna(last_row["close"]):
                 close_price = float(last_row["close"])
+            turnover_rate = self._extract_market_metric(last_row, "turnover_rate")
+            volume_ratio = self._extract_market_metric(last_row, "volume_ratio")
 
             return {
                 "code": code,
@@ -929,6 +1099,8 @@ class AnalysisService:
                 "volume_healthy": volume_healthy,
                 "close_price": close_price,
                 "check_date": check_date,
+                "turnover_rate": turnover_rate,
+                "volume_ratio": volume_ratio,
             }
         except Exception as e:
             import traceback
@@ -998,6 +1170,10 @@ class AnalysisService:
                     "zx_long_pos": cached_result.get("zx_long_pos", b1_result.get("zx_long_pos")),
                     "weekly_ma_aligned": cached_result.get("weekly_ma_aligned", b1_result.get("weekly_ma_aligned")),
                     "volume_healthy": cached_result.get("volume_healthy", b1_result.get("volume_healthy")),
+                    "turnover_rate": cached_result.get("turnover_rate", b1_result.get("turnover_rate")),
+                    "volume_ratio": cached_result.get("volume_ratio", b1_result.get("volume_ratio")),
+                    "active_pool_rank": cached_result.get("active_pool_rank"),
+                    "in_active_pool": cached_result.get("in_active_pool"),
                     "close_price": cached_result.get("close_price", b1_result.get("close_price")),
                     "analysis_date": cached_result.get("analysis_date") or cached_result.get("pick_date") or analysis_date,
                     # 保留原始 total_score 以兼容现有代码
@@ -1043,6 +1219,24 @@ class AnalysisService:
                 "code": code,
                 **b1_result
             }
+            result.setdefault("active_pool_rank", None)
+            result.setdefault("in_active_pool", None)
+
+            analysis_date_text = self._normalize_pick_date(analysis_date) or analysis_date
+            if analysis_date_text:
+                check_ts = pd.Timestamp(analysis_date_text).normalize()
+                preselect_cfg = self._load_preselect_config()
+                active_pool_rankings = self._safe_build_active_pool_rankings(
+                    start_ts=check_ts,
+                    end_ts=check_ts,
+                    preselect_cfg=preselect_cfg,
+                    target_codes={code},
+                )
+                if active_pool_rankings is not None:
+                    active_pool_rank = active_pool_rankings.get(code, {}).get(check_ts)
+                    top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
+                    result["active_pool_rank"] = active_pool_rank
+                    result["in_active_pool"] = active_pool_rank is not None and active_pool_rank <= top_m
 
             # 执行评分
             if reviewer == "quant":
@@ -1086,6 +1280,10 @@ class AnalysisService:
                         "zx_long_pos": result.get("zx_long_pos"),
                         "weekly_ma_aligned": result.get("weekly_ma_aligned"),
                         "volume_healthy": result.get("volume_healthy"),
+                        "turnover_rate": result.get("turnover_rate"),
+                        "volume_ratio": result.get("volume_ratio"),
+                        "active_pool_rank": result.get("active_pool_rank"),
+                        "in_active_pool": result.get("in_active_pool"),
                         "close_price": close_price,
                         "analysis_date": analysis_date,
                         "pick_date": analysis_date,
@@ -1330,7 +1528,7 @@ class AnalysisService:
     def get_stock_history_checks(
         self,
         code: str,
-        days: int = 180,
+        days: int = HISTORY_WINDOW_DAYS,
         page: int = 1,
         page_size: int | None = None,
     ) -> tuple[list, int]:
@@ -1392,6 +1590,9 @@ class AnalysisService:
                 "zx_long_pos": item.zx_long_pos,
                 "weekly_ma_aligned": item.weekly_ma_aligned,
                 "volume_healthy": item.volume_healthy,
+                "active_pool_rank": item.active_pool_rank,
+                "turnover_rate": item.turnover_rate,
+                "volume_ratio": item.volume_ratio,
                 "in_active_pool": rules.get("in_active_pool"),
                 "b1_passed": item.b1_passed,
                 "prefilter_passed": rules.get("prefilter_passed"),
@@ -1407,7 +1608,13 @@ class AnalysisService:
             }))
         return history, total
 
-    def generate_stock_history_checks(self, code: str, days: int = 180, clean: bool = True) -> dict:
+    def generate_stock_history_checks(
+        self,
+        code: str,
+        days: int = HISTORY_WINDOW_DAYS,
+        clean: bool = True,
+        target_dates: Optional[list[str | date_class]] = None,
+    ) -> dict:
         """
         重新刷新并持久化股票历史检查数据
 
@@ -1428,10 +1635,30 @@ class AnalysisService:
         if prepared_df.empty:
             return {"success": False, "error": "数据不存在"}
 
-        recent_dates = [
-            pd.Timestamp(ts).date()
-            for ts in prepared_df["date"].tail(days).tolist()
-        ]
+        if target_dates:
+            normalized_target_dates: list[date_class] = []
+            for item in target_dates:
+                try:
+                    normalized_target_dates.append(
+                        item if isinstance(item, date_class) else date_class.fromisoformat(str(item))
+                    )
+                except ValueError:
+                    continue
+            available_dates = {
+                pd.Timestamp(ts).date()
+                for ts in prepared_df["date"].tolist()
+            }
+            recent_dates = [
+                item
+                for item in sorted(set(normalized_target_dates))
+                if item in available_dates
+            ]
+            days = len(recent_dates) or days
+        else:
+            recent_dates = [
+                pd.Timestamp(ts).date()
+                for ts in prepared_df["date"].tail(days).tolist()
+            ]
         with SessionLocal() as db:
             if clean:
                 db.query(DailyB1CheckDetail).filter(DailyB1CheckDetail.code == code).delete()
@@ -1509,11 +1736,17 @@ class AnalysisService:
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config)
         preselect_cfg = self._load_preselect_config()
-        active_pool_sets = self._build_active_pool_sets(
+        active_pool_sets = self._safe_build_active_pool_sets(
             start_ts=target_ts.normalize(),
             end_ts=target_ts.normalize(),
             preselect_cfg=preselect_cfg,
         )
+        active_pool_rankings = self._safe_build_active_pool_rankings(
+            start_ts=target_ts.normalize(),
+            end_ts=target_ts.normalize(),
+            preselect_cfg=preselect_cfg,
+            target_codes={code},
+        ) or {}
 
         df_prepared = selector.prepare_df(df_before)
         last_row = df_prepared.iloc[-1]
@@ -1521,7 +1754,8 @@ class AnalysisService:
         prefilter_result = prefilter.evaluate(code=code, pick_date=check_date_obj.isoformat(), price_df=df_before)
         prefilter_passed = bool(prefilter_result.get("passed", True))
         prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
-        in_active_pool = code in active_pool_sets.get(target_ts.normalize(), set())
+        active_pool_rank = active_pool_rankings.get(code, {}).get(target_ts.normalize())
+        in_active_pool = None if active_pool_sets is None else code in active_pool_sets.get(target_ts.normalize(), set())
         b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
         record = {
             "check_date": check_date_obj.isoformat(),
@@ -1533,6 +1767,9 @@ class AnalysisService:
             "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
             "volume_healthy": self._calculate_volume_health(df_prepared),
             "in_active_pool": in_active_pool,
+            "active_pool_rank": active_pool_rank,
+            "turnover_rate": self._extract_market_metric(last_row, "turnover_rate"),
+            "volume_ratio": self._extract_market_metric(last_row, "volume_ratio"),
             "b1_passed": b1_passed,
             "prefilter_passed": prefilter_passed,
             "prefilter_blocked_by": prefilter_blocked_by,
@@ -1549,6 +1786,31 @@ class AnalysisService:
         }
         payload = self._build_history_detail_payload(record=record, score_result=score_result)
         with SessionLocal() as db:
+            check = (
+                db.query(DailyB1Check)
+                .filter(
+                    DailyB1Check.code == code,
+                    DailyB1Check.check_date == check_date_obj,
+                )
+                .first()
+            )
+            if check is None:
+                check = DailyB1Check(code=code, check_date=check_date_obj)
+                db.add(check)
+            check.close_price = record["close_price"]
+            check.change_pct = record["change_pct"]
+            check.kdj_j = record["kdj_j"]
+            check.kdj_low_rank = record["kdj_low_rank"]
+            check.zx_long_pos = record["zx_long_pos"]
+            check.weekly_ma_aligned = record["weekly_ma_aligned"]
+            check.volume_healthy = record["volume_healthy"]
+            check.b1_passed = record["b1_passed"]
+            check.active_pool_rank = record["active_pool_rank"]
+            check.turnover_rate = record["turnover_rate"]
+            check.volume_ratio = record["volume_ratio"]
+            check.score = record["score"]
+            check.notes = payload["rules_json"].get("fail_reason")
+
             detail = (
                 db.query(DailyB1CheckDetail)
                 .filter(

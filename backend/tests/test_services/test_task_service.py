@@ -1135,14 +1135,14 @@ async def test_run_full_update_syncs_history_windows(task_service):
 
     def fake_star_window(window_size: int, reviewer: str, source: str) -> dict:
         execution_order.append("tomorrow_star")
-        assert window_size == 180
+        assert window_size == 120
         assert reviewer == "quant"
         assert source == "full_update"
         return tomorrow_star_payload
 
     def fake_current_hot_window(window_size: int, reviewer: str) -> dict:
         execution_order.append("current_hot")
-        assert window_size == 180
+        assert window_size == 120
         assert reviewer == "quant"
         return current_hot_payload
 
@@ -1186,8 +1186,8 @@ async def test_run_full_update_syncs_history_windows(task_service):
     task_service.db.refresh(task)
     task_service.running_tasks.pop(task.id, None)
 
-    mock_star_window.assert_called_once_with(180, "quant", "full_update")
-    mock_current_hot_window.assert_called_once_with(180, "quant")
+    mock_star_window.assert_called_once_with(120, "quant", "full_update")
+    mock_current_hot_window.assert_called_once_with(120, "quant")
     mock_invalidate.assert_called_once()
     assert execution_order == ["tomorrow_star", "current_hot"]
     assert task.task_stage == "history_window_hot"

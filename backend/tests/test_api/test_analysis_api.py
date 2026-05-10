@@ -360,7 +360,7 @@ def test_get_diagnosis_history_empty(test_client: TestClient) -> None:
         assert data["code"] == "600000"  # 代码自动补零到6位
         assert data["data_ready"] is False  # 只读模式：标记数据未就绪
         assert "message" in data  # 应该有提示消息
-        mock_service.get_stock_history_checks.assert_called_once_with("600000", 180, 1, 10)
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 120, 1, 10)
 
 
 @pytest.mark.api
@@ -485,7 +485,7 @@ def test_get_diagnosis_history_padded_code(test_client: TestClient) -> None:
         assert response.status_code == 200
         data = response.json()
         assert data["code"] == "000001"  # 自动补零到6位
-        mock_service.get_stock_history_checks.assert_called_once_with("000001", 180, 1, 10)
+        mock_service.get_stock_history_checks.assert_called_once_with("000001", 120, 1, 10)
 
 
 @pytest.mark.api
@@ -518,7 +518,7 @@ def test_get_diagnosis_history_refreshes_current_page_when_requested(test_client
                 "close_price": 10.8,
                 "b1_passed": True,
             }
-        ], 180)
+        ], 120)
 
         response = test_client.get("/api/v1/analysis/diagnosis/600000/history?refresh=true")
 
@@ -527,12 +527,12 @@ def test_get_diagnosis_history_refreshes_current_page_when_requested(test_client
         assert data["history"][0]["check_date"] == "2026-05-06"
         mock_service.ensure_history_page.assert_called_once_with(
             "600000",
-            days=180,
+            days=120,
             page=1,
             page_size=10,
             force=True,
         )
-        mock_service.get_stock_history_checks.assert_called_once_with("600000", 180, 1, 10)
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 120, 1, 10)
 
 
 @pytest.mark.api
@@ -557,7 +557,7 @@ def test_generate_diagnosis_history_refreshes_first_page_synchronously(test_clie
         assert data["latest_trade_date"] == "2026-05-06"
         mock_service.ensure_history_page.assert_called_once_with(
             "600000",
-            days=180,
+            days=120,
             page=1,
             page_size=10,
             force=False,
@@ -568,7 +568,7 @@ def test_generate_diagnosis_history_refreshes_first_page_synchronously(test_clie
 def test_get_history_status_reports_refresh_need(test_client: TestClient) -> None:
     with patch("app.api.analysis.analysis_service") as mock_service:
         mock_service.get_history_refresh_status.return_value = {
-            "total": 180,
+            "total": 120,
             "needs_refresh": True,
             "latest_trade_date": "2026-05-06",
             "latest_history_date": "2026-04-30",
@@ -584,7 +584,7 @@ def test_get_history_status_reports_refresh_need(test_client: TestClient) -> Non
         assert data["generating"] is False
         mock_service.get_history_refresh_status.assert_called_once_with(
             "600000",
-            days=180,
+            days=120,
             page=1,
             page_size=10,
         )
@@ -1188,4 +1188,4 @@ def test_get_diagnosis_history_read_only_no_recalc(test_client: TestClient) -> N
         assert "message" in data
 
         # 确保没有调用任何计算方法（只读模式）
-        mock_service.get_stock_history_checks.assert_called_once_with("600000", 180, 1, 10)
+        mock_service.get_stock_history_checks.assert_called_once_with("600000", 120, 1, 10)

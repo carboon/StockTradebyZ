@@ -77,8 +77,8 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app:/app/backend
-      # PostgreSQL 模式使用 DATABASE_URL (正式主库)
-      - DATABASE_URL=${DATABASE_URL:-postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade}
+      # 容器内必须使用 Docker 服务名 postgres，避免宿主机 DATABASE_URL=localhost 污染 backend。
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-stocktrade}:${POSTGRES_PASSWORD:-stocktrade123}@postgres:5432/${POSTGRES_DB:-stocktrade}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0

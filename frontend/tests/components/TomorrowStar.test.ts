@@ -263,6 +263,46 @@ describe('TomorrowStar.vue', () => {
     expect(apiAnalysis.getResults).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
+  it('shows market regime explanation when tomorrow-star candidates are blocked by market conditions', async () => {
+    vi.mocked(apiAnalysis.getDates).mockResolvedValue({
+      dates: ['2024-01-15'],
+      history: [
+        {
+          date: '2024-01-15',
+          count: 0,
+          pass: 0,
+          status: 'market_regime_blocked',
+          market_regime_blocked: true,
+          market_regime_info: {
+            summary: '中证 500 / 创业板指环境未达标',
+            details: [
+              { name: 'CSI500', close: 7800, ema_fast: 7839.85, ema_slow: 7921.66, return_lookback: -0.0601 },
+              { name: 'CHINEXT', close: 2000, ema_fast: 1980, ema_slow: 1990, return_lookback: -0.0078 },
+            ],
+          },
+        },
+      ],
+    } as any)
+    vi.mocked(apiAnalysis.getCandidates).mockResolvedValue({
+      candidates: [],
+      total: 0,
+    } as any)
+    vi.mocked(apiAnalysis.getResults).mockResolvedValue({
+      results: [],
+      total: 0,
+      min_score_threshold: 4,
+    } as any)
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.showTomorrowStarMarketRegimeNotice).toBe(true)
+    expect(wrapper.text()).toContain('今日未展示候选股票')
+    expect(wrapper.text()).toContain('中证 500 / 创业板指环境未达标')
+    expect(wrapper.text()).toContain('CSI500：收盘点位 7800.00 低于短期均线 7839.85')
+    expect(wrapper.text()).toContain('CHINEXT：短期均线 1980.00 未站上长期均线 1990.00')
+  })
+
   it('sorts top analysis results by trend_start first, then score', async () => {
     const wrapper = mountComponent()
     await flushPromises()

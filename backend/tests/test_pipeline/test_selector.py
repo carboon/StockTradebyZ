@@ -532,6 +532,22 @@ class TestWeeklyMA:
         assert len(bull) == len(df)
         assert bull.dtype == bool
 
+    def test_weekly_bullish_check_matches_truncated_history(self):
+        """向量化周线判断应等同于逐日只看到当日以前的数据。"""
+        df = create_weekly_bullish_data(n=900)
+        full_bull = compute_weekly_ma_bull(
+            df,
+            ma_periods=(5, 10, 20),
+        )
+
+        for idx in [260, 301, 444, len(df) - 3]:
+            truncated = df.iloc[:idx + 1].copy()
+            truncated_bull = compute_weekly_ma_bull(
+                truncated,
+                ma_periods=(5, 10, 20),
+            )
+            assert bool(full_bull.iloc[idx]) == bool(truncated_bull.iloc[-1])
+
     def test_weekly_bullish_filter(self):
         """测试周线多头过滤器"""
         df = create_weekly_bullish_data(n=300)

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Watchlist, Stock, StockAnalysis, StockDaily
 from app.services.analysis_cache import analysis_cache
+from app.time_utils import utc_now
 
 
 def _resolve_analysis_trade_date(result: dict, df) -> date_class:
@@ -489,7 +490,7 @@ class WatchlistAnalysisService:
             analysis.weekly_ma_aligned = analysis_result.get("weekly_ma_aligned")
             analysis.volume_healthy = analysis_result.get("volume_healthy")
             analysis.details_json = analysis_result.get("details")
-            analysis.updated_at = datetime.now()
+            analysis.updated_at = utc_now()
         else:
             # 创建新记录
             analysis = StockAnalysis(

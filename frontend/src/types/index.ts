@@ -30,9 +30,20 @@ export interface Candidate {
   close_price?: number
   change_pct?: number
   turnover?: number
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  active_pool_rank?: number | null
   b1_passed?: boolean
   kdj_j?: number
   consecutive_days?: number
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  total_score?: number
+  signal_type?: string
+  comment?: string
+  tomorrow_star_pass?: boolean | null
+  prefilter_passed?: boolean | null
+  prefilter_summary?: string | null
+  prefilter_blocked_by?: string[] | null
 }
 
 export interface AnalysisResult {
@@ -45,6 +56,9 @@ export interface AnalysisResult {
   total_score?: number
   signal_type?: string
   comment?: string
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  tomorrow_star_pass?: boolean | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
@@ -64,8 +78,14 @@ export interface CurrentHotCandidate {
   close_price?: number
   change_pct?: number
   turnover?: number
+  turnover_rate?: number | null
+  volume_ratio?: number | null
   b1_passed?: boolean | null
   kdj_j?: number
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  total_score?: number | null
+  signal_type?: string | null
+  comment?: string | null
 }
 
 export interface CurrentHotAnalysisResult {
@@ -81,6 +101,8 @@ export interface CurrentHotAnalysisResult {
   total_score?: number
   signal_type?: string
   comment?: string
+  turnover_rate?: number | null
+  volume_ratio?: number | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
@@ -120,6 +142,9 @@ export interface B1Check {
   zx_long_pos?: boolean
   weekly_ma_aligned?: boolean
   volume_healthy?: boolean
+  active_pool_rank?: number | null
+  turnover_rate?: number | null
+  volume_ratio?: number | null
   in_active_pool?: boolean | null
   b1_passed?: boolean
   prefilter_passed?: boolean | null
@@ -267,11 +292,32 @@ export interface DataFreshnessResponse {
 export interface DailyBatchUpdateResponse {
   success: boolean
   message: string
-  trade_date: string
+  trade_date?: string
   task_id?: number
   ws_url?: string
   existing?: boolean
   task?: Task | null
+}
+
+export interface Recent120IntegrityResponse {
+  success: boolean
+  window_size: number
+  date_count: number
+  date_range?: string[]
+  summary?: Record<string, any>
+  issues: Array<{ trade_date: string; issues: string[] }>
+  dates: Array<Record<string, any>>
+  message: string
+}
+
+export interface TradeDateRevalidationResponse {
+  success: boolean
+  trade_date: string
+  summary: Record<string, any>
+  sample_recomputed_current_hot: Array<Record<string, any>>
+  current_hot_mismatches?: Array<Record<string, any>>
+  issues: string[]
+  message: string
 }
 
 // K线数据
@@ -345,11 +391,27 @@ export interface TomorrowStarHistoryItem {
   candidate_count?: number
   analysis_count?: number
   trend_start_count?: number
+  b1_pass_count?: number
   consecutive_candidate_count?: number
+  tomorrow_star_count?: number
   status?: 'pending' | 'running' | 'success' | 'failed' | 'missing' | string
   source?: string
   error_message?: string | null
   is_latest?: boolean
+  market_regime_blocked?: boolean
+  market_regime_info?: {
+    passed?: boolean
+    summary?: string | null
+    details?: Array<string | {
+      ts_code?: string | null
+      name?: string | null
+      passed?: boolean | null
+      close?: number | null
+      ema_fast?: number | null
+      ema_slow?: number | null
+      return_lookback?: number | null
+    }> | null
+  } | null
 }
 
 export interface TomorrowStarWindowStatusItem {
@@ -359,13 +421,29 @@ export interface TomorrowStarWindowStatusItem {
   candidate_count?: number
   analysis_count?: number
   trend_start_count?: number
+  b1_pass_count?: number
   consecutive_candidate_count?: number
+  tomorrow_star_count?: number
   reviewer?: string | null
   source?: string | null
   started_at?: string | null
   finished_at?: string | null
   error_message?: string | null
   is_latest?: boolean
+  market_regime_blocked?: boolean
+  market_regime_info?: {
+    passed?: boolean
+    summary?: string | null
+    details?: Array<string | {
+      ts_code?: string | null
+      name?: string | null
+      passed?: boolean | null
+      close?: number | null
+      ema_fast?: number | null
+      ema_slow?: number | null
+      return_lookback?: number | null
+    }> | null
+  } | null
 }
 
 export interface TomorrowStarWindowStatusResponse {
@@ -477,6 +555,8 @@ export interface DiagnosisHistoryResponse {
   total: number
   page?: number
   page_size?: number
+  trend_start_dates?: string[]
+  tomorrow_star_dates?: string[]
   data_ready?: boolean
   message?: string | null
 }
@@ -499,6 +579,10 @@ export interface DiagnosisAnalysisDetails {
   zx_long_pos?: boolean
   weekly_ma_aligned?: boolean
   volume_healthy?: boolean
+  active_pool_rank?: number | null
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  in_active_pool?: boolean | null
   scores?: Record<string, number>
   trend_reasoning?: string
   position_reasoning?: string

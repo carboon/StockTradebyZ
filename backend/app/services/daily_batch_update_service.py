@@ -216,6 +216,7 @@ class DailyBatchUpdateService:
         trade_date: str,
         source: str = "daily_batch",
         progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+        sync_raw_csv: bool = True,
     ) -> dict[str, Any]:
         trade_day = datetime.fromisoformat(trade_date).date()
         self._emit_progress(
@@ -274,7 +275,8 @@ class DailyBatchUpdateService:
             )
             records = self._frame_to_records(frame)
             snapshot_path, file_size, checksum = self._save_snapshot_file(trade_date, records)
-            self._sync_raw_csv_files(frame)
+            if sync_raw_csv:
+                self._sync_raw_csv_files(frame)
 
             self._emit_progress(
                 progress_callback,
@@ -322,6 +324,7 @@ class DailyBatchUpdateService:
                 "db_record_count": manifest.db_record_count,
                 "db_stock_count": manifest.db_stock_count,
                 "storage_path": manifest.storage_path,
+                "raw_csv_synced": sync_raw_csv,
             }
             self._emit_progress(
                 progress_callback,

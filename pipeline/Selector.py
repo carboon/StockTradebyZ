@@ -213,31 +213,46 @@ def compute_weekly_ma_bull(
 ) -> pd.Series:
     """
     周线均线多头排列标志（MA_short > MA_mid > MA_long），
-    forward-fill 到日线 index，返回 bool Series。
+    返回每个交易日“截至当日”的判断结果。
 
-    周线收盘价 index 为真实交易日，reindex 后 ffill 可正确对齐。
+    当前周使用当日收盘价作为临时周收盘，避免向量化回测只有周末
+    才更新周线信号，导致和单日候选生成口径不一致。
     """
-    weekly_close = compute_weekly_close(df)
-    s, m, l = ma_periods
-    ma_s = weekly_close.rolling(s, min_periods=s).mean()
-    ma_m = weekly_close.rolling(m, min_periods=m).mean()
-    ma_l = weekly_close.rolling(l, min_periods=l).mean()
-    bull = (ma_s > ma_m) & (ma_m > ma_l)
+    if df.empty:
+        return pd.Series([], index=df.index, dtype=bool)
 
-    daily_index = (
-        df.index if isinstance(df.index, pd.DatetimeIndex)
-        else pd.DatetimeIndex(df["date"])
-    )
-    # 转 float（1.0/0.0/NaN）→ reindex → ffill → 填 0 → bool
-    # 避免 bool reindex 后升级为 object dtype 触发 FutureWarning
+    indexed = df.copy()
+    if isinstance(indexed.index, pd.DatetimeIndex):
+        indexed = indexed.sort_index()
+    else:
+        indexed["date"] = pd.to_datetime(indexed["date"])
+        indexed = indexed.sort_values("date").set_index("date", drop=False)
+
+    close = indexed["close"].astype(float)
+    daily_index = pd.DatetimeIndex(close.index)
+    year_week = daily_index.isocalendar().year.astype(str) + "-" + daily_index.isocalendar().week.astype(str).str.zfill(2)
+    week_keys = pd.Index(year_week)
+    first_pos_by_week = ~week_keys.duplicated()
+    week_id = first_pos_by_week.cumsum() - 1
+    prev_week_last_close = close.groupby(week_id).last().shift(1)
+    week_frame = pd.DataFrame({"week_id": week_id, "close": close.to_numpy(dtype=float)}, index=daily_index)
+
+    s, m, l = ma_periods
+    for period, name in ((s, "ma_s"), (m, "ma_m"), (l, "ma_l")):
+        previous_count = max(period - 1, 0)
+        previous_sum = prev_week_last_close.rolling(previous_count, min_periods=previous_count).sum()
+        week_frame[name] = (
+            week_frame["week_id"].map(previous_sum).astype(float) + week_frame["close"]
+        ) / float(period)
+
     bull_daily = (
-        bull.astype(float)
-        .reindex(daily_index)
-        .ffill()
-        .fillna(0.0)
-        .astype(bool)
+        week_frame["ma_s"].notna()
+        & week_frame["ma_m"].notna()
+        & week_frame["ma_l"].notna()
+        & (week_frame["ma_s"] > week_frame["ma_m"])
+        & (week_frame["ma_m"] > week_frame["ma_l"])
     )
-    return bull_daily
+    return pd.Series(bull_daily.to_numpy(dtype=bool), index=df.index, name="wma_bull")
 
 
 def compute_brick_chart(

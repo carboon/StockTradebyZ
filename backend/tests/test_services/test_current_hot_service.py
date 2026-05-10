@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from app.models import CurrentHotAnalysisResult, CurrentHotCandidate, CurrentHotRun, Stock, StockDaily
+from app.models import Config, CurrentHotAnalysisResult, CurrentHotCandidate, CurrentHotRun, Stock, StockDaily
 from app.services.current_hot_service import CurrentHotService
 
 
@@ -61,6 +61,29 @@ def test_get_pool_entries_merges_duplicate_sector_memberships(test_db) -> None:
     assert entries[0].code == "603019"
     assert entries[0].sector_names == ["AI服务器", "液冷"]
     assert entries[0].board_group == "other"
+
+
+@pytest.mark.service
+def test_get_pool_entries_falls_back_when_stored_config_is_empty(test_db) -> None:
+    test_db.add(Config(key=CurrentHotService.CONFIG_KEY, value="{}", description="empty current hot pool"))
+    test_db.commit()
+
+    entries = CurrentHotService(test_db).get_pool_entries()
+
+    assert len(entries) > 0
+    assert any(entry.code == "300308" and entry.name == "中际旭创" for entry in entries)
+
+
+@pytest.mark.service
+def test_get_pool_entries_accepts_flat_code_name_config(test_db) -> None:
+    test_db.add(Config(key=CurrentHotService.CONFIG_KEY, value='{"600000": "浦发银行"}', description="flat pool"))
+    test_db.commit()
+
+    entries = CurrentHotService(test_db).get_pool_entries()
+
+    assert len(entries) == 1
+    assert entries[0].code == "600000"
+    assert entries[0].name == "浦发银行"
 
 
 @pytest.mark.service
@@ -212,6 +235,48 @@ def test_generate_current_hot_backfills_history_before_analysis(test_db) -> None
 
 
 @pytest.mark.service
+def test_generate_current_hot_can_skip_remote_history_backfill(test_db) -> None:
+    target_date = date(2026, 5, 8)
+    test_db.add(Stock(code="688795", name="摩尔线程-U", market="SH", industry="半导体"))
+    test_db.add(
+        StockDaily(
+            code="688795",
+            trade_date=target_date,
+            open=727.96,
+            close=703.0,
+            high=740.0,
+            low=700.0,
+            volume=100000,
+            turnover_rate=13.1383,
+            volume_ratio=0.78,
+        )
+    )
+    test_db.commit()
+
+    service = CurrentHotService(test_db)
+    with patch.object(
+        CurrentHotService,
+        "_load_pool_config",
+        return_value={"半导体": {"摩尔线程-U": "688795"}},
+    ), patch(
+        "app.services.current_hot_service.DailyDataService.fetch_daily_data",
+    ) as mock_fetch:
+        payload = service.generate_for_trade_date(target_date, backfill_missing_history=False)
+
+    assert payload["status"] == "ok"
+    assert mock_fetch.call_count == 0
+    candidate = test_db.query(CurrentHotCandidate).filter(CurrentHotCandidate.pick_date == target_date).one()
+    analysis = test_db.query(CurrentHotAnalysisResult).filter(CurrentHotAnalysisResult.pick_date == target_date).one()
+    assert candidate.code == "688795"
+    assert candidate.turnover_rate == 13.1383
+    assert candidate.volume_ratio == 0.78
+    assert candidate.b1_passed is False
+    assert analysis.comment == "历史数据不足"
+    assert analysis.turnover_rate == 13.1383
+    assert analysis.volume_ratio == 0.78
+
+
+@pytest.mark.service
 def test_ensure_window_rebuilds_missing_trade_dates(test_db) -> None:
     trade_dates = [date(2026, 5, 7), date(2026, 5, 8)]
     test_db.add(Stock(code="600000", name="浦发银行", market="SH"))
@@ -232,7 +297,13 @@ def test_ensure_window_rebuilds_missing_trade_dates(test_db) -> None:
     service = CurrentHotService(test_db)
     generated_dates: list[date] = []
 
-    def fake_generate_for_trade_date(target_trade_date: date, reviewer: str = "quant") -> dict:
+    def fake_generate_for_trade_date(
+        target_trade_date: date,
+        reviewer: str = "quant",
+        *,
+        backfill_missing_history: bool = True,
+    ) -> dict:
+        del backfill_missing_history
         generated_dates.append(target_trade_date)
         test_db.add(
             CurrentHotRun(

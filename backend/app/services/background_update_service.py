@@ -145,7 +145,7 @@ class BackgroundLatestTradeDayUpdateService:
     """独立后台最新交易日更新服务。"""
 
     DEFAULT_REVIEWER = "quant"
-    DEFAULT_WINDOW_SIZE = 180
+    DEFAULT_WINDOW_SIZE = 120
     BEIJING_TZ = ZoneInfo("Asia/Shanghai")
     RETRY_START_HOUR = 16
     RETRY_START_MINUTE = 30
@@ -467,6 +467,13 @@ class BackgroundLatestTradeDayUpdateService:
             message = f"{trade_date} 更新完成"
             MarketService.finish_update(message)
             self._invalidate_runtime_caches()
+            try:
+                from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
+
+                diagnosis_cache_result = diagnosis_history_cache_service.prewarm()
+            except Exception as exc:
+                diagnosis_cache_result = {"success": False, "error": str(exc)}
+                self.log.warning("单股诊断历史缓存预热失败: %s", exc)
 
             return {
                 "success": True,
@@ -478,6 +485,7 @@ class BackgroundLatestTradeDayUpdateService:
                 "tomorrow_star_result": tomorrow_result,
                 "current_hot_result": current_hot_result,
                 "tomorrow_star_stats": tomorrow_stats,
+                "diagnosis_cache_prewarm": diagnosis_cache_result,
                 "timings": timings,
             }
         except Exception as exc:

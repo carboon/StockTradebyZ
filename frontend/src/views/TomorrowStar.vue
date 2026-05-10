@@ -95,19 +95,13 @@
                       >
                         最新
                       </el-tag>
-                      <el-tag
-                        :type="getHistoryStatusTagType(row.status)"
-                        size="small"
-                        class="status-tag"
-                      >
-                        {{ getHistoryStatusLabel(row.status) }}
-                      </el-tag>
                     </div>
                   </div>
                   <div class="mobile-history-item__meta">
-                    <span>候选数 {{ row.count === '-' ? '-' : row.count }}</span>
+                    <span v-if="!isCurrentHotTab">候选数 {{ row.count === '-' ? '-' : row.count }}</span>
                     <span>趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
-                    <span>连续候选数 {{ row.consecutiveCandidateCount === '-' ? '-' : row.consecutiveCandidateCount }}</span>
+                    <span v-if="isCurrentHotTab">B1通过数 {{ row.b1PassCount === '-' ? '-' : row.b1PassCount }}</span>
+                    <span v-if="!isCurrentHotTab">明日之星 {{ row.tomorrowStarCount === '-' ? '-' : row.tomorrowStarCount }}</span>
                   </div>
                 </button>
               </div>
@@ -129,7 +123,11 @@
               </div>
             </el-card>
 
-            <el-card class="mobile-section-card">
+            <el-card
+              class="mobile-section-card"
+              v-loading="activeCandidateLoading"
+              element-loading-text="正在刷新候选数据..."
+            >
               <template #header>
                 <div class="card-header">
                   <div class="title-section">
@@ -169,9 +167,9 @@
                 <span class="tip-item">{{ activeMobileAnalysisTip }}</span>
               </div>
 
-              <div v-if="activeAnalysisRows.length > 0" class="mobile-analysis-list">
+              <div v-if="activeMobileAnalysisRows.length > 0" class="mobile-analysis-list">
                 <button
-                  v-for="row in activeAnalysisRows"
+                  v-for="row in activeMobileAnalysisRows"
                   :key="row.code"
                   type="button"
                   class="mobile-analysis-item"
@@ -190,37 +188,51 @@
                     <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                       {{ getSignalTypeLabel(row.signal_type) }}
                     </el-tag>
+                    <el-tag v-if="isCurrentHotTab" :type="getBooleanTagType(getAnalysisB1Passed(row))" size="small">
+                      B1 {{ getBooleanTagLabel(getAnalysisB1Passed(row)) }}
+                    </el-tag>
                     <el-tooltip
-                      v-if="showAnalysisPrefilter && row.prefilter_passed === false && getAnalysisPrefilterSummary(row)"
-                      :content="getAnalysisPrefilterSummary(row)"
+                      v-if="showAnalysisPrefilter && getAnalysisPrefilterPassed(row) === false && getAnalysisPrefilterSummary(getAnalysisPrefilterLike(row))"
+                      :content="getAnalysisPrefilterSummary(getAnalysisPrefilterLike(row))"
                       placement="top"
                     >
-                      <el-tag :type="getAnalysisPrefilterTagType(row.prefilter_passed)" size="small">
-                        前置 {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
+                      <el-tag :type="getAnalysisPrefilterTagType(getAnalysisPrefilterPassed(row))" size="small">
+                        前置 {{ getAnalysisPrefilterLabel(getAnalysisPrefilterPassed(row)) }}
                       </el-tag>
                     </el-tooltip>
                     <el-tag
                       v-else-if="showAnalysisPrefilter"
-                      :type="getAnalysisPrefilterTagType(row.prefilter_passed)"
+                      :type="getAnalysisPrefilterTagType(getAnalysisPrefilterPassed(row))"
                       size="small"
                     >
-                      前置 {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
+                      前置 {{ getAnalysisPrefilterLabel(getAnalysisPrefilterPassed(row)) }}
                     </el-tag>
                     <span v-if="showAnalysisComment" class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
                   </div>
                 </button>
               </div>
-              <el-empty v-else :description="activeMobileAnalysisEmptyDescription" :image-size="90" />
+              <el-empty v-else :description="activeMobileAnalysisEmptyDescription" :image-size="90">
+                <div v-if="showTomorrowStarMarketRegimeNotice" class="market-regime-empty">
+                  <div class="market-regime-empty__title">今日未展示候选股票</div>
+                  <div class="market-regime-empty__summary">{{ activeMarketRegimeSummary }}</div>
+                  <ul v-if="activeMarketRegimeDetails.length > 0" class="market-regime-empty__list">
+                    <li v-for="detail in activeMarketRegimeDetails" :key="detail">{{ detail }}</li>
+                  </ul>
+                  <div class="market-regime-empty__hint">
+                    当前策略会先判断整体市场环境；当大环境偏弱时，会暂停输出候选股票，避免把低质量机会展示给用户。
+                  </div>
+                </div>
+              </el-empty>
 
               <div v-if="showActiveAnalysisPagination" class="pagination-wrap mobile-pagination">
                 <div class="mobile-pagination__summary">
-                  第 {{ currentHotAnalysisPage }} / {{ currentHotAnalysisPageCount }} 页
+                  第 {{ activeMobileAnalysisPage }} / {{ activeMobileAnalysisPageCount }} 页
                 </div>
                 <el-pagination
-                  v-model:current-page="currentHotAnalysisPage"
-                  :page-size="currentHotAnalysisPageSize"
+                  v-model:current-page="activeMobileAnalysisPage"
+                  :page-size="activeMobileAnalysisPageSize"
                   layout="prev, pager, next"
-                  :total="totalCurrentHotAnalysisResults"
+                  :total="activeMobileAnalysisTotal"
                   :hide-on-single-page="false"
                   background
                   size="small"
@@ -229,8 +241,8 @@
             </el-card>
           </div>
 
-          <el-row v-else :gutter="20" class="top-row">
-            <el-col :span="8">
+          <div v-else class="top-grid" :class="{ 'is-current-hot': isCurrentHotTab }">
+            <div class="history-column">
               <el-card class="history-card matched-height">
                 <template #header>
                   <div class="card-header">
@@ -247,18 +259,18 @@
                   :data="activeDisplayHistoryData"
                   @row-click="selectDate"
                   class="history-table"
-                  height="400"
+                  :height="activeHistoryTableHeight"
                   highlight-current-row
                   :current-row-key="activeSelectedDate"
                   row-key="rawDate"
                 >
-                  <el-table-column prop="date" label="时间" width="120" />
-                  <el-table-column prop="count" label="候选数" width="100" align="center">
+                  <el-table-column prop="date" label="时间" :min-width="isCurrentHotTab ? 150 : 118" />
+                  <el-table-column v-if="!isCurrentHotTab" prop="count" label="候选" width="64" align="center">
                     <template #default="{ row }">
                       {{ row.count === '-' ? '-' : row.count }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="pass" label="趋势启动数" width="120" align="center">
+                  <el-table-column prop="pass" label="启动" :min-width="isCurrentHotTab ? 82 : 64" align="center">
                     <template #default="{ row }">
                       <el-tag v-if="row.pass !== '-'" :type="row.pass > 0 ? 'success' : 'info'" size="small">
                         {{ row.pass }}
@@ -266,42 +278,30 @@
                       <span v-else>-</span>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="consecutiveCandidateCount" label="连续候选数" width="120" align="center">
+                  <el-table-column v-if="isCurrentHotTab" prop="b1PassCount" min-width="82" label="B1" align="center">
                     <template #default="{ row }">
-                      <el-tag v-if="row.consecutiveCandidateCount !== '-'" :type="row.consecutiveCandidateCount > 0 ? 'warning' : 'info'" size="small">
-                        {{ row.consecutiveCandidateCount }}
+                      <el-tag v-if="row.b1PassCount !== '-'" :type="row.b1PassCount > 0 ? 'success' : 'info'" size="small">
+                        {{ row.b1PassCount }}
                       </el-tag>
                       <span v-else>-</span>
                     </template>
                   </el-table-column>
-                  <el-table-column label="状态" width="80" align="center">
+                  <el-table-column v-if="!isCurrentHotTab" prop="tomorrowStarCount" label="星" width="58" align="center">
                     <template #default="{ row }">
-                      <div class="history-status-cell">
-                        <el-tag
-                          v-if="row.rawDate === activeLatestDate"
-                          type="success"
-                          size="small"
-                          class="status-tag"
-                        >
-                          最新
-                        </el-tag>
-                        <el-tag
-                          :type="getHistoryStatusTagType(row.status)"
-                          size="small"
-                          class="status-tag"
-                        >
-                          {{ getHistoryStatusLabel(row.status) }}
-                        </el-tag>
-                      </div>
+                      <el-tag v-if="row.tomorrowStarCount !== '-'" :type="row.tomorrowStarCount > 0 ? 'success' : 'info'" size="small">
+                        {{ row.tomorrowStarCount }}
+                      </el-tag>
+                      <span v-else>-</span>
                     </template>
                   </el-table-column>
                 </el-table>
 
                 <div class="pagination-wrap">
+                  <span class="pagination-total">共 {{ activeTotalHistoryCount }} 日</span>
                   <el-pagination
                     v-model:current-page="activeHistoryPage"
                     :page-size="activeHistoryPageSize"
-                    layout="total, prev, pager, next"
+                    layout="prev, pager, next"
                     :total="activeTotalHistoryCount"
                     :hide-on-single-page="false"
                     background
@@ -309,10 +309,14 @@
                   />
                 </div>
               </el-card>
-            </el-col>
+            </div>
 
-            <el-col :span="16">
-              <el-card class="candidates-card matched-height">
+            <div class="content-column">
+              <el-card
+                class="candidates-card matched-height"
+                v-loading="activeCandidateLoading"
+                element-loading-text="正在刷新候选数据..."
+              >
                 <template #header>
                   <div class="card-header">
                     <div class="title-section">
@@ -348,66 +352,136 @@
                   </div>
                 </template>
 
+                <div v-if="activeCandidateSortLabel" class="sort-hint">
+                  当前排序：{{ activeCandidateSortLabel }}
+                </div>
+
                 <div class="table-header-tip">
                   <template v-if="tab.name === 'tomorrow-star'">
                     <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
                     <span class="tip-item">· 条件：KDJ 低位 + 知行线结构通过 + 周线多头排列 + 最大量日非阴线</span>
                   </template>
                   <template v-else>
-                    <span class="tip-item">· 当前热盘关注当日强势活跃标的，右侧支持科创板 / 其他板块过滤</span>
-                    <span class="tip-item">· 点击历史日期可回看对应热力股票池与量化分析结果</span>
+                    <span class="tip-item">· 当前热盘关注当日强势活跃标的AI标的，右侧支持科创板 / 其他板块过滤，点击历史日期可回看对应热力股票池</span>
                   </template>
                 </div>
 
                 <el-table
+                  v-if="activeDisplayLatestCandidates.length > 0"
                   :data="activeDisplayLatestCandidates"
                   stripe
                   class="candidates-table"
-                  height="400"
-                  table-layout="auto"
+                  :height="activeCandidateTableHeight"
+                  table-layout="fixed"
+                  size="small"
+                  @sort-change="handleCandidateSortChange"
                 >
-                  <el-table-column prop="code" label="代码" min-width="100" />
-                  <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
-                  <el-table-column prop="open_price" label="开盘价" min-width="100" align="right">
+                  <el-table-column prop="code" label="代码" width="72" sortable="custom" :sort-orders="candidateSortOrders" />
+                  <el-table-column prop="name" label="名称" width="76" sortable="custom" :sort-orders="candidateSortOrders" show-overflow-tooltip>
                     <template #default="{ row }">
-                      {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
+                      <span class="stock-name-cell">{{ row.name || row.code }}</span>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="close_price" label="收盘价" min-width="100" align="right">
-                    <template #default="{ row }">
-                      {{ typeof row.close_price === 'number' ? row.close_price.toFixed(2) : '-' }}
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
-                    <template #default="{ row }">
-                      <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
-                        {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
-                      </span>
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="kdj_j" label="KDJ-J" min-width="100" align="right">
-                    <template #default="{ row }">
-                      {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
-                    </template>
-                  </el-table-column>
-                  <el-table-column v-if="isCurrentHotTab" label="所属板块" min-width="120" show-overflow-tooltip>
-                    <template #default="{ row }">
-                      {{ getCurrentHotBoardLabel(row) }}
-                    </template>
-                  </el-table-column>
-                  <el-table-column v-if="isCurrentHotTab" label="B1" min-width="100" align="center">
+                  <el-table-column v-if="isCurrentHotTab" label="B1" width="58" align="center" sortable="custom" prop="b1_passed" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       <el-tag :type="getBooleanTagType(row.b1_passed)" size="small">
                         {{ getBooleanTagLabel(row.b1_passed) }}
                       </el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column v-else prop="consecutive_days" label="连续候选" min-width="110" align="center">
+                  <el-table-column v-if="isCurrentHotTab" prop="signal_type" label="信号" width="88" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                        {{ getSignalTypeLabel(row.signal_type) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="!isCurrentHotTab" prop="tomorrow_star_pass" label="星" width="58" align="center">
+                    <template #default="{ row }">
+                      <el-tag :type="getBooleanTagType(row.tomorrow_star_pass)" size="small">
+                        {{ getBooleanTagLabel(row.tomorrow_star_pass) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="!isCurrentHotTab" prop="signal_type" label="信号" width="88" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                        {{ getSignalTypeLabel(row.signal_type) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="!isCurrentHotTab" prop="total_score" label="评分" width="62" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      <el-tag :type="getScoreType(row.total_score)" size="small">
+                        {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="total_score" label="评分" width="62" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      <el-tag :type="getScoreType(row.total_score)" size="small">
+                        {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="open_price" label="开盘" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="close_price" label="收盘" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ typeof row.close_price === 'number' ? row.close_price.toFixed(2) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="change_pct" label="涨跌" width="68" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
+                        {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
+                      </span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="turnover_rate" label="换手" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatTurnoverRate(row.turnover_rate) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="volume_ratio" label="量比" width="56" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatVolumeRatio(row.volume_ratio) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="!isCurrentHotTab" prop="active_pool_rank" label="活跃" width="60" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatActivePoolRank(row.active_pool_rank) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="kdj_j" label="KDJ" width="58" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" label="板块" width="160" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ getCurrentHotBoardLabel(row) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-else prop="consecutive_days" width="58" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #header>
+                      <el-tooltip content="连续通过B1规则筛选的天数" placement="top">
+                        <span class="table-header-help">连续</span>
+                      </el-tooltip>
+                    </template>
                     <template #default="{ row }">
                       {{ (row.consecutive_days || 1) > 1 ? row.consecutive_days : '否' }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="80" align="center" fixed="right">
+                  <el-table-column label="备注" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ getCandidateInlineNote(row) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="56" align="center">
                     <template #default="{ row }">
                       <el-button text type="primary" size="small" @click="viewStock(row.code, activeStockSource)">
                         详情
@@ -415,8 +489,19 @@
                     </template>
                   </el-table-column>
                 </el-table>
+                <div v-else-if="showTomorrowStarMarketRegimeNotice" class="market-regime-empty market-regime-empty--desktop">
+                  <div class="market-regime-empty__title">今日未展示候选股票</div>
+                  <div class="market-regime-empty__summary">{{ activeMarketRegimeSummary }}</div>
+                  <ul v-if="activeMarketRegimeDetails.length > 0" class="market-regime-empty__list">
+                    <li v-for="detail in activeMarketRegimeDetails" :key="detail">{{ detail }}</li>
+                  </ul>
+                  <div class="market-regime-empty__hint">
+                    当前策略会先判断整体市场环境；当大环境偏弱时，会暂停输出候选股票，避免把低质量机会展示给用户。
+                  </div>
+                </div>
+                <el-empty v-else description="暂无候选股票" :image-size="90" />
 
-                <div class="pagination-wrap">
+                <div v-if="activeDisplayLatestCandidates.length > 0" class="pagination-wrap">
                   <el-pagination
                     v-model:current-page="activeCandidatePage"
                     :page-size="activeCandidatePageSize"
@@ -426,80 +511,9 @@
                     background
                   />
                 </div>
-
-                <el-divider v-if="showAnalysisSection" />
-                <div v-if="showAnalysisSection" class="analysis-section">
-                  <div class="analysis-tip">
-                    <span>{{ analysisTipText }}</span>
-                  </div>
-                  <h4>{{ activeAnalysisTitle }}</h4>
-                  <el-table
-                    :data="activeAnalysisRows"
-                    stripe
-                    size="small"
-                    max-height="200"
-                  >
-                    <el-table-column prop="code" label="代码" width="80" />
-                    <el-table-column label="名称" min-width="120" show-overflow-tooltip>
-                      <template #default="{ row }">
-                        {{ getAnalysisResultName(row) }}
-                      </template>
-                    </el-table-column>
-                    <el-table-column prop="total_score" label="评分" width="80" align="right">
-                      <template #default="{ row }">
-                        <el-tag :type="getScoreType(row.total_score)" size="small">
-                          {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
-                        </el-tag>
-                      </template>
-                    </el-table-column>
-                    <el-table-column prop="signal_type" label="信号" width="120">
-                      <template #default="{ row }">
-                        <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
-                          {{ getSignalTypeLabel(row.signal_type) }}
-                        </el-tag>
-                      </template>
-                    </el-table-column>
-                    <el-table-column v-if="showAnalysisPrefilter" label="前置过滤" width="96" align="center">
-                      <template #default="{ row }">
-                        <el-tooltip
-                          v-if="row.prefilter_passed === false && getAnalysisPrefilterSummary(row)"
-                          :content="getAnalysisPrefilterSummary(row)"
-                          placement="top"
-                        >
-                          <el-tag :type="getAnalysisPrefilterTagType(row.prefilter_passed)" size="small">
-                            {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
-                          </el-tag>
-                        </el-tooltip>
-                        <el-tag v-else :type="getAnalysisPrefilterTagType(row.prefilter_passed)" size="small">
-                          {{ getAnalysisPrefilterLabel(row.prefilter_passed) }}
-                        </el-tag>
-                      </template>
-                    </el-table-column>
-                    <el-table-column v-if="showAnalysisComment" prop="comment" label="评语" show-overflow-tooltip />
-                    <el-table-column label="操作" width="90" align="center">
-                      <template #default="{ row }">
-                        <el-button text type="primary" size="small" @click="viewStock(row.code, activeStockSource)">
-                          详情
-                        </el-button>
-                      </template>
-                    </el-table-column>
-                  </el-table>
-
-                  <div v-if="showActiveAnalysisPagination" class="pagination-wrap analysis-pagination">
-                    <el-pagination
-                      v-model:current-page="currentHotAnalysisPage"
-                      :page-size="currentHotAnalysisPageSize"
-                      layout="total, prev, pager, next"
-                      :total="totalCurrentHotAnalysisResults"
-                      :hide-on-single-page="false"
-                      background
-                      size="small"
-                    />
-                  </div>
-                </div>
               </el-card>
-            </el-col>
-          </el-row>
+            </div>
+          </div>
         </template>
       </el-tab-pane>
 
@@ -788,6 +802,26 @@ import { useResponsive } from '@/composables/useResponsive'
 type DataTabKey = 'tomorrow-star' | 'current-hot'
 type MiddaySourceKey = DataTabKey
 type BoardFilter = 'all' | 'sci-tech' | 'others'
+type SortOrder = 'ascending' | 'descending' | null
+type CandidateSortProp =
+  | 'code'
+  | 'name'
+  | 'open_price'
+  | 'close_price'
+  | 'change_pct'
+  | 'turnover_rate'
+  | 'volume_ratio'
+  | 'active_pool_rank'
+  | 'kdj_j'
+  | 'b1_passed'
+  | 'signal_type'
+  | 'total_score'
+  | 'consecutive_days'
+type CandidateSortState = {
+  prop: CandidateSortProp | ''
+  order: SortOrder
+}
+type AnalysisDisplayRow = AnalysisResult | CurrentHotAnalysisResult | CurrentHotCandidate
 
 const analysisTabs: Array<{ name: DataTabKey; label: string }> = [
   { name: 'tomorrow-star', label: '明日之星' },
@@ -805,7 +839,7 @@ let candidatesRequestId = 0
 let currentHotLoadDataRequestId = 0
 let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v2'
+const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v9'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 const MIDDAY_CACHE_TTL_MS = 60_000
 let incrementalPollTimer: number | null = null
@@ -850,11 +884,27 @@ type HistoryRow = {
   rawDate: string
   count: number | '-'
   pass: number | '-'
+  b1PassCount: number | '-'
   consecutiveCandidateCount: number | '-'
-  status: 'pending' | 'running' | 'success' | 'failed' | 'missing'
+  tomorrowStarCount: number | '-'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'missing' | 'market_regime_blocked'
   analysisCount: number | '-'
   errorMessage?: string | null
   isLatest?: boolean
+  marketRegimeBlocked?: boolean
+  marketRegimeInfo?: {
+    passed?: boolean
+    summary?: string | null
+    details?: Array<string | {
+      ts_code?: string | null
+      name?: string | null
+      passed?: boolean | null
+      close?: number | null
+      ema_fast?: number | null
+      ema_slow?: number | null
+      return_lookback?: number | null
+    }> | null
+  } | null
 }
 
 type HistoryLikeItem = {
@@ -865,10 +915,26 @@ type HistoryLikeItem = {
   candidate_count?: number
   analysis_count?: number
   trend_start_count?: number
+  b1_pass_count?: number
   consecutive_candidate_count?: number
+  tomorrow_star_count?: number
   status?: string
   error_message?: string | null
   is_latest?: boolean
+  market_regime_blocked?: boolean
+  market_regime_info?: {
+    passed?: boolean
+    summary?: string | null
+    details?: Array<string | {
+      ts_code?: string | null
+      name?: string | null
+      passed?: boolean | null
+      close?: number | null
+      ema_fast?: number | null
+      ema_slow?: number | null
+      return_lookback?: number | null
+    }> | null
+  } | null
 }
 
 const historyData = ref<HistoryRow[]>([])
@@ -882,13 +948,16 @@ const freshnessVersion = ref<string>('')
 
 // 历史记录分页（左侧）
 const historyPage = ref(1)
-const historyPageSize = computed(() => (isMobile.value ? 5 : 12))
+const historyPageSize = computed(() => (isMobile.value ? 5 : 15))
+const activeHistoryTableHeight = computed(() => (isMobile.value ? undefined : 620))
+const activeCandidateTableHeight = computed(() => (isMobile.value ? undefined : 700))
 
 // 最新数据（右侧显示）
 const latestCandidates = ref<Candidate[]>([])
 const latestAnalysisResults = ref<AnalysisResult[]>([])
 const latestCandidatePage = ref(1)
-const candidatePageSize = 10
+const candidatePageSize = 18
+const candidateSort = ref<CandidateSortState>({ prop: '', order: null })
 
 // 当前查看的日期（默认为最新）
 const viewingDate = ref<string | null>(null)
@@ -907,10 +976,12 @@ const currentHotLatestCandidates = ref<CurrentHotCandidate[]>([])
 const currentHotAnalysisResults = ref<CurrentHotAnalysisResult[]>([])
 const currentHotCandidatePage = ref(1)
 const currentHotAnalysisPage = ref(1)
-const currentHotCandidatePageSize = 10
+const currentHotCandidatePageSize = 18
 const currentHotAnalysisPageSize = 5
+const currentHotCandidateSort = ref<CandidateSortState>({ prop: '', order: null })
 const currentHotViewingDate = ref<string | null>(null)
 const currentHotCandidatesCache = ref<Map<string, { candidates: CurrentHotCandidate[], results: CurrentHotAnalysisResult[], timestamp: number }>>(new Map())
+const candidateSortOrders: Array<Exclude<SortOrder, null>> = ['descending', 'ascending']
 
 // 增量更新状态
 const incrementalUpdate = ref<IncrementalUpdateStatus>({
@@ -954,11 +1025,91 @@ const activeShowInitializationEmpty = computed(() => (isCurrentHotTab.value ? cu
 const activeEmptyDescription = computed(() => (isCurrentHotTab.value ? '当前热盘尚无可用数据' : '明日之星尚无可用数据'))
 const activeShowCachedHint = computed(() => (isCurrentHotTab.value ? currentHotHydratedFromCache.value : showCachedHint.value))
 const activeLoadingLatest = computed(() => (isCurrentHotTab.value ? currentHotLoadingLatest.value : loadingLatest.value))
+const activeCandidateLoading = computed(() => (
+  isCurrentHotTab.value
+    ? currentHotLoading.value || currentHotLoadingLatest.value
+    : loading.value || loadingLatest.value || checkingFreshness.value
+))
 const activeCandidateTitle = computed(() => (isCurrentHotTab.value ? '热力股票池' : '候选股票'))
 const activeStockSource = computed<'tomorrow-star' | 'current-hot'>(() => (isCurrentHotTab.value ? 'current-hot' : 'tomorrow-star'))
 const showBoardFilter = computed(() => isCurrentHotTab.value)
 const showAnalysisComment = computed(() => !isCurrentHotTab.value)
-const analysisTipText = '对目标股票进行量化分析，评估趋势结构、价格位置、量价行为、历史异动四个维度'
+const currentHotAnalysisByCode = computed(() => {
+  const resultMap = new Map<string, CurrentHotAnalysisResult>()
+  currentHotAnalysisResults.value.forEach((result) => {
+    resultMap.set(result.code, result)
+  })
+  return resultMap
+})
+const tomorrowStarAnalysisByCode = computed(() => {
+  const resultMap = new Map<string, AnalysisResult>()
+  latestAnalysisResults.value.forEach((result) => {
+    resultMap.set(result.code, result)
+  })
+  return resultMap
+})
+
+function mergeTomorrowStarCandidateAnalysis(candidate: Candidate): Candidate {
+  const analysis = tomorrowStarAnalysisByCode.value.get(candidate.code)
+  if (!analysis) return candidate
+  return {
+    ...candidate,
+    name: candidate.name || analysis.name,
+    b1_passed: candidate.b1_passed ?? (analysis.verdict === 'PASS'),
+    turnover_rate: candidate.turnover_rate ?? analysis.turnover_rate,
+    volume_ratio: candidate.volume_ratio ?? analysis.volume_ratio,
+    verdict: candidate.verdict ?? analysis.verdict,
+    total_score: candidate.total_score ?? analysis.total_score,
+    signal_type: candidate.signal_type ?? analysis.signal_type,
+    comment: candidate.comment ?? analysis.comment,
+    tomorrow_star_pass: candidate.tomorrow_star_pass ?? analysis.tomorrow_star_pass,
+    prefilter_passed: candidate.prefilter_passed ?? analysis.prefilter_passed,
+    prefilter_summary: candidate.prefilter_summary ?? analysis.prefilter_summary,
+    prefilter_blocked_by: candidate.prefilter_blocked_by ?? analysis.prefilter_blocked_by,
+  }
+}
+
+function mergeCurrentHotCandidateAnalysis(candidate: CurrentHotCandidate): CurrentHotCandidate {
+  const analysis = currentHotAnalysisByCode.value.get(candidate.code)
+  if (!analysis) return candidate
+  return {
+    ...candidate,
+    b1_passed: candidate.b1_passed ?? analysis.b1_passed,
+    turnover_rate: candidate.turnover_rate ?? analysis.turnover_rate,
+    volume_ratio: candidate.volume_ratio ?? analysis.volume_ratio,
+    verdict: candidate.verdict ?? analysis.verdict,
+    total_score: candidate.total_score ?? analysis.total_score,
+    signal_type: candidate.signal_type ?? analysis.signal_type,
+    comment: candidate.comment ?? analysis.comment,
+    sector_names: candidate.sector_names?.length ? candidate.sector_names : analysis.sector_names,
+    board_group: candidate.board_group ?? analysis.board_group,
+  }
+}
+const activeCandidateSortLabel = computed(() => {
+  const state = isCurrentHotTab.value ? currentHotCandidateSort.value : candidateSort.value
+  if (!state.prop || !state.order) return ''
+  const labels: Record<CandidateSortProp, string> = {
+    code: '代码',
+    name: '名称',
+    open_price: '开盘',
+    close_price: '收盘',
+    change_pct: '涨跌',
+    turnover_rate: '换手',
+    volume_ratio: '量比',
+    active_pool_rank: '活跃排名',
+    kdj_j: 'KDJ',
+    b1_passed: 'B1',
+    signal_type: '信号',
+    total_score: '评分',
+    consecutive_days: '连续候选',
+  }
+  const direction = state.order === 'ascending' ? '从低到高' : '从高到低'
+  if (state.prop === 'active_pool_rank') {
+    return `${labels[state.prop]} ${state.order === 'ascending' ? '从低到高' : '从高到低'}`
+  }
+  const prefix = isCurrentHotTab.value ? '' : '星通过置顶，'
+  return `${prefix}${labels[state.prop]} ${direction}`
+})
 
 // 历史记录分页数据
 const totalHistoryCount = computed(() => historyData.value.length)
@@ -984,26 +1135,15 @@ const displayCurrentHotHistoryData = computed(() => {
 const totalLatestCandidates = computed(() => latestCandidates.value.length)
 const displayLatestCandidates = computed(() => {
   const start = (latestCandidatePage.value - 1) * candidatePageSize
-  const sorted = [...latestCandidates.value].sort((a, b) => {
-    const consecutiveDiff = (b.consecutive_days || 1) - (a.consecutive_days || 1)
-    if (consecutiveDiff !== 0) return consecutiveDiff
-    const aVal = typeof a.kdj_j === 'number' ? a.kdj_j : Number.POSITIVE_INFINITY
-    const bVal = typeof b.kdj_j === 'number' ? b.kdj_j : Number.POSITIVE_INFINITY
-    if (aVal !== bVal) return aVal - bVal
-    return a.code.localeCompare(b.code)
-  })
+  const sorted = sortTomorrowStarCandidates(latestCandidates.value.map(mergeTomorrowStarCandidateAnalysis))
   return sorted.slice(start, start + candidatePageSize)
 })
 
 const currentHotFilteredCandidates = computed(() => {
   return [...currentHotLatestCandidates.value]
+    .map(mergeCurrentHotCandidateAnalysis)
     .filter((candidate) => matchesBoardFilter(candidate.code, currentHotBoardFilter.value))
-    .sort((a, b) => {
-      const aVal = typeof a.kdj_j === 'number' ? a.kdj_j : Number.POSITIVE_INFINITY
-      const bVal = typeof b.kdj_j === 'number' ? b.kdj_j : Number.POSITIVE_INFINITY
-      if (aVal !== bVal) return aVal - bVal
-      return a.code.localeCompare(b.code)
-    })
+    .sort(compareCurrentHotCandidates)
 })
 const totalCurrentHotCandidates = computed(() => currentHotFilteredCandidates.value.length)
 const displayCurrentHotLatestCandidates = computed(() => {
@@ -1030,8 +1170,161 @@ const currentHotViewingDateDisplay = computed(() => {
   return currentHotLatestDate.value ? formatDateString(currentHotLatestDate.value) : ''
 })
 
+function getCandidateDefaultSort(a: Candidate, b: Candidate): number {
+  const consecutiveDiff = (b.consecutive_days || 1) - (a.consecutive_days || 1)
+  if (consecutiveDiff !== 0) return consecutiveDiff
+  const aKdj = toFiniteNumber(a.kdj_j) ?? Number.POSITIVE_INFINITY
+  const bKdj = toFiniteNumber(b.kdj_j) ?? Number.POSITIVE_INFINITY
+  if (aKdj !== bKdj) return aKdj - bKdj
+  return a.code.localeCompare(b.code)
+}
+
+function getCurrentHotDefaultSort(a: CurrentHotCandidate, b: CurrentHotCandidate): number {
+  const signalDiff = getSignalPriority(a.signal_type ?? undefined) - getSignalPriority(b.signal_type ?? undefined)
+  if (signalDiff !== 0) return signalDiff
+
+  const b1Diff = getB1PassPriority(a.b1_passed) - getB1PassPriority(b.b1_passed)
+  if (b1Diff !== 0) return b1Diff
+
+  const scoreDiff = getScoreSortValue(a.total_score ?? undefined) - getScoreSortValue(b.total_score ?? undefined)
+  if (scoreDiff !== 0) return scoreDiff
+
+  return a.code.localeCompare(b.code)
+}
+
+function getCandidateSortState(): CandidateSortState {
+  return isCurrentHotTab.value ? currentHotCandidateSort.value : candidateSort.value
+}
+
+function getCandidateSortableValue(row: Candidate | CurrentHotCandidate, prop: CandidateSortProp): number | string | boolean | null {
+  if (prop === 'code') return row.code
+  if (prop === 'name') return row.name || ''
+  if (prop === 'b1_passed') return row.b1_passed ?? null
+  if (prop === 'signal_type' && 'signal_type' in row) return getSignalSortableValue(row.signal_type)
+  if (prop === 'total_score' && 'total_score' in row) return toFiniteNumber(row.total_score)
+  if (prop === 'consecutive_days') {
+    return 'consecutive_days' in row ? toFiniteNumber(row.consecutive_days) ?? 1 : null
+  }
+  if (prop === 'active_pool_rank' && 'active_pool_rank' in row) {
+    const rank = toFiniteNumber(row.active_pool_rank)
+    return rank === null ? null : -rank
+  }
+  return toFiniteNumber(row[prop as keyof (Candidate | CurrentHotCandidate)] as number | string | null | undefined)
+}
+
+function compareNullableValues(
+  aValue: number | string | boolean | null,
+  bValue: number | string | boolean | null,
+  order: Exclude<SortOrder, null>,
+): number {
+  const direction = order === 'ascending' ? 1 : -1
+  const aMissing = aValue === null || aValue === ''
+  const bMissing = bValue === null || bValue === ''
+  if (aMissing || bMissing) {
+    if (aMissing && bMissing) return 0
+    return aMissing ? 1 : -1
+  }
+
+  if (typeof aValue === 'string' || typeof bValue === 'string') {
+    return String(aValue).localeCompare(String(bValue), 'zh-Hans-CN') * direction
+  }
+
+  if (typeof aValue === 'boolean' || typeof bValue === 'boolean') {
+    const diff = (aValue === true ? 1 : 0) - (bValue === true ? 1 : 0)
+    return diff * direction
+  }
+
+  const numericDiff = Number(aValue) - Number(bValue)
+  if (numericDiff === 0) return 0
+  return numericDiff * direction
+}
+
+function compareByCandidateSort(
+  a: Candidate | CurrentHotCandidate,
+  b: Candidate | CurrentHotCandidate,
+  fallback: () => number,
+): number {
+  const sortState = getCandidateSortState()
+  if (!sortState.prop || !sortState.order) {
+    return fallback()
+  }
+
+  const diff = compareNullableValues(
+    getCandidateSortableValue(a, sortState.prop),
+    getCandidateSortableValue(b, sortState.prop),
+    sortState.order,
+  )
+  return diff !== 0 ? diff : fallback()
+}
+
+function sortTomorrowStarCandidates(rows: Candidate[]): Candidate[] {
+  return [...rows].sort((a, b) => {
+    const starDiff = getTomorrowStarPassPriority(a.tomorrow_star_pass) - getTomorrowStarPassPriority(b.tomorrow_star_pass)
+    if (starDiff !== 0) return starDiff
+    return compareByCandidateSort(a, b, () => getCandidateDefaultSort(a, b))
+  })
+}
+
+function compareCurrentHotCandidates(a: CurrentHotCandidate, b: CurrentHotCandidate): number {
+  return compareByCandidateSort(a, b, () => getCurrentHotDefaultSort(a, b))
+}
+
+function handleCandidateSortChange({ prop, order }: { prop: string, order: SortOrder }) {
+  const nextState: CandidateSortState = {
+    prop: (prop || '') as CandidateSortProp | '',
+    order,
+  }
+  if (isCurrentHotTab.value) {
+    currentHotCandidateSort.value = nextState
+    currentHotCandidatePage.value = 1
+    return
+  }
+  candidateSort.value = nextState
+  latestCandidatePage.value = 1
+}
+
+function normalizeCandidateSortState(value: unknown): CandidateSortState {
+  if (!value || typeof value !== 'object') return { prop: '', order: null }
+  const item = value as Partial<CandidateSortState>
+  const validProps: CandidateSortProp[] = [
+    'code',
+    'name',
+    'open_price',
+    'close_price',
+    'change_pct',
+    'turnover_rate',
+    'volume_ratio',
+    'active_pool_rank',
+    'kdj_j',
+    'b1_passed',
+    'signal_type',
+    'total_score',
+    'consecutive_days',
+  ]
+  const prop = validProps.includes(item.prop as CandidateSortProp) ? item.prop as CandidateSortProp : ''
+  const order = item.order === 'ascending' || item.order === 'descending' ? item.order : null
+  return { prop, order }
+}
+
 function getSignalPriority(signalType?: string): number {
   return signalType === 'trend_start' ? 0 : 1
+}
+
+function getSignalSortableValue(signalType?: string | null): number {
+  const value = getSignalPriority(signalType ?? undefined)
+  return signalType ? value : 99
+}
+
+function getB1PassPriority(pass?: boolean | null): number {
+  if (pass === true) return 0
+  if (pass === false) return 1
+  return 2
+}
+
+function getTomorrowStarPassPriority(pass?: boolean | null): number {
+  if (pass === true) return 0
+  if (pass === false) return 1
+  return 2
 }
 
 function getScoreSortValue(score?: number): number {
@@ -1039,9 +1332,12 @@ function getScoreSortValue(score?: number): number {
 }
 
 function compareTomorrowStarAnalysisResults(
-  a: { signal_type?: string, total_score?: number, code: string },
-  b: { signal_type?: string, total_score?: number, code: string },
+  a: { tomorrow_star_pass?: boolean | null, signal_type?: string, total_score?: number, code: string },
+  b: { tomorrow_star_pass?: boolean | null, signal_type?: string, total_score?: number, code: string },
 ): number {
+  const tomorrowStarDiff = getTomorrowStarPassPriority(a.tomorrow_star_pass) - getTomorrowStarPassPriority(b.tomorrow_star_pass)
+  if (tomorrowStarDiff !== 0) return tomorrowStarDiff
+
   const signalDiff = getSignalPriority(a.signal_type) - getSignalPriority(b.signal_type)
   if (signalDiff !== 0) return signalDiff
 
@@ -1055,10 +1351,16 @@ function compareCurrentHotAnalysisResults(
   a: { b1_passed?: boolean | null, signal_type?: string, total_score?: number, code: string },
   b: { b1_passed?: boolean | null, signal_type?: string, total_score?: number, code: string },
 ): number {
-  const b1Diff = (a.b1_passed === true ? 0 : 1) - (b.b1_passed === true ? 0 : 1)
+  const signalDiff = getSignalPriority(a.signal_type) - getSignalPriority(b.signal_type)
+  if (signalDiff !== 0) return signalDiff
+
+  const b1Diff = getB1PassPriority(a.b1_passed) - getB1PassPriority(b.b1_passed)
   if (b1Diff !== 0) return b1Diff
 
-  return compareTomorrowStarAnalysisResults(a, b)
+  const scoreDiff = getScoreSortValue(a.total_score) - getScoreSortValue(b.total_score)
+  if (scoreDiff !== 0) return scoreDiff
+
+  return a.code.localeCompare(b.code)
 }
 
 const topAnalysisResults = computed(() => {
@@ -1074,20 +1376,32 @@ const currentHotFilteredAnalysisResults = computed(() => {
 })
 const totalCurrentHotAnalysisResults = computed(() => currentHotFilteredAnalysisResults.value.length)
 const currentHotAnalysisPageCount = computed(() => Math.max(1, Math.ceil(totalCurrentHotAnalysisResults.value / currentHotAnalysisPageSize)))
-const displayCurrentHotAnalysisResults = computed(() => {
-  if (currentHotAnalysisPage.value > currentHotAnalysisPageCount.value) {
-    currentHotAnalysisPage.value = currentHotAnalysisPageCount.value
-  }
-  const start = (currentHotAnalysisPage.value - 1) * currentHotAnalysisPageSize
-  return currentHotFilteredAnalysisResults.value.slice(start, start + currentHotAnalysisPageSize)
+const showActiveAnalysisPagination = computed(() => (
+  isCurrentHotTab.value
+    ? totalCurrentHotCandidates.value > currentHotCandidatePageSize
+    : false
+))
+const activeMobileAnalysisRows = computed(() => (isCurrentHotTab.value ? displayCurrentHotLatestCandidates.value : topAnalysisResults.value))
+const activeMobileAnalysisTitle = computed(() => (isCurrentHotTab.value ? '热力股票池' : '分析结果 Top 5'))
+const activeMobileAnalysisTip = computed(() => (isCurrentHotTab.value ? '· 已合并评分与信号，默认按趋势启动、B1通过、评分排序' : '· 仅展示评分最高的 5 只股票'))
+const activeMobileAnalysisEmptyDescription = computed(() => (isCurrentHotTab.value ? '暂无热力股票池' : '暂无 Top 5 分析结果'))
+const activeMobileAnalysisPage = computed({
+  get: () => (isCurrentHotTab.value ? currentHotCandidatePage.value : currentHotAnalysisPage.value),
+  set: (value: number) => {
+    if (isCurrentHotTab.value) {
+      currentHotCandidatePage.value = value
+      return
+    }
+    currentHotAnalysisPage.value = value
+  },
 })
-const activeAnalysisRows = computed(() => (isCurrentHotTab.value ? displayCurrentHotAnalysisResults.value : topAnalysisResults.value))
-const showAnalysisSection = computed(() => (isCurrentHotTab.value ? totalCurrentHotAnalysisResults.value > 0 : topAnalysisResults.value.length > 0))
-const showActiveAnalysisPagination = computed(() => isCurrentHotTab.value && totalCurrentHotAnalysisResults.value > currentHotAnalysisPageSize)
-const activeAnalysisTitle = computed(() => (isCurrentHotTab.value ? '分析结果' : '分析结果 (Top 5)'))
-const activeMobileAnalysisTitle = computed(() => (isCurrentHotTab.value ? '分析结果' : '分析结果 Top 5'))
-const activeMobileAnalysisTip = computed(() => (isCurrentHotTab.value ? '· 分析结果每页展示 5 只股票，可按板块过滤查看' : '· 仅展示评分最高的 5 只股票'))
-const activeMobileAnalysisEmptyDescription = computed(() => (isCurrentHotTab.value ? '暂无分析结果' : '暂无 Top 5 分析结果'))
+const activeMobileAnalysisPageSize = computed(() => (isCurrentHotTab.value ? currentHotCandidatePageSize : currentHotAnalysisPageSize))
+const activeMobileAnalysisPageCount = computed(() => (
+  isCurrentHotTab.value
+    ? Math.max(1, Math.ceil(totalCurrentHotCandidates.value / currentHotCandidatePageSize))
+    : currentHotAnalysisPageCount.value
+))
+const activeMobileAnalysisTotal = computed(() => (isCurrentHotTab.value ? totalCurrentHotCandidates.value : totalCurrentHotAnalysisResults.value))
 const activeDisplayHistoryData = computed(() => (isCurrentHotTab.value ? displayCurrentHotHistoryData.value : displayHistoryData.value))
 const showAnalysisPrefilter = computed(() => !isCurrentHotTab.value)
 const activeSelectedDate = computed(() => (isCurrentHotTab.value ? currentHotSelectedDate.value : selectedDate.value))
@@ -1118,6 +1432,52 @@ const activeCandidatePage = computed({
     }
     latestCandidatePage.value = value
   },
+})
+const activeTomorrowStarHistoryRow = computed(() => {
+  if (isCurrentHotTab.value) return null
+  const targetDate = viewingDate.value || selectedDate.value || latestDate.value
+  if (!targetDate) return null
+  return historyData.value.find((item) => item.rawDate === targetDate) || null
+})
+const showTomorrowStarMarketRegimeNotice = computed(() => {
+  const row = activeTomorrowStarHistoryRow.value
+  return Boolean(
+    row
+    && row.marketRegimeBlocked
+    && latestCandidates.value.length === 0
+    && latestAnalysisResults.value.length === 0
+  )
+})
+const activeMarketRegimeSummary = computed(() => {
+  const summary = activeTomorrowStarHistoryRow.value?.marketRegimeInfo?.summary?.trim()
+  return summary || '当前整体市场环境未达到策略要求，因此本日不展示候选股票。'
+})
+const activeMarketRegimeDetails = computed(() => {
+  const details = activeTomorrowStarHistoryRow.value?.marketRegimeInfo?.details
+  if (!Array.isArray(details)) return []
+  return details
+    .map((item) => {
+      if (typeof item === 'string') {
+        return item.trim()
+      }
+      if (!item || typeof item !== 'object') {
+        return ''
+      }
+
+      const name = String(item.name || item.ts_code || '市场指标').trim()
+      const reasons: string[] = []
+      if (typeof item.close === 'number' && typeof item.ema_fast === 'number' && item.close <= item.ema_fast) {
+        reasons.push(`收盘点位 ${item.close.toFixed(2)} 低于短期均线 ${item.ema_fast.toFixed(2)}`)
+      }
+      if (typeof item.ema_fast === 'number' && typeof item.ema_slow === 'number' && item.ema_fast <= item.ema_slow) {
+        reasons.push(`短期均线 ${item.ema_fast.toFixed(2)} 未站上长期均线 ${item.ema_slow.toFixed(2)}`)
+      }
+      if (typeof item.return_lookback === 'number' && item.return_lookback <= 0) {
+        reasons.push(`近 20 日收益率 ${(item.return_lookback * 100).toFixed(2)}% 未转正`)
+      }
+      return reasons.length > 0 ? `${name}：${reasons.join('；')}` : `${name} 未满足市场环境要求`
+    })
+    .filter(Boolean)
 })
 
 function beginRequest(key: string): AbortSignal {
@@ -1151,33 +1511,12 @@ function matchesBoardFilter(code: string, filter: BoardFilter): boolean {
 
 function normalizeHistoryStatus(status?: string | null): HistoryRow['status'] {
   const value = String(status || '').toLowerCase()
+  if (value === 'market_regime_blocked') return 'market_regime_blocked'
   if (value === 'success' || value === 'completed' || value === 'done') return 'success'
   if (value === 'running' || value === 'processing' || value === 'in_progress') return 'running'
   if (value === 'failed' || value === 'error') return 'failed'
   if (value === 'pending' || value === 'queued') return 'pending'
   return 'missing'
-}
-
-function getHistoryStatusLabel(status: HistoryRow['status']): string {
-  const labels: Record<HistoryRow['status'], string> = {
-    success: '完成',
-    running: '生成中',
-    failed: '失败',
-    pending: '待生成',
-    missing: '缺失',
-  }
-  return labels[status]
-}
-
-function getHistoryStatusTagType(status: HistoryRow['status']): string {
-  const tags: Record<HistoryRow['status'], string> = {
-    success: 'success',
-    running: 'warning',
-    failed: 'danger',
-    pending: 'info',
-    missing: 'info',
-  }
-  return tags[status]
 }
 
 function getHistoryCount(item: HistoryLikeItem): number | '-' {
@@ -1192,6 +1531,16 @@ function getHistoryPassCount(item: HistoryLikeItem): number | '-' {
   return '-'
 }
 
+function getHistoryB1PassCount(item: HistoryLikeItem): number | '-' {
+  if (typeof item.b1_pass_count === 'number') return item.b1_pass_count
+  return '-'
+}
+
+function getHistoryTomorrowStarCount(item: HistoryLikeItem): number | '-' {
+  if (typeof item.tomorrow_star_count === 'number') return item.tomorrow_star_count
+  return '-'
+}
+
 function normalizeHistoryRow(
   item: HistoryLikeItem,
   fallbackLatestDate: string,
@@ -1201,7 +1550,9 @@ function normalizeHistoryRow(
 
   const count = getHistoryCount(item)
   const pass = getHistoryPassCount(item)
+  const b1PassCount = getHistoryB1PassCount(item)
   const consecutiveCandidateCount = typeof item.consecutive_candidate_count === 'number' ? item.consecutive_candidate_count : '-'
+  const tomorrowStarCount = getHistoryTomorrowStarCount(item)
   const analysisCount = typeof item.analysis_count === 'number' ? item.analysis_count : '-'
   const inferredStatus =
     item.status
@@ -1218,11 +1569,15 @@ function normalizeHistoryRow(
     rawDate,
     count,
     pass,
+    b1PassCount,
     consecutiveCandidateCount,
+    tomorrowStarCount,
     status: normalizeHistoryStatus(inferredStatus),
     analysisCount,
     errorMessage: item.error_message || null,
     isLatest: Boolean(item.is_latest || (fallbackLatestDate && rawDate === fallbackLatestDate)),
+    marketRegimeBlocked: Boolean(item.market_regime_blocked),
+    marketRegimeInfo: item.market_regime_info || null,
   }
 }
 
@@ -1266,7 +1621,9 @@ function normalizeHistoryRows(
       rawDate,
       count: '-',
       pass: '-',
+      b1PassCount: '-',
       consecutiveCandidateCount: '-',
+      tomorrowStarCount: '-',
       status: 'missing',
       analysisCount: '-',
       errorMessage: null,
@@ -1317,7 +1674,9 @@ async function loadData(skipLatestLoad: boolean = false) {
             rawDate: formatDateString(date),
             count: candidates.length,
             pass: passCount,
+            b1PassCount: '-',
             consecutiveCandidateCount: '-',
+            tomorrowStarCount: '-',
             status: 'success',
             analysisCount: results.length,
             errorMessage: null,
@@ -1329,7 +1688,9 @@ async function loadData(skipLatestLoad: boolean = false) {
             rawDate: formatDateString(date),
             count: '-',
             pass: '-',
+            b1PassCount: '-',
             consecutiveCandidateCount: '-',
+            tomorrowStarCount: '-',
             status: 'missing',
             analysisCount: '-',
             errorMessage: null,
@@ -1390,6 +1751,7 @@ async function loadLatestCandidates() {
     const candidates = candidatesData.candidates || []
     latestCandidates.value = candidates
     latestCandidatePage.value = 1
+    candidateSort.value = { prop: '', order: null }
 
     if (candidatesData.pick_date) {
       const newPickDate = formatDate(candidatesData.pick_date)
@@ -1483,13 +1845,16 @@ async function loadCurrentHotData(skipLatestLoad: boolean = false) {
           const candidates = candidatesData.candidates || []
           const results = resultsData.results || []
           const passCount = results.filter((r) => r.signal_type === 'trend_start').length
+          const b1PassCount = candidates.filter((candidate) => candidate.b1_passed === true).length
 
           return {
             date: formatDateString(date),
             rawDate: formatDateString(date),
             count: candidates.length,
             pass: passCount,
+            b1PassCount,
             consecutiveCandidateCount: '-',
+            tomorrowStarCount: '-',
             status: 'success',
             analysisCount: results.length,
             errorMessage: null,
@@ -1501,7 +1866,9 @@ async function loadCurrentHotData(skipLatestLoad: boolean = false) {
             rawDate: formatDateString(date),
             count: '-',
             pass: '-',
+            b1PassCount: '-',
             consecutiveCandidateCount: '-',
+            tomorrowStarCount: '-',
             status: 'missing',
             analysisCount: '-',
             errorMessage: null,
@@ -1562,6 +1929,7 @@ async function loadCurrentHotLatestCandidates() {
     currentHotLatestCandidates.value = candidates
     currentHotCandidatePage.value = 1
     currentHotAnalysisPage.value = 1
+    currentHotCandidateSort.value = { prop: '', order: null }
 
     if (candidatesData.pick_date) {
       const newPickDate = formatDate(candidatesData.pick_date)
@@ -1621,6 +1989,7 @@ async function selectCurrentHotDate(row: HistoryRow) {
   currentHotViewingDate.value = row.rawDate
   currentHotCandidatePage.value = 1
   currentHotAnalysisPage.value = 1
+  currentHotCandidateSort.value = { prop: '', order: null }
   persistTomorrowStarCache()
 
   if (row.status !== 'success') {
@@ -1692,6 +2061,7 @@ async function selectDate(row: HistoryRow) {
   selectedDate.value = row.rawDate
   viewingDate.value = row.rawDate
   latestCandidatePage.value = 1
+  candidateSort.value = { prop: '', order: null }
   persistTomorrowStarCache()
 
   if (row.status !== 'success') {
@@ -1795,6 +2165,7 @@ async function refreshCurrentCandidates() {
       latestAnalysisResults.value = results
       latestDataDate.value = dateToRefresh
       latestCandidatePage.value = 1
+      candidateSort.value = { prop: '', order: null }
 
       // 更新缓存
       candidatesCache.value.set(dateToRefresh, {
@@ -1844,6 +2215,7 @@ async function refreshCurrentHotCandidates() {
     currentHotLatestDataDate.value = dateToRefresh
     currentHotCandidatePage.value = 1
     currentHotAnalysisPage.value = 1
+    currentHotCandidateSort.value = { prop: '', order: null }
 
     currentHotCandidatesCache.value.set(dateToRefresh, {
       candidates,
@@ -2054,7 +2426,7 @@ function viewStock(code: string, source: 'tomorrow-star' | 'current-hot' | 'midd
   router.push({ path: '/diagnosis', query: { code, source, days: '30' } })
 }
 
-function getAnalysisResultName(result: AnalysisResult | CurrentHotAnalysisResult): string {
+function getAnalysisResultName(result: AnalysisDisplayRow): string {
   if ('name' in result && typeof result.name === 'string' && result.name.trim()) {
     return result.name.trim()
   }
@@ -2066,17 +2438,48 @@ function getAnalysisResultName(result: AnalysisResult | CurrentHotAnalysisResult
   return result.code
 }
 
-function getAnalysisResultComment(result: AnalysisResult | CurrentHotAnalysisResult): string {
+function getAnalysisResultComment(result: AnalysisDisplayRow): string {
   if (typeof result.comment === 'string' && result.comment.trim()) {
     return result.comment.trim()
   }
   return '点击查看单股诊断'
 }
 
+function getCandidateInlineNote(row: Candidate | CurrentHotCandidate): string {
+  if (isCurrentHotTab.value) {
+    const board = getCurrentHotBoardLabel(row as CurrentHotCandidate)
+    const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
+    return comment ? `${board}｜${comment}` : board
+  }
+  const candidate = row as Candidate
+  const prefilterSummary = typeof candidate.prefilter_summary === 'string' ? candidate.prefilter_summary.trim() : ''
+  const comment = typeof candidate.comment === 'string' ? candidate.comment.trim() : ''
+  return comment || prefilterSummary || '点击查看单股诊断'
+}
+
+function getAnalysisB1Passed(result: AnalysisDisplayRow): boolean | null | undefined {
+  return 'b1_passed' in result ? result.b1_passed : undefined
+}
+
 type AnalysisPrefilterLike = {
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
+}
+
+function getAnalysisPrefilterLike(result: AnalysisDisplayRow): AnalysisPrefilterLike {
+  if ('prefilter_passed' in result || 'prefilter_summary' in result || 'prefilter_blocked_by' in result) {
+    return {
+      prefilter_passed: 'prefilter_passed' in result ? result.prefilter_passed : undefined,
+      prefilter_summary: 'prefilter_summary' in result ? result.prefilter_summary : undefined,
+      prefilter_blocked_by: 'prefilter_blocked_by' in result ? result.prefilter_blocked_by : undefined,
+    }
+  }
+  return {}
+}
+
+function getAnalysisPrefilterPassed(result: AnalysisDisplayRow): boolean | null | undefined {
+  return getAnalysisPrefilterLike(result).prefilter_passed
 }
 
 function getAnalysisPrefilterTagType(value?: boolean | null): string {
@@ -2106,7 +2509,12 @@ function getAnalysisPrefilterSummary(result: AnalysisPrefilterLike): string {
 
 function getCurrentHotBoardLabel(candidate: CurrentHotCandidate): string {
   if (Array.isArray(candidate.sector_names) && candidate.sector_names.length > 0) {
-    return candidate.sector_names.join(' / ')
+    const sectorNames = candidate.sector_names
+      .map((item) => String(item || '').trim())
+      .filter((item) => item && item !== '当前热盘')
+    if (sectorNames.length > 0) {
+      return sectorNames.join(' / ')
+    }
   }
   const label = [candidate.board_name, candidate.board, candidate.sector_name]
     .find((item) => typeof item === 'string' && item.trim())
@@ -2115,6 +2523,38 @@ function getCurrentHotBoardLabel(candidate: CurrentHotCandidate): string {
   }
   if (candidate.board_group === 'kechuang') return '科创板'
   return isSciTechBoardCode(candidate.code) ? '科创板' : '其他板块'
+}
+
+function formatTurnoverRate(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : `${numericValue.toFixed(2)}%`
+}
+
+function formatVolumeRatio(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : numericValue.toFixed(2)
+}
+
+function formatActivePoolRank(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : String(Math.round(numericValue))
+}
+
+function toFiniteNumber(value?: number | string | null): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function hasCandidateMarketMetrics(candidates: Array<Candidate | CurrentHotCandidate>): boolean {
+  if (candidates.length === 0) return true
+  return candidates.some((candidate) => (
+    toFiniteNumber(candidate.turnover_rate) !== null
+    || toFiniteNumber(candidate.volume_ratio) !== null
+  ))
 }
 
 function formatDate(date: string | Date): string {
@@ -2146,14 +2586,14 @@ function formatDateTime(dateTimeStr: string): string {
   }).format(date)
 }
 
-function getScoreType(score?: number): string {
+function getScoreType(score?: number | null): string {
   if (!score) return 'info'
   if (score >= 4.0) return 'success'
   if (score >= 3.5) return 'warning'
   return 'danger'
 }
 
-function getSignalTypeLabel(signalType?: string): string {
+function getSignalTypeLabel(signalType?: string | null): string {
   const signalMap: Record<string, string> = {
     'trend_start': '趋势启动',
     'rebound': '反弹延续',
@@ -2162,7 +2602,7 @@ function getSignalTypeLabel(signalType?: string): string {
   return signalMap[signalType || ''] || signalType || '-'
 }
 
-function getSignalTypeTag(signalType?: string): string {
+function getSignalTypeTag(signalType?: string | null): string {
   if (signalType === 'trend_start') return 'success'
   if (signalType === 'rebound') return 'warning'
   if (signalType === 'distribution_risk') return 'danger'
@@ -2215,14 +2655,37 @@ function getMiddayRowComment(row: IntradayAnalysisItem): string {
   return '点击查看单股诊断'
 }
 
-function buildHistorySignature(dates: string[], history: Array<{ date: string; count?: number; pass?: number } | HistoryRow>): string {
+function buildHistorySignature(dates: string[], history: Array<HistoryLikeItem | HistoryRow>): string {
+  const resolveCount = (item: HistoryLikeItem | HistoryRow): number | '-' => {
+    if (typeof item.count === 'number') return item.count
+    if ('candidate_count' in item && typeof item.candidate_count === 'number') return item.candidate_count
+    return '-'
+  }
+  const resolvePass = (item: HistoryLikeItem | HistoryRow): number | '-' => {
+    if (typeof item.pass === 'number') return item.pass
+    if ('trend_start_count' in item && typeof item.trend_start_count === 'number') return item.trend_start_count
+    return '-'
+  }
+
   if (history.length > 0) {
     return JSON.stringify(
       history.map((item) => ({
         date: formatDateString(('rawDate' in item ? item.rawDate : item.date) || ''),
-        count: typeof item.count === 'number' ? item.count : '-',
-        pass: typeof item.pass === 'number' ? item.pass : '-',
-        consecutiveCandidateCount: 'consecutiveCandidateCount' in item ? item.consecutiveCandidateCount : '-',
+        count: resolveCount(item),
+        pass: resolvePass(item),
+        b1PassCount: (
+          'b1PassCount' in item
+            ? item.b1PassCount
+            : (typeof item.b1_pass_count === 'number' ? item.b1_pass_count : '-')
+        ),
+        consecutiveCandidateCount: 'consecutiveCandidateCount' in item
+          ? item.consecutiveCandidateCount
+          : (typeof item.consecutive_candidate_count === 'number' ? item.consecutive_candidate_count : '-'),
+        tomorrowStarCount: (
+          'tomorrowStarCount' in item
+            ? item.tomorrowStarCount
+            : (typeof item.tomorrow_star_count === 'number' ? item.tomorrow_star_count : '-')
+        ),
         status: 'status' in item ? item.status : undefined,
       }))
     )
@@ -2276,6 +2739,7 @@ function persistTomorrowStarCache() {
     latestDataDate: latestDataDate.value,
     historyPage: historyPage.value,
     latestCandidatePage: latestCandidatePage.value,
+    candidateSort: candidateSort.value,
     lastHistorySignature: lastHistorySignature.value,
     freshnessVersion: freshnessVersion.value,
     currentHotHistoryData: currentHotHistoryData.value,
@@ -2288,6 +2752,7 @@ function persistTomorrowStarCache() {
     currentHotHistoryPage: currentHotHistoryPage.value,
     currentHotCandidatePage: currentHotCandidatePage.value,
     currentHotAnalysisPage: currentHotAnalysisPage.value,
+    currentHotCandidateSort: currentHotCandidateSort.value,
     currentHotLastHistorySignature: currentHotLastHistorySignature.value,
     currentHotBoardFilter: currentHotBoardFilter.value,
     cachedAt: Date.now(),
@@ -2309,12 +2774,17 @@ function hydrateTomorrowStarCache() {
       rawDate: formatDateString(item.rawDate || item.date || ''),
       date: formatDateString(item.rawDate || item.date || ''),
       status: normalizeHistoryStatus(item.status),
+      b1PassCount: typeof item.b1PassCount === 'number' ? item.b1PassCount : '-',
       consecutiveCandidateCount: typeof item.consecutiveCandidateCount === 'number' ? item.consecutiveCandidateCount : '-',
+      tomorrowStarCount: typeof item.tomorrowStarCount === 'number' ? item.tomorrowStarCount : '-',
       analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
       errorMessage: item.errorMessage || null,
       isLatest: Boolean(item.isLatest),
     }))
     latestCandidates.value = payload.latestCandidates || []
+    if (!hasCandidateMarketMetrics(latestCandidates.value)) {
+      latestCandidates.value = []
+    }
     latestAnalysisResults.value = payload.latestAnalysisResults || []
     selectedDate.value = payload.selectedDate || null
     viewingDate.value = payload.viewingDate || null
@@ -2322,6 +2792,7 @@ function hydrateTomorrowStarCache() {
     latestDataDate.value = payload.latestDataDate || ''
     historyPage.value = Math.max(1, Number(payload.historyPage) || 1)
     latestCandidatePage.value = Math.max(1, Number(payload.latestCandidatePage) || 1)
+    candidateSort.value = normalizeCandidateSortState(payload.candidateSort)
     lastHistorySignature.value = payload.lastHistorySignature || ''
     freshnessVersion.value = payload.freshnessVersion || ''
     currentHotHistoryData.value = (payload.currentHotHistoryData || []).map((item: any) => ({
@@ -2329,12 +2800,17 @@ function hydrateTomorrowStarCache() {
       rawDate: formatDateString(item.rawDate || item.date || ''),
       date: formatDateString(item.rawDate || item.date || ''),
       status: normalizeHistoryStatus(item.status),
+      b1PassCount: typeof item.b1PassCount === 'number' ? item.b1PassCount : '-',
       consecutiveCandidateCount: typeof item.consecutiveCandidateCount === 'number' ? item.consecutiveCandidateCount : '-',
+      tomorrowStarCount: typeof item.tomorrowStarCount === 'number' ? item.tomorrowStarCount : '-',
       analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
       errorMessage: item.errorMessage || null,
       isLatest: Boolean(item.isLatest),
     }))
     currentHotLatestCandidates.value = payload.currentHotLatestCandidates || []
+    if (!hasCandidateMarketMetrics(currentHotLatestCandidates.value)) {
+      currentHotLatestCandidates.value = []
+    }
     currentHotAnalysisResults.value = payload.currentHotAnalysisResults || []
     currentHotSelectedDate.value = payload.currentHotSelectedDate || null
     currentHotViewingDate.value = payload.currentHotViewingDate || null
@@ -2343,6 +2819,7 @@ function hydrateTomorrowStarCache() {
     currentHotHistoryPage.value = Math.max(1, Number(payload.currentHotHistoryPage) || 1)
     currentHotCandidatePage.value = Math.max(1, Number(payload.currentHotCandidatePage) || 1)
     currentHotAnalysisPage.value = Math.max(1, Number(payload.currentHotAnalysisPage) || 1)
+    currentHotCandidateSort.value = normalizeCandidateSortState(payload.currentHotCandidateSort)
     currentHotLastHistorySignature.value = payload.currentHotLastHistorySignature || ''
     currentHotBoardFilter.value = payload.currentHotBoardFilter || 'all'
 
@@ -2551,6 +3028,24 @@ $space-lg: 32px;
     }
   }
 
+  .top-grid {
+    display: grid;
+    grid-template-columns: clamp(400px, 25vw, 460px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: stretch;
+    min-height: calc(100vh - 174px);
+
+    &.is-current-hot {
+      grid-template-columns: clamp(360px, 22vw, 420px) minmax(0, 1fr);
+    }
+  }
+
+  .history-column,
+  .content-column {
+    min-width: 0;
+    display: flex;
+  }
+
   .board-filter,
   .source-switch {
     :deep(.el-radio-group__item),
@@ -2626,6 +3121,50 @@ $space-lg: 32px;
     margin-top: 10px;
     font-size: 13px;
     color: #606266;
+  }
+
+  .market-regime-empty {
+    margin: 16px auto 0;
+    padding: 16px;
+    max-width: 720px;
+    border: 1px solid #f3d19e;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #fff9ef 0%, #fffdf8 100%);
+    color: #7c4a03;
+    text-align: left;
+  }
+
+  .market-regime-empty--desktop {
+    margin: 20px 0 0;
+    min-height: 400px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .market-regime-empty__title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #9a3412;
+  }
+
+  .market-regime-empty__summary {
+    margin-top: 10px;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  .market-regime-empty__list {
+    margin: 12px 0 0;
+    padding-left: 18px;
+    line-height: 1.8;
+  }
+
+  .market-regime-empty__hint {
+    margin-top: 12px;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #92400e;
   }
 
   .mobile-analysis-item__name {
@@ -2705,6 +3244,7 @@ $space-lg: 32px;
 
     .history-table {
       flex: 1 1 auto;
+      font-size: 12px;
 
       :deep(.el-table__row) {
         cursor: pointer;
@@ -2715,33 +3255,39 @@ $space-lg: 32px;
       }
 
       :deep(.el-table__cell) {
-        padding: $space-xs 0;
+        padding: 5px 0;
+      }
+
+      :deep(.cell) {
+        padding: 0 10px;
       }
     }
 
-    .history-status-cell {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 4px;
-
-      .status-tag {
-        min-width: 52px;
-      }
-    }
   }
 
   .candidates-card {
+    :deep(.el-card__body) {
+      overflow: hidden;
+    }
+
     .candidates-table {
       flex: 1 1 auto;
       min-height: 200px;
+      width: 100%;
+      font-size: 12px;
 
       :deep(.cell) {
         white-space: nowrap;
+        padding: 0 5px;
       }
 
       :deep(.el-table__cell) {
-        padding: $space-xs 0;
+        padding: 5px 0;
+      }
+
+      :deep(.el-table-fixed-column--right::before),
+      :deep(.el-table-fixed-column--right::after) {
+        display: none;
       }
     }
 
@@ -2785,10 +3331,31 @@ $space-lg: 32px;
   .history-card {
     .pagination-wrap {
       display: flex;
-      justify-content: flex-end;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       margin-top: $space-xs;
       flex-shrink: 0;
       min-height: 32px;
+      overflow: hidden;
+    }
+
+    .pagination-total {
+      flex: 0 0 auto;
+      font-size: 12px;
+      color: #64748b;
+      white-space: nowrap;
+    }
+
+    :deep(.el-pagination) {
+      min-width: 0;
+      justify-content: flex-end;
+      overflow: hidden;
+    }
+
+    :deep(.el-pager) {
+      max-width: 212px;
+      overflow: hidden;
     }
   }
 
@@ -2805,6 +3372,21 @@ $space-lg: 32px;
   // 统一按钮样式
   .el-button {
     border-radius: 4px;
+  }
+
+  .stock-name-cell {
+    display: inline-block;
+    max-width: 4em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+
+  .table-header-help {
+    cursor: help;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
   }
 }
 
@@ -2851,26 +3433,6 @@ $space-lg: 32px;
     :deep(.el-card__body) {
       overflow: visible;
     }
-  }
-}
-
-// 确保 el-row 和 el-col 对齐
-.el-row {
-  margin: 0 !important;
-
-  .el-col {
-    padding: 0 !important;
-  }
-}
-
-// 顶部两列等高对齐
-.top-row {
-  display: flex;
-  align-items: stretch;
-
-  .el-col {
-    display: flex;
-    flex-direction: column;
   }
 }
 

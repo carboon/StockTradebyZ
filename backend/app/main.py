@@ -147,10 +147,10 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.to_thread(
                 ensure_tomorrow_star_window,
-                180,
+                120,
             )
         except Exception as exc:
-            logger.exception("明日之星 180 日窗口补齐启动失败: %s", exc)
+            logger.exception("明日之星 120 日窗口补齐启动失败: %s", exc)
 
     async def warm_stock_metadata_cache() -> None:
         try:
@@ -162,9 +162,24 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.exception("股票基础列表缓存预热失败: %s", exc)
 
+    async def warm_diagnosis_history_cache() -> None:
+        try:
+            from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
+
+            result = await asyncio.to_thread(diagnosis_history_cache_service.prewarm)
+            logger.info(
+                "单股诊断历史缓存预热完成: success=%s count=%s failed=%s",
+                result.get("success"),
+                result.get("success_count"),
+                len(result.get("failed") or []),
+            )
+        except Exception as exc:
+            logger.exception("单股诊断历史缓存预热失败: %s", exc)
+
     if not _TEST_MODE and not DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE.exists():
         asyncio.create_task(bootstrap_tomorrow_star_window())
         asyncio.create_task(warm_stock_metadata_cache())
+        asyncio.create_task(warm_diagnosis_history_cache())
 
     yield
     logger.info("StockTrader API 已关闭")

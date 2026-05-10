@@ -189,7 +189,8 @@ class TaskService:
     """后台任务服务"""
 
     ACTIVE_STATUSES = ("pending", "running")
-    FULL_TASK_TYPES = ("full_update", "tomorrow_star")
+    RECENT_120_REBUILD_TASK_TYPE = "recent_120_rebuild"
+    FULL_TASK_TYPES = ("full_update", "tomorrow_star", RECENT_120_REBUILD_TASK_TYPE)
     SINGLE_ANALYSIS_TASK_TYPE = "single_analysis"
     INCREMENTAL_UPDATE_TASK_TYPE = "incremental_update"
     DAILY_BATCH_UPDATE_TASK_TYPE = "daily_batch_update"
@@ -247,6 +248,8 @@ class TaskService:
 
         "history_window_star": {"label": "补齐历史窗口", "detail": "生成明日之星历史记录", "index": 6, "total": 6, "percent": 92},
         "history_window_hot": {"label": "补齐历史窗口", "detail": "生成当前热盘历史记录", "index": 6, "total": 6, "percent": 96},
+        "recent_120_rebuild": {"label": "近120交易日重建", "detail": "检查数据、更新 CSV/DB 并重建派生结果", "index": 1, "total": 2, "percent": 5},
+        "diagnosis_cache_prewarm": {"label": "预热诊断缓存", "detail": "写入单股诊断历史缓存", "index": 2, "total": 2, "percent": 98},
 
         # 阶段6: 完成（100%）
         "finalize": {"label": "输出推荐", "detail": "生成最终结果", "index": 6, "total": 6, "percent": 100},
@@ -526,6 +529,8 @@ class TaskService:
         try:
             if task_type == "full_update":
                 await self._run_full_update(task, db)
+            elif task_type == self.RECENT_120_REBUILD_TASK_TYPE:
+                await self._run_recent_120_rebuild(task, db, params_json)
             elif task_type == "single_analysis":
                 await self._run_single_analysis(task, db, params_json)
             elif task_type == self.DAILY_BATCH_UPDATE_TASK_TYPE:
@@ -785,7 +790,7 @@ class TaskService:
 
         tomorrow_star_window_synced = await asyncio.to_thread(
             self._run_tomorrow_star_window_sync,
-            180,
+            120,
             reviewer,
             "full_update",
         )
@@ -806,7 +811,7 @@ class TaskService:
 
         current_hot_synced = await asyncio.to_thread(
             self._run_current_hot_window_sync,
-            180,
+            120,
             reviewer,
         )
         if current_hot_synced.get("failed_dates"):
@@ -825,6 +830,175 @@ class TaskService:
                 "durations_seconds": stage_durations,
             },
         }
+        diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db, preserve_stage=True)
+        task.result_json["diagnosis_cache_prewarm"] = diagnosis_cache
+
+    async def _run_recent_120_rebuild(self, task: Any, db: Session, params_json: dict = None):
+        """Run the recent-120 rebuild script used by the task center full rebuild button."""
+        params = params_json or task.params_json or {}
+        window_size = int(params.get("window_size") or 120)
+        reviewer = str(params.get("reviewer") or "quant")
+
+        task.task_stage = "recent_120_rebuild"
+        task.progress = 5
+        task.progress_meta_json = self._build_stage_meta(
+            "recent_120_rebuild",
+            progress=5,
+            message=f"开始重建最近 {window_size} 个交易日数据",
+        )
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
+
+        cmd = [
+            sys.executable or "python",
+            str(ROOT / "backend" / "scripts" / "rebuild_recent_120_data.py"),
+            "--yes",
+            "--window-size",
+            str(window_size),
+            "--reviewer",
+            reviewer,
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(ROOT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self.running_tasks[task.id] = process
+
+        last_flush_at = 0.0
+        output_tail: list[str] = []
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            text = line.decode(locale.getpreferredencoding(False), errors="replace").strip()
+            if not text:
+                continue
+            output_tail.append(text)
+            output_tail = output_tail[-80:]
+            if not _should_skip_task_log_line(text):
+                self._record_task_log(task, text, "info", stage=task.task_stage)
+
+            progress = self._estimate_recent_120_progress(text)
+            if progress is not None:
+                task.progress = max(task.progress or 0, progress)
+                task.progress_meta_json = self._build_stage_meta(
+                    "recent_120_rebuild",
+                    progress=task.progress,
+                    message=text,
+                )
+            now_monotonic = time.perf_counter()
+            if now_monotonic - last_flush_at >= self._progress_commit_interval_seconds:
+                db.commit()
+                last_flush_at = now_monotonic
+                await self._publish_ops_task_event(task, "task_progress")
+
+        return_code = await process.wait()
+        if return_code != 0:
+            if task.id in self._cancelled_tasks:
+                raise asyncio.CancelledError()
+            raise Exception(f"近120交易日重建脚本执行失败，返回码: {return_code}")
+
+        from app.services.tushare_service import TushareService
+
+        TushareService.clear_data_status_cache()
+        self._invalidate_tomorrow_star_caches()
+        try:
+            from app.services.admin_summary_metadata_service import get_admin_summary_metadata_service
+            get_admin_summary_metadata_service(db).invalidate()
+        except Exception:
+            pass
+
+        task.result_json = {
+            "success": True,
+            "task_type": self.RECENT_120_REBUILD_TASK_TYPE,
+            "window_size": window_size,
+            "reviewer": reviewer,
+            "output_tail": output_tail,
+        }
+        task.progress = 100
+        task.task_stage = "completed"
+        task.progress_meta_json = self._build_stage_meta(
+            "completed",
+            progress=100,
+            message="最近120交易日数据重建完成",
+        )
+        await self._prewarm_diagnosis_history_cache_async(task, db)
+
+    @staticmethod
+    def _estimate_recent_120_progress(line: str) -> Optional[int]:
+        if line.startswith("[plan]"):
+            return 8
+        if line.startswith("[data "):
+            return 25
+        if line.startswith("[metrics "):
+            return 38
+        if line.startswith("[csv]"):
+            return 48
+        if line.startswith("[clean]"):
+            return 55
+        if line.startswith("[rebuild] tomorrow-star"):
+            return 68
+        if line.startswith("[rebuild] current-hot"):
+            return 78
+        if line.startswith("[rebuild] diagnosis"):
+            return 88
+        if line.startswith("[metrics]"):
+            return 94
+        if line.startswith("[cache]"):
+            return 97
+        return None
+
+    async def _prewarm_diagnosis_history_cache_async(
+        self,
+        task: Any,
+        db: Session,
+        *,
+        preserve_stage: bool = False,
+    ) -> dict[str, Any]:
+        previous_stage = task.task_stage
+        previous_progress = task.progress
+        previous_meta = task.progress_meta_json
+        task.task_stage = "diagnosis_cache_prewarm"
+        task.progress = max(int(task.progress or 0), 98)
+        task.progress_meta_json = self._build_stage_meta(
+            "diagnosis_cache_prewarm",
+            progress=task.progress,
+            message="正在预热单股诊断历史缓存",
+        )
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
+        try:
+            from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
+
+            result = await asyncio.to_thread(diagnosis_history_cache_service.prewarm)
+            self._record_task_log(
+                task,
+                f"单股诊断历史缓存预热完成: {result.get('success_count', 0)} 只股票",
+                "info",
+                stage="diagnosis_cache_prewarm",
+            )
+            if preserve_stage:
+                task.task_stage = previous_stage
+                task.progress = previous_progress
+                task.progress_meta_json = previous_meta
+                db.commit()
+            return result
+        except Exception as exc:
+            self._record_task_log(
+                task,
+                f"单股诊断历史缓存预热失败: {exc}",
+                "warning",
+                stage="diagnosis_cache_prewarm",
+            )
+            if preserve_stage:
+                task.task_stage = previous_stage
+                task.progress = previous_progress
+                task.progress_meta_json = previous_meta
+                db.commit()
+            return {"success": False, "error": str(exc)}
 
     def _reset_full_update_state(self, db: Session, task: Any) -> None:
         """重置数据库中的全量初始化结果，但保留 CSV 原始文件供步骤 1 续跑。"""
@@ -936,7 +1110,7 @@ class TaskService:
             trade_date,
             reviewer="quant",
             source=source,
-            window_size=180,
+            window_size=120,
         )
         build_result = consistency_result.get("build") or {}
         if not build_result.get("success"):
@@ -979,6 +1153,8 @@ class TaskService:
             "current_hot_rebuild": current_hot_result,
             **result,
         }
+        diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db)
+        task.result_json["diagnosis_cache_prewarm"] = diagnosis_cache
         task.task_stage = "daily_batch_completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1074,7 +1250,7 @@ class TaskService:
             trade_date,
             reviewer="quant",
             source="incremental_update",
-            window_size=180,
+            window_size=120,
         )
         build_result = consistency_result.get("build") or {}
         if not build_result.get("success"):
@@ -1130,6 +1306,8 @@ class TaskService:
             "current_hot_rebuild": current_hot_result,
             **result,
         }
+        diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db)
+        task.result_json["diagnosis_cache_prewarm"] = diagnosis_cache
         task.task_stage = "daily_batch_completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1168,7 +1346,7 @@ class TaskService:
 
     @staticmethod
     def _run_tomorrow_star_window_sync(
-        window_size: int = 180,
+        window_size: int = 120,
         reviewer: str = "quant",
         source: str = "full_update",
     ) -> dict[str, Any]:
@@ -1184,7 +1362,7 @@ class TaskService:
 
     @staticmethod
     def _run_current_hot_window_sync(
-        window_size: int = 180,
+        window_size: int = 120,
         reviewer: str = "quant",
     ) -> dict[str, Any]:
         from app.database import SessionLocal
@@ -1203,6 +1381,7 @@ class TaskService:
 
         cache.delete_prefix("candidates:")
         cache.delete_prefix("analysis_results:")
+        cache.delete_prefix("diagnosis:history:")
         cache.delete(build_freshness_cache_key())
 
     async def _run_tomorrow_star(self, task: Any, db: Session):
@@ -1611,6 +1790,8 @@ class TaskService:
             if skip_fetch:
                 parts.append("skip_fetch")
             return " | ".join(parts)
+        if task_type == TaskService.RECENT_120_REBUILD_TASK_TYPE:
+            return f"近120交易日重建 / window={params.get('window_size', 120)}"
         if task_type == "single_analysis":
             return f"单股分析 / code={params.get('code', '-')}"
         if task_type == TaskService.DAILY_BATCH_UPDATE_TASK_TYPE:
@@ -1901,7 +2082,7 @@ class TaskService:
         """
         if task.status not in ("failed", "cancelled"):
             return False
-        if task.task_type not in self.FULL_TASK_TYPES:
+        if task.task_type not in ("full_update", "tomorrow_star"):
             return False
         # 检查是否有未完成的步骤
         steps_completed = task.steps_completed or {}

@@ -98,13 +98,14 @@ def test_get_current_hot_dates_returns_history(test_client_with_db: Any) -> None
     data = response.json()
     assert data["dates"] == ["2026-05-08"]
     assert data["history"][0]["trend_start_count"] == 1
+    assert data["history"][0]["b1_pass_count"] == 1
     assert data["history"][0]["consecutive_candidate_count"] == 1
 
 
 def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> None:
     db = test_client_with_db.db
     pick_date = date(2026, 5, 8)
-    db.add(Stock(code="688001", name="华兴源创", market="SH"))
+    db.add(Stock(code="688001", name="华兴源创", market="SH", industry="半导体"))
     db.add(
         CurrentHotRun(
             pick_date=pick_date,
@@ -124,6 +125,8 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
             open_price=10.0,
             close_price=10.5,
             change_pct=5.0,
+            turnover_rate=12.3,
+            volume_ratio=1.5,
             b1_passed=True,
             kdj_j=12.0,
         )
@@ -138,6 +141,8 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
             total_score=5.3,
             signal_type="trend_start",
             comment="ok",
+            turnover_rate=12.3,
+            volume_ratio=1.5,
             details_json={"comment": "ok"},
         )
     )
@@ -152,8 +157,52 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
     results_data = results_response.json()
     assert candidates_data["candidates"][0]["board_group"] == "kechuang"
     assert candidates_data["candidates"][0]["sector_names"] == ["光芯片"]
+    assert candidates_data["candidates"][0]["turnover_rate"] == 12.3
+    assert candidates_data["candidates"][0]["volume_ratio"] == 1.5
+    assert candidates_data["candidates"][0]["b1_passed"] is True
+    assert candidates_data["candidates"][0]["total_score"] == 5.3
+    assert candidates_data["candidates"][0]["signal_type"] == "trend_start"
     assert results_data["results"][0]["b1_passed"] is True
     assert results_data["results"][0]["total_score"] == 5.3
+    assert results_data["results"][0]["turnover_rate"] == 12.3
+    assert results_data["results"][0]["volume_ratio"] == 1.5
+
+
+def test_current_hot_replaces_generic_sector_with_stock_industry(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    pick_date = date(2026, 5, 8)
+    db.add(Stock(code="600001", name="算力股份", market="SH", industry="通信设备"))
+    db.add(CurrentHotRun(pick_date=pick_date, status="success", candidate_count=1, analysis_count=1))
+    db.add(
+        CurrentHotCandidate(
+            pick_date=pick_date,
+            code="600001",
+            sector_names_json=["当前热盘"],
+            board_group="other",
+            b1_passed=True,
+        )
+    )
+    db.add(
+        CurrentHotAnalysisResult(
+            pick_date=pick_date,
+            code="600001",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.0,
+            signal_type="trend_start",
+            details_json={},
+        )
+    )
+    db.commit()
+
+    candidates_response = test_client_with_db.get("/api/v1/analysis/current-hot/candidates?date=2026-05-08")
+    results_response = test_client_with_db.get("/api/v1/analysis/current-hot/results?date=2026-05-08")
+
+    assert candidates_response.status_code == 200
+    assert results_response.status_code == 200
+    assert candidates_response.json()["candidates"][0]["sector_names"] == ["通信设备"]
+    assert results_response.json()["results"][0]["sector_names"] == ["通信设备"]
 
 
 def test_get_current_hot_results_prioritizes_b1_then_trend_start_then_score(test_client_with_db: Any) -> None:
@@ -190,6 +239,35 @@ def test_get_current_hot_results_prioritizes_b1_then_trend_start_then_score(test
     assert response.status_code == 200
     data = response.json()
     assert [item["code"] for item in data["results"]] == ["688002", "688001", "600001", "600002"]
+
+
+def test_get_current_hot_candidates_prioritizes_trend_start_then_b1_then_score(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    pick_date = date(2026, 5, 8)
+    db.add_all([
+        Stock(code="688001", name="A", market="SH"),
+        Stock(code="688002", name="B", market="SH"),
+        Stock(code="600001", name="C", market="SH"),
+        Stock(code="600002", name="D", market="SH"),
+    ])
+    db.add(CurrentHotRun(pick_date=pick_date, status="success", candidate_count=4, analysis_count=4, trend_start_count=2))
+    db.add_all([
+        CurrentHotCandidate(pick_date=pick_date, code="688001", sector_names_json=["芯片"], board_group="kechuang", b1_passed=True),
+        CurrentHotCandidate(pick_date=pick_date, code="688002", sector_names_json=["芯片"], board_group="kechuang", b1_passed=False),
+        CurrentHotCandidate(pick_date=pick_date, code="600001", sector_names_json=["算力"], board_group="other", b1_passed=True),
+        CurrentHotCandidate(pick_date=pick_date, code="600002", sector_names_json=["算力"], board_group="other", b1_passed=True),
+        CurrentHotAnalysisResult(pick_date=pick_date, code="688001", reviewer="quant", b1_passed=True, verdict="WATCH", total_score=4.8, signal_type="rebound", comment="a", details_json={}),
+        CurrentHotAnalysisResult(pick_date=pick_date, code="688002", reviewer="quant", b1_passed=False, verdict="PASS", total_score=5.0, signal_type="trend_start", comment="b", details_json={}),
+        CurrentHotAnalysisResult(pick_date=pick_date, code="600001", reviewer="quant", b1_passed=True, verdict="PASS", total_score=4.2, signal_type="trend_start", comment="c", details_json={}),
+        CurrentHotAnalysisResult(pick_date=pick_date, code="600002", reviewer="quant", b1_passed=True, verdict="WATCH", total_score=4.9, signal_type="rebound", comment="d", details_json={}),
+    ])
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/current-hot/candidates?date=2026-05-08")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["code"] for item in data["candidates"]] == ["600001", "688002", "600002", "688001"]
 
 
 def test_generate_current_hot_creates_daily_rows(test_client_with_db: Any) -> None:

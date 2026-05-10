@@ -49,9 +49,9 @@
 
     <!-- 分析结果 -->
     <template v-if="stockCode">
-      <el-row :gutter="20" class="content-row">
+      <div class="content-grid">
         <!-- K线图 -->
-        <el-col :span="isMobileViewport ? 24 : 16">
+        <div class="chart-column">
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
@@ -111,10 +111,10 @@
             </template>
             <div ref="chartRef" class="chart-container" />
           </el-card>
-        </el-col>
+        </div>
 
         <!-- 分析面板 -->
-        <el-col :span="isMobileViewport ? 24 : 8">
+        <div class="analysis-column">
           <el-card class="analysis-card">
             <div v-if="analysisResult" class="analysis-content">
               <div v-if="isMobileViewport" class="analysis-summary-grid">
@@ -130,6 +130,18 @@
                     {{ analysisResult.b1_passed ? '通过' : '未通过' }}
                   </el-tag>
                 </div>
+                <div class="summary-tile">
+                  <span class="summary-label">活跃度排名</span>
+                  <span class="value">{{ formatRank(analysisResult.active_pool_rank) }}</span>
+                </div>
+                <div class="summary-tile">
+                  <span class="summary-label">换手率</span>
+                  <span class="value">{{ formatTurnoverRate(analysisResult.turnover_rate) }}</span>
+                </div>
+                <div class="summary-tile">
+                  <span class="summary-label">量比</span>
+                  <span class="value">{{ formatVolumeRatio(analysisResult.volume_ratio) }}</span>
+                </div>
                 <div class="summary-tile verdict-tile">
                   <span class="summary-label">
                     趋势判断
@@ -142,6 +154,39 @@
               </div>
 
               <template v-else>
+                <div class="analysis-metric-grid">
+                  <div class="metric-card">
+                    <span class="metric-label">当前评分</span>
+                    <el-tag :type="getScoreType(analysisResult.score)" size="large">
+                      {{ analysisResult.score != null ? analysisResult.score.toFixed(1) : '-' }}
+                    </el-tag>
+                  </div>
+                  <div class="metric-card">
+                    <span class="metric-label">B1检查</span>
+                    <el-tag :type="analysisResult.b1_passed ? 'success' : 'danger'">
+                      {{ analysisResult.b1_passed ? '通过' : '未通过' }}
+                    </el-tag>
+                  </div>
+                  <div class="metric-card">
+                    <span class="metric-label">活跃池状态</span>
+                    <el-tag :type="getGateTagType(analysisResult.in_active_pool)" size="small">
+                      {{ getGateLabel(analysisResult.in_active_pool) }}
+                    </el-tag>
+                  </div>
+                  <div class="metric-card">
+                    <span class="metric-label">活跃度排名</span>
+                    <span class="metric-value">{{ formatRank(analysisResult.active_pool_rank) }}</span>
+                  </div>
+                  <div class="metric-card">
+                    <span class="metric-label">换手率</span>
+                    <span class="metric-value">{{ formatTurnoverRate(analysisResult.turnover_rate) }}</span>
+                  </div>
+                  <div class="metric-card">
+                    <span class="metric-label">量比</span>
+                    <span class="metric-value">{{ formatVolumeRatio(analysisResult.volume_ratio) }}</span>
+                  </div>
+                </div>
+
                 <div class="analysis-item">
                   <span class="label">当前评分</span>
                   <el-tag :type="getScoreType(analysisResult.score)" size="large">
@@ -336,14 +381,14 @@
 
             <el-empty v-else description="暂无分析数据" :image-size="80" />
           </el-card>
-        </el-col>
-      </el-row>
+        </div>
+      </div>
 
       <!-- 历史记录 -->
       <el-card class="history-card">
         <template #header>
           <div class="history-header">
-            <span>每日检查历史 (近180个交易日收盘后回放)</span>
+            <span>每日检查历史 (近120个交易日收盘后回放)</span>
             <div class="history-actions">
               <span v-if="refreshingHistory" class="refreshing-text">
                 正在刷新第 {{ historyPage }} 页数据...
@@ -376,6 +421,7 @@
                 </span>
               </div>
               <div class="history-card-tags">
+                <el-tag type="info" size="small">排名 {{ formatRank(row.active_pool_rank) }}</el-tag>
                 <el-tag :type="getGateTagType(row.in_active_pool)" size="small">活跃池 {{ getGateLabel(row.in_active_pool) }}</el-tag>
                 <el-tag :type="getGateTagType(row.b1_passed)" size="small">B1 {{ getGateLabel(row.b1_passed) }}</el-tag>
                 <el-tag :type="getPrefilterTagType(row.prefilter_passed)" size="small">前置过滤 {{ getGateLabel(row.prefilter_passed) }}</el-tag>
@@ -386,6 +432,10 @@
                 <el-tag :type="getTomorrowStarTagType(row.tomorrow_star_pass)" size="small">
                   明日之星 {{ getGateLabel(row.tomorrow_star_pass) }}
                 </el-tag>
+              </div>
+              <div class="history-card-metrics">
+                <span>换手率 {{ formatTurnoverRate(row.turnover_rate) }}</span>
+                <span>量比 {{ formatVolumeRatio(row.volume_ratio) }}</span>
               </div>
               <div class="history-card-footer">
                 <div class="history-score-line">
@@ -407,9 +457,9 @@
             :data="historyData"
             stripe
             size="small"
-            max-height="420"
+            max-height="520"
             table-layout="auto"
-            min-width="1060"
+            min-width="1260"
           >
           <el-table-column prop="check_date" label="交易日" width="110">
             <template #default="{ row }">
@@ -441,6 +491,21 @@
               <el-tag :type="getGateTagType(row.in_active_pool)" size="small">
                 {{ getGateLabel(row.in_active_pool) }}
               </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="active_pool_rank" label="活跃度排名" width="110" align="center">
+            <template #default="{ row }">
+              {{ formatRank(row.active_pool_rank) }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="turnover_rate" label="换手率" width="90" align="right">
+            <template #default="{ row }">
+              {{ formatTurnoverRate(row.turnover_rate) }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="volume_ratio" label="量比" width="80" align="right">
+            <template #default="{ row }">
+              {{ formatVolumeRatio(row.volume_ratio) }}
             </template>
           </el-table-column>
           <el-table-column prop="b1_passed" width="60" align="center">
@@ -598,8 +663,9 @@ const { isMobile } = useResponsive()
 const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state:v2'
 const DIAGNOSIS_CHART_CACHE_KEY = 'stocktrade:diagnosis:chart-cache'
 const DIAGNOSIS_CHART_CACHE_TTL_MS = 30 * 60 * 1000
-const AUTO_HISTORY_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 const DIAGNOSIS_INITIAL_CHART_DAYS = 60
+const DIAGNOSIS_HISTORY_WINDOW_DAYS = 120
+const READ_ONLY_ROUTE_SOURCES = new Set(['tomorrow-star', 'current-hot', 'midday-analysis'])
 
 const searchForm = ref({ code: '' })
 const stockCode = ref('')
@@ -621,6 +687,10 @@ type DiagnosisViewResult = {
   zx_long_pos?: boolean
   weekly_ma_aligned?: boolean
   volume_healthy?: boolean
+  active_pool_rank?: number | null
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  in_active_pool?: boolean | null
   scores?: Record<string, number>
   trend_reasoning?: string
   position_reasoning?: string
@@ -634,6 +704,8 @@ type DiagnosisSearchSuggestion = StockSearchItem & {
 
 const historyData = ref<B1Check[]>([])
 const historyTotal = ref(0)
+const trendStartDates = ref<string[]>([])
+const tomorrowStarDates = ref<string[]>([])
 const historyPage = ref(1)
 const historyPageSize = 10
 const historyDetailVisible = ref(false)
@@ -652,7 +724,7 @@ const scoreConfig = {
   volume_behavior: { label: '量价行为', weight: 0.3 },
   previous_abnormal_move: { label: '历史异动', weight: 0.3 },
 }
-const chartDayOptions = [30, 60, 120, 180] as const
+const chartDayOptions = [30, 60, 120] as const
 
 // 计算评分项
 const scoreItems = computed(() => {
@@ -693,8 +765,7 @@ const emptyDescription = computed(() => {
 })
 const isMobileViewport = computed(() => isMobile.value)
 const isTomorrowStarMobileSource = computed(() => {
-  const source = Array.isArray(route.query.source) ? route.query.source[0] : route.query.source
-  return isMobile.value && source === 'tomorrow-star'
+  return isMobile.value && getRouteSource() === 'tomorrow-star'
 })
 
 let chartInstance: ECharts | null = null
@@ -737,6 +808,22 @@ function applyMobileRouteChartPreference() {
   }
 }
 
+function getRouteSource(): string {
+  const source = route.query.source
+  if (Array.isArray(source)) return source[0] || ''
+  return typeof source === 'string' ? source : ''
+}
+
+function shouldLoadRouteReadOnly(): boolean {
+  return READ_ONLY_ROUTE_SOURCES.has(getRouteSource())
+}
+
+async function loadRouteStock(routeCode: string) {
+  stockName.value = ''
+  searchForm.value.code = routeCode
+  await runStockDiagnosis(!shouldLoadRouteReadOnly())
+}
+
 onMounted(() => {
   configStore.checkTushareStatus()
   restoreDiagnosisState()
@@ -745,9 +832,7 @@ onMounted(() => {
   // 从路由参数获取股票代码
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode) {
-    stockName.value = ''
-    searchForm.value.code = routeCode
-    searchAndAnalyze()
+    void loadRouteStock(routeCode)
   }
 
   window.addEventListener('resize', handleResize)
@@ -762,15 +847,13 @@ onActivated(() => {
 
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode && routeCode !== stockCode.value) {
-    stockName.value = ''
-    searchForm.value.code = routeCode
-    searchAndAnalyze()
+    void loadRouteStock(routeCode)
     return
   }
 
   if (stockCode.value) {
     void loadStockInfo()
-    maybeAutoRefreshHistory(true)
+    void loadHistoryData(false)
   }
 })
 
@@ -796,7 +879,7 @@ function handleResize() {
   chartInstance?.resize()
 }
 
-async function searchStock(requestId: number) {
+async function searchStock(requestId: number, options: { autoRefreshHistory?: boolean } = {}) {
   if (!configStore.tushareReady) {
     ElMessage.warning('请先完成 Tushare 配置')
     return
@@ -841,6 +924,8 @@ async function searchStock(requestId: number) {
   stockName.value = matchedStock.name || ''
   searchForm.value.code = stockCode.value
   analysisResult.value = null
+  trendStartDates.value = []
+  tomorrowStarDates.value = []
   historyPage.value = 1
 
   await loadStockInfo()
@@ -855,7 +940,39 @@ async function searchStock(requestId: number) {
   await loadHistoryData()
   if (requestId !== searchSequence) return
   persistDiagnosisState()
-  await maybeAutoRefreshHistory()
+  if (options.autoRefreshHistory !== false) {
+    await maybeAutoRefreshHistory()
+  }
+}
+
+function buildAnalysisResultFromHistory(row: B1Check): DiagnosisViewResult {
+  return {
+    score: row.score,
+    b1_passed: row.b1_passed,
+    verdict: row.verdict,
+    signal_type: row.signal_type || undefined,
+    signal_reasoning: row.signal_reasoning,
+    comment: row.comment || row.notes,
+    kdj_j: row.kdj_j,
+    zx_long_pos: row.zx_long_pos,
+    weekly_ma_aligned: row.weekly_ma_aligned,
+    volume_healthy: row.volume_healthy,
+    active_pool_rank: row.active_pool_rank,
+    turnover_rate: row.turnover_rate,
+    volume_ratio: row.volume_ratio,
+    in_active_pool: row.in_active_pool,
+    scores: row.scores || undefined,
+    trend_reasoning: row.trend_reasoning,
+    position_reasoning: row.position_reasoning,
+    volume_reasoning: row.volume_reasoning,
+    abnormal_move_reasoning: row.abnormal_move_reasoning,
+  }
+}
+
+function syncAnalysisResultFromHistory() {
+  const latest = historyData.value[0]
+  if (!latest) return
+  analysisResult.value = buildAnalysisResultFromHistory(latest)
 }
 
 function toDiagnosisSearchSuggestion(item: StockSearchItem): DiagnosisSearchSuggestion {
@@ -915,6 +1032,10 @@ function handleStockSuggestionSelect(item: DiagnosisSearchSuggestion) {
 }
 
 async function searchAndAnalyze() {
+  await runStockDiagnosis(true)
+}
+
+async function runStockDiagnosis(autoAnalyze: boolean) {
   const requestId = ++searchSequence
 
   // 如果状态还没加载过，先加载一次
@@ -928,10 +1049,16 @@ async function searchAndAnalyze() {
     return
   }
 
-  await searchStock(requestId)
+  await searchStock(requestId, { autoRefreshHistory: autoAnalyze })
   if (requestId !== searchSequence) return
 
-  // 自动开始分析
+  if (!autoAnalyze) {
+    syncAnalysisResultFromHistory()
+    persistDiagnosisState()
+    return
+  }
+
+  // 手动诊断才提交后台分析任务；从榜单跳转只读取已生成数据，避免分页时被分析任务超时提示干扰。
   if (stockCode.value) {
     await analyzeStock()
   }
@@ -983,7 +1110,7 @@ async function triggerHistoryRefresh(silent: boolean = false, force: boolean = f
     const refreshSignal = beginRequest('historyRefresh')
     const result = await apiAnalysis.refreshHistory(
       stockCode.value,
-      180,
+      DIAGNOSIS_HISTORY_WINDOW_DAYS,
       historyPage.value,
       historyPageSize,
       force,
@@ -1010,24 +1137,23 @@ async function triggerHistoryRefresh(silent: boolean = false, force: boolean = f
 async function maybeAutoRefreshHistory(force: boolean = false) {
   if (!stockCode.value) return
 
-  const lastRefreshAt = lastAutoHistoryRefreshAt.value[stockCode.value] || 0
   const statusSignal = beginRequest('historyStatus')
   let shouldRefresh = false
 
   try {
     const status = await apiAnalysis.getHistoryStatus(
       stockCode.value,
-      180,
+      DIAGNOSIS_HISTORY_WINDOW_DAYS,
       1,
       historyPageSize,
       { signal: statusSignal },
     )
     shouldRefresh = force
-      ? !refreshingHistory.value && Date.now() - lastRefreshAt >= AUTO_HISTORY_REFRESH_INTERVAL_MS
-      : Boolean(status.needs_refresh) || (Date.now() - lastRefreshAt >= AUTO_HISTORY_REFRESH_INTERVAL_MS)
+      ? false
+      : Boolean(status.needs_refresh)
   } catch (error) {
     if (!isRequestCanceled(error)) {
-      shouldRefresh = force
+      shouldRefresh = false
     }
   } finally {
     finishRequest('historyStatus', statusSignal)
@@ -1046,7 +1172,7 @@ function selectChartDays(days: number) {
 }
 
 watch(
-  historyData,
+  [historyData, trendStartDates],
   () => {
     if (!currentDiagnosisChartData.value || !stockCode.value) return
     void renderChart(getDiagnosisDisplayChartData(currentDiagnosisChartData.value, chartDays.value))
@@ -1125,11 +1251,12 @@ async function renderChart(data: KLineData) {
 
   const dates = data.daily.map((d) => d.date)
   const values = data.daily.map((d) => [d.open, d.close, d.low, d.high])
+  const trendStartDateSet = new Set(trendStartDates.value)
   const volumeBars = data.daily.map((d) => {
-    const isTrendStart = historyData.value.some((item) => item.check_date === d.date && item.signal_type === 'trend_start')
+    const isTrendStart = trendStartDateSet.has(d.date)
     return {
       value: d.volume,
-      itemStyle: { color: isTrendStart ? '#1d4ed8' : '#778899' },
+      itemStyle: { color: isTrendStart ? '#ef5350' : '#778899' },
     }
   })
   const ma5 = data.daily.map((d) => d.ma5)
@@ -1321,7 +1448,7 @@ async function loadHistoryData(refresh: boolean = false) {
   try {
     const data = await apiAnalysis.getDiagnosisHistory(
       stockCode.value,
-      180,
+      DIAGNOSIS_HISTORY_WINDOW_DAYS,
       historyPage.value,
       historyPageSize,
       refresh,
@@ -1330,6 +1457,8 @@ async function loadHistoryData(refresh: boolean = false) {
     stockName.value = data.name || stockName.value
     historyData.value = data.history || []
     historyTotal.value = data.total || 0
+    trendStartDates.value = data.trend_start_dates || []
+    tomorrowStarDates.value = data.tomorrow_star_dates || []
     persistDiagnosisState()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
@@ -1341,7 +1470,7 @@ async function loadHistoryData(refresh: boolean = false) {
 
 async function handleHistoryPageChange(page: number) {
   historyPage.value = page
-  await triggerHistoryRefresh(true)
+  await loadHistoryData(false)
 }
 
 // 分析任务轮询定时器
@@ -1430,6 +1559,10 @@ async function checkAnalysisResult() {
         zx_long_pos: analysis.zx_long_pos,
         weekly_ma_aligned: analysis.weekly_ma_aligned,
         volume_healthy: analysis.volume_healthy,
+        active_pool_rank: analysis.active_pool_rank,
+        turnover_rate: analysis.turnover_rate,
+        volume_ratio: analysis.volume_ratio,
+        in_active_pool: analysis.in_active_pool,
         // 评分明细
         scores: analysis.scores || {},
         trend_reasoning: analysis.trend_reasoning || '',
@@ -1502,6 +1635,21 @@ function formatDate(dateStr: string): string {
 function formatChange(pct?: number): string {
   if (pct === undefined || pct === null) return '-'
   return (pct > 0 ? '+' : '') + pct.toFixed(2) + '%'
+}
+
+function formatRank(rank?: number | null): string {
+  if (rank === undefined || rank === null) return '-'
+  return `#${rank}`
+}
+
+function formatTurnoverRate(value?: number | null): string {
+  if (value === undefined || value === null) return '-'
+  return `${value.toFixed(2)}%`
+}
+
+function formatVolumeRatio(value?: number | null): string {
+  if (value === undefined || value === null) return '-'
+  return value.toFixed(2)
 }
 
 // 中国习惯：红涨绿跌
@@ -1592,6 +1740,8 @@ function persistDiagnosisState() {
     stockName: stockName.value,
     chartDays: chartDays.value,
     historyData: historyData.value,
+    trendStartDates: trendStartDates.value,
+    tomorrowStarDates: tomorrowStarDates.value,
     analysisResult: analysisResult.value,
     isInWatchlist: isInWatchlist.value,
     lastAutoHistoryRefreshAt: lastAutoHistoryRefreshAt.value,
@@ -1695,8 +1845,10 @@ function restoreDiagnosisState() {
     searchForm.value = state.searchForm || { code: '' }
     stockCode.value = state.stockCode || ''
     stockName.value = state.stockName || ''
-    chartDays.value = state.chartDays || 120
+    chartDays.value = chartDayOptions.includes(state.chartDays) ? state.chartDays : 120
     historyData.value = state.historyData || []
+    trendStartDates.value = state.trendStartDates || []
+    tomorrowStarDates.value = state.tomorrowStarDates || []
     analysisResult.value = state.analysisResult || null
     isInWatchlist.value = Boolean(state.isInWatchlist)
     lastAutoHistoryRefreshAt.value = state.lastAutoHistoryRefreshAt || {}
@@ -1723,6 +1875,8 @@ function normalizeRouteCode(code: unknown): string {
 
 <style scoped lang="scss">
 .diagnosis-page {
+  width: 100%;
+
   .page-alert {
     margin-bottom: 16px;
   }
@@ -1759,11 +1913,22 @@ function normalizeRouteCode(code: unknown): string {
     }
   }
 
-  .content-row {
+  .content-grid {
+    display: grid;
+    grid-template-columns: minmax(620px, 1.55fr) minmax(360px, 0.95fr);
+    gap: 20px;
     margin-bottom: 20px;
+    align-items: stretch;
+  }
+
+  .chart-column,
+  .analysis-column {
+    min-width: 0;
+    display: flex;
   }
 
   .chart-card {
+    width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -1912,11 +2077,12 @@ function normalizeRouteCode(code: unknown): string {
 
     .chart-container {
       flex: 1;
-      min-height: 400px;
+      min-height: 520px;
     }
   }
 
   .analysis-card {
+    width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -1927,6 +2093,33 @@ function normalizeRouteCode(code: unknown): string {
     }
 
     .analysis-content {
+      .analysis-metric-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .metric-card {
+        display: grid;
+        gap: 6px;
+        padding: 12px;
+        border: 1px solid #e5edf5;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      }
+
+      .metric-label {
+        font-size: 12px;
+        color: #64748b;
+      }
+
+      .metric-value {
+        font-size: 18px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
       .analysis-summary-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2187,6 +2380,10 @@ function normalizeRouteCode(code: unknown): string {
     }
   }
 
+  .history-card {
+    width: 100%;
+  }
+
   .history-table-wrap {
     overflow-x: auto;
   }
@@ -2254,6 +2451,14 @@ function normalizeRouteCode(code: unknown): string {
       gap: 12px;
     }
 
+    .history-card-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 12px;
+      color: #64748b;
+    }
+
     .history-score-line {
       display: flex;
       align-items: center;
@@ -2300,7 +2505,8 @@ function normalizeRouteCode(code: unknown): string {
       width: 100%;
     }
 
-    .content-row {
+    .content-grid {
+      grid-template-columns: 1fr;
       margin-bottom: 16px;
     }
 
@@ -2364,6 +2570,10 @@ function normalizeRouteCode(code: unknown): string {
       }
 
       .analysis-content {
+        .analysis-metric-grid {
+          grid-template-columns: 1fr;
+        }
+
         .analysis-item {
           gap: 12px;
         }

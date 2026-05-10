@@ -1,0 +1,7 @@
+ALTER TABLE current_hot_candidates
+    ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE PRECISION;
+
+ALTER TABLE current_hot_analysis_results
+    ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE PRECISION;

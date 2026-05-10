@@ -6,7 +6,7 @@
 global:
   data_dir: "./data/raw"          # A股日线CSV目录
   output_dir: "./data/candidates" # 候选结果输出目录
-  top_m: 4000                     # 流动性池：取成交额最高的 top_m 只；覆盖类似 603989 这类中等活跃但趋势刚启动的标的
+  top_m: 2000                     # 流动性池：按 43 日滚动成交额取前 2000；当前市场环境下收紧活跃池范围
   n_turnover_days: 43             # 滚动成交额窗口（日）
   min_bars_buffer: 10             # 额外的最小 bar 缓冲
 

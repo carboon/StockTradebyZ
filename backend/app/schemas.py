@@ -83,6 +83,9 @@ class CandidateItem(BaseModel):
     close_price: Optional[float] = None
     change_pct: Optional[float] = None
     turnover: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
     b1_passed: Optional[bool] = None
     kdj_j: Optional[float] = None
     consecutive_days: int = 1
@@ -94,10 +97,12 @@ class CandidatesResponse(BaseModel):
     candidates: List[CandidateItem]
     total: int
     # 只读模式状态字段
-    status: Optional[str] = None  # "ok" | "not_ready"
+    status: Optional[str] = None  # "ok" | "not_ready" | "market_regime_blocked"
     message: Optional[str] = None
     has_running_task: Optional[bool] = None
     running_task_id: Optional[int] = None
+    # 市场环境阻断时的额外信息
+    market_regime_info: Optional[Dict[str, Any]] = None
 
     class Config:
         # 忽略额外字段（兼容旧代码）
@@ -116,8 +121,14 @@ class CurrentHotCandidateItem(BaseModel):
     close_price: Optional[float] = None
     change_pct: Optional[float] = None
     turnover: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
     b1_passed: Optional[bool] = None
     kdj_j: Optional[float] = None
+    verdict: Optional[str] = None
+    total_score: Optional[float] = None
+    signal_type: Optional[str] = None
+    comment: Optional[str] = None
     consecutive_days: int = 1
 
 
@@ -140,6 +151,9 @@ class AnalysisItem(BaseModel):
     total_score: Optional[float] = None
     signal_type: Optional[str] = None
     comment: Optional[str] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    tomorrow_star_pass: Optional[bool] = None
     prefilter_passed: Optional[bool] = None
     prefilter_summary: Optional[str] = None
     prefilter_blocked_by: Optional[List[str]] = None
@@ -151,6 +165,13 @@ class AnalysisResultResponse(BaseModel):
     results: List[AnalysisItem]
     total: int
     min_score_threshold: float
+    # 市场环境阻断时的额外信息
+    status: Optional[str] = None  # "ok" | "market_regime_blocked"
+    message: Optional[str] = None
+    market_regime_info: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "ignore"
 
 
 class CurrentHotAnalysisItem(BaseModel):
@@ -167,6 +188,8 @@ class CurrentHotAnalysisItem(BaseModel):
     total_score: Optional[float] = None
     signal_type: Optional[str] = None
     comment: Optional[str] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
 
 
 class CurrentHotAnalysisResultResponse(BaseModel):
@@ -293,9 +316,12 @@ class TomorrowStarHistoryItem(BaseModel):
     analysis_count: int = 0
     trend_start_count: int = 0
     consecutive_candidate_count: int = 0
+    tomorrow_star_count: int = 0
     status: str = "missing"
     error_message: Optional[str] = None
     is_latest: bool = False
+    market_regime_blocked: bool = False
+    market_regime_info: Optional[Dict[str, Any]] = None
 
 
 class TomorrowStarDatesResponse(BaseModel):
@@ -327,6 +353,7 @@ class CurrentHotHistoryItem(BaseModel):
     candidate_count: int = 0
     analysis_count: int = 0
     trend_start_count: int = 0
+    b1_pass_count: int = 0
     consecutive_candidate_count: int = 0
     pass_count: int = 0
     status: str = "missing"
@@ -355,6 +382,9 @@ class B1CheckItem(BaseModel):
     zx_long_pos: Optional[bool] = None
     weekly_ma_aligned: Optional[bool] = None
     volume_healthy: Optional[bool] = None
+    active_pool_rank: Optional[int] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
     in_active_pool: Optional[bool] = None
     b1_passed: Optional[bool] = None
     prefilter_passed: Optional[bool] = None
@@ -397,6 +427,8 @@ class DiagnosisHistoryResponse(BaseModel):
     total: int
     page: int = 1
     page_size: int = 10
+    trend_start_dates: List[date_class] = Field(default_factory=list)
+    tomorrow_star_dates: List[date_class] = Field(default_factory=list)
     # 只读模式状态字段
     data_ready: bool = True  # True=有历史数据, False=暂无历史数据（未生成）
     message: Optional[str] = None

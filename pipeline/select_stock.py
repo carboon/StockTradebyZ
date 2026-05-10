@@ -23,6 +23,8 @@ import yaml
 from schemas import Candidate
 from Selector import B1Selector, BrickChartSelector
 from pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
+from review_prefilter import Step4Prefilter
+from quant_reviewer import load_config as load_review_config
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +321,21 @@ def run_preselect(
     # 4) 确定选股日期
     pick_ts = _resolve_pick_date(prepared, pick_date)
     logger.info("选股日期: %s", pick_ts.date())
+
+    # ========== 市场环境检查 ==========
+    pick_date_str = pick_ts.strftime("%Y-%m-%d")
+    try:
+        review_cfg = load_review_config()
+        prefilter = Step4Prefilter(review_cfg)
+        regime_result = prefilter.check_market_regime_only(pick_date_str)
+
+        if not regime_result.get("passed", True):
+            logger.warning("市场环境不佳，跳过候选生成: %s", regime_result.get("summary", ""))
+            return pick_ts, []  # 返回空候选列表
+    except Exception as e:
+        logger.warning("市场环境检查失败，继续执行: %s", e)
+        # 检查失败时继续执行，不阻塞流程
+    # ========================================
 
     # 5) 构建流动性池
     pool_codes = TopTurnoverPoolBuilder(top_m=top_m).build(prepared).get(pick_ts, [])

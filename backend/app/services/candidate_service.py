@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Candidate, Stock, StockDaily
+from app.models import Candidate, DailyB1Check, Stock, StockDaily
 from app.services.tushare_service import TushareService
 
 ROOT = Path(__file__).parent.parent.parent.parent
@@ -318,6 +318,9 @@ class CandidateService:
                 Stock.name,
                 StockDaily.open.label("open_price"),
                 StockDaily.close.label("daily_close_price"),
+                StockDaily.turnover_rate,
+                StockDaily.volume_ratio,
+                DailyB1Check.active_pool_rank,
             )
             .join(Stock, Candidate.code == Stock.code, isouter=True)
             .join(
@@ -325,6 +328,14 @@ class CandidateService:
                 and_(
                     Candidate.code == StockDaily.code,
                     Candidate.pick_date == StockDaily.trade_date,
+                ),
+                isouter=True,
+            )
+            .join(
+                DailyB1Check,
+                and_(
+                    Candidate.code == DailyB1Check.code,
+                    Candidate.pick_date == DailyB1Check.check_date,
                 ),
                 isouter=True,
             )
@@ -336,7 +347,12 @@ class CandidateService:
         candidates = []
         for row in query.all():
             raw_snapshot = None
-            if row.open_price is None or row.daily_close_price is None:
+            if (
+                row.open_price is None
+                or row.daily_close_price is None
+                or row.turnover_rate is None
+                or row.volume_ratio is None
+            ):
                 raw_snapshot = self._load_raw_daily_snapshot(str(row.code).zfill(6), target_date)
             close_price = float(row.close_price) if row.close_price is not None else (
                 float(row.daily_close_price) if row.daily_close_price is not None else (
@@ -358,12 +374,51 @@ class CandidateService:
                 "close": close_price,
                 "change_pct": change_pct,
                 "turnover_n": float(row.turnover) if row.turnover is not None else None,
+                "turnover_rate": float(row.turnover_rate) if row.turnover_rate is not None else (
+                    raw_snapshot.get("turnover_rate") if raw_snapshot else None
+                ),
+                "volume_ratio": float(row.volume_ratio) if row.volume_ratio is not None else (
+                    raw_snapshot.get("volume_ratio") if raw_snapshot else None
+                ),
+                "active_pool_rank": int(row.active_pool_rank) if row.active_pool_rank is not None else None,
                 "b1_passed": row.b1_passed,
                 "kdj_j": float(row.kdj_j) if row.kdj_j is not None else None,
                 "consecutive_days": int(row.consecutive_days or 1),
             })
 
+        self._fill_missing_active_pool_ranks(target_date, candidates)
         return target_date.isoformat(), candidates
+
+    @staticmethod
+    def _fill_missing_active_pool_ranks(pick_date: date, candidates: List[Dict[str, Any]]) -> None:
+        missing_codes = {
+            str(item.get("code", "")).zfill(6)
+            for item in candidates
+            if item.get("active_pool_rank") is None and item.get("code")
+        }
+        if not missing_codes:
+            return
+
+        try:
+            from app.services.analysis_service import analysis_service
+
+            target_ts = pd.Timestamp(pick_date).normalize()
+            preselect_cfg = analysis_service._load_preselect_config()
+            rankings = analysis_service._safe_build_active_pool_rankings(
+                start_ts=target_ts,
+                end_ts=target_ts,
+                preselect_cfg=preselect_cfg,
+                target_codes=missing_codes,
+            )
+            if not rankings:
+                return
+            for item in candidates:
+                code = str(item.get("code", "")).zfill(6)
+                if item.get("active_pool_rank") is None:
+                    rank = rankings.get(code, {}).get(target_ts)
+                    item["active_pool_rank"] = int(rank) if rank is not None else None
+        except Exception as exc:
+            logger.warning("补齐候选活跃排名失败: pick_date=%s error=%s", pick_date, exc)
 
     def _load_raw_daily_snapshot(self, code: str, pick_date: date) -> Optional[dict[str, Optional[float]]]:
         normalized_code = str(code or "").zfill(6)
@@ -374,20 +429,31 @@ class CandidateService:
                 self._raw_daily_cache[normalized_code] = {}
                 return None
             try:
-                df = pd.read_csv(csv_path, usecols=["date", "open", "close"])
+                df = pd.read_csv(csv_path)
                 df["date"] = pd.to_datetime(df["date"]).dt.date
                 cached = {
                     trade_date: {
-                        "open": float(open_price) if pd.notna(open_price) else None,
-                        "close": float(close_price) if pd.notna(close_price) else None,
+                        "open": self._to_optional_float(row.get("open")),
+                        "close": self._to_optional_float(row.get("close")),
+                        "turnover_rate": self._to_optional_float(row.get("turnover_rate")),
+                        "volume_ratio": self._to_optional_float(row.get("volume_ratio")),
                     }
-                    for trade_date, open_price, close_price in df.itertuples(index=False, name=None)
+                    for trade_date, row in df.set_index("date").iterrows()
                 }
             except Exception as exc:
                 logger.warning("读取原始行情失败: code=%s error=%s", normalized_code, exc)
                 cached = {}
             self._raw_daily_cache[normalized_code] = cached
         return cached.get(pick_date)
+
+    @staticmethod
+    def _to_optional_float(value: Any) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def get_latest_candidate_date(self) -> Optional[date]:
         """获取最新候选日期

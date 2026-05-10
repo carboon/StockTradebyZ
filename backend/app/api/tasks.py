@@ -6,9 +6,9 @@ Tasks API
 import os
 import platform
 import csv
-from datetime import datetime
+from datetime import date as date_class, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -19,7 +19,19 @@ from app.api.rate_limit import status_api_rate_limit
 from app.cache import cache
 from app.config import PROJECT_ROOT, settings
 from app.database import get_db
-from app.models import Config, Task, TaskLog
+from app.models import (
+    AnalysisResult,
+    Candidate,
+    Config,
+    CurrentHotAnalysisResult,
+    CurrentHotCandidate,
+    DailyB1Check,
+    RawDataManifest,
+    StockDaily,
+    Task,
+    TaskLog,
+    TomorrowStarRun,
+)
 from app.services.task_service import TaskService
 from app.services.tushare_service import TushareService
 from app.schemas import (
@@ -367,6 +379,308 @@ def _resolve_full_update_params(request: UpdateStartRequest, service: TushareSer
     return params
 
 
+def _resolve_recent_trade_dates(db: Session, window_size: int = 120) -> list[date_class]:
+    rows = (
+        db.query(StockDaily.trade_date)
+        .distinct()
+        .order_by(StockDaily.trade_date.desc())
+        .limit(max(1, int(window_size)))
+        .all()
+    )
+    return [trade_date for trade_date, in rows if trade_date]
+
+
+def _date_counts_map(rows) -> dict[str, dict[str, int]]:
+    return {
+        trade_date.isoformat(): {
+            "row_count": int(row_count or 0),
+            "turnover_count": int(turnover_count or 0),
+            "volume_ratio_count": int(volume_ratio_count or 0),
+        }
+        for trade_date, row_count, turnover_count, volume_ratio_count in rows
+        if trade_date
+    }
+
+
+def _build_recent_120_integrity_report(db: Session, *, window_size: int = 120) -> dict:
+    trade_dates = _resolve_recent_trade_dates(db, window_size)
+    if not trade_dates:
+        return {
+            "success": False,
+            "window_size": window_size,
+            "date_count": 0,
+            "message": "数据库中没有可检查的行情交易日",
+            "issues": [],
+            "dates": [],
+            "summary": {},
+        }
+
+    rows = (
+        db.query(
+            StockDaily.trade_date,
+            func.count(StockDaily.id),
+            func.count(StockDaily.turnover_rate),
+            func.count(StockDaily.volume_ratio),
+        )
+        .filter(StockDaily.trade_date.in_(trade_dates))
+        .group_by(StockDaily.trade_date)
+        .all()
+    )
+    daily_stats = _date_counts_map(rows)
+
+    manifest_map = {
+        item.trade_date.isoformat(): item
+        for item in db.query(RawDataManifest).filter(RawDataManifest.trade_date.in_(trade_dates)).all()
+    }
+    star_run_map = {
+        item.pick_date.isoformat(): item
+        for item in db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date.in_(trade_dates)).all()
+    }
+    current_hot_dates = {
+        pick_date.isoformat()
+        for pick_date, in db.query(CurrentHotCandidate.pick_date)
+        .filter(CurrentHotCandidate.pick_date.in_(trade_dates))
+        .distinct()
+        .all()
+        if pick_date
+    }
+    diagnosis_dates = {
+        check_date.isoformat()
+        for check_date, in db.query(DailyB1Check.check_date)
+        .filter(DailyB1Check.check_date.in_(trade_dates))
+        .distinct()
+        .all()
+        if check_date
+    }
+
+    min_rows = 3000
+    min_metric_ratio = 0.90
+    issues: list[dict] = []
+    date_reports: list[dict] = []
+    for trade_date in trade_dates:
+        key = trade_date.isoformat()
+        item = daily_stats.get(key, {"row_count": 0, "turnover_count": 0, "volume_ratio_count": 0})
+        row_count = int(item["row_count"])
+        metric_count = min(int(item["turnover_count"]), int(item["volume_ratio_count"]))
+        metric_ratio = (metric_count / row_count) if row_count else 0.0
+        manifest = manifest_map.get(key)
+        star_run = star_run_map.get(key)
+        has_current_hot = key in current_hot_dates
+        has_diagnosis = key in diagnosis_dates
+        day_issues: list[str] = []
+        if row_count < min_rows:
+            day_issues.append("行情行数偏低")
+        if row_count > 0 and metric_ratio < min_metric_ratio:
+            day_issues.append("换手率/量比填充不足")
+        if manifest and int(manifest.db_stock_count or 0) > 0 and row_count < int(manifest.db_stock_count or 0):
+            day_issues.append("DB 行数低于 manifest 入库股票数")
+        if not star_run or str(star_run.status or "").lower() != "success":
+            day_issues.append("明日之星未成功生成")
+        if not has_current_hot:
+            day_issues.append("当前热盘缺少候选")
+        if not has_diagnosis:
+            day_issues.append("单股诊断历史未覆盖")
+
+        report = {
+            "trade_date": key,
+            "row_count": row_count,
+            "turnover_count": int(item["turnover_count"]),
+            "volume_ratio_count": int(item["volume_ratio_count"]),
+            "metric_fill_ratio": round(metric_ratio, 4),
+            "manifest_status": manifest.status if manifest else None,
+            "manifest_stock_count": int(manifest.stock_count or 0) if manifest else 0,
+            "manifest_db_stock_count": int(manifest.db_stock_count or 0) if manifest else 0,
+            "tomorrow_star_status": star_run.status if star_run else None,
+            "tomorrow_star_candidates": int(star_run.candidate_count or 0) if star_run else 0,
+            "current_hot_ready": has_current_hot,
+            "diagnosis_ready": has_diagnosis,
+            "issues": day_issues,
+        }
+        date_reports.append(report)
+        if day_issues:
+            issues.append({"trade_date": key, "issues": day_issues})
+
+    return {
+        "success": not issues,
+        "window_size": window_size,
+        "date_count": len(trade_dates),
+        "date_range": [trade_dates[-1].isoformat(), trade_dates[0].isoformat()],
+        "summary": {
+            "issue_dates": len(issues),
+            "checked_dates": len(trade_dates),
+            "min_rows": min_rows,
+            "min_metric_fill_ratio": min_metric_ratio,
+        },
+        "issues": issues[:50],
+        "dates": date_reports,
+        "message": "近120交易日数据完整" if not issues else f"发现 {len(issues)} 个交易日存在完整性问题",
+    }
+
+
+def _count_for_date(db: Session, model: Any, date_field: Any, target_date: date_class, *extra_filters: Any) -> int:
+    query = db.query(func.count(model.id)).filter(date_field == target_date)
+    for filter_item in extra_filters:
+        query = query.filter(filter_item)
+    return int(query.scalar() or 0)
+
+
+def _build_trade_date_revalidation_report(db: Session, target_date: date_class) -> dict:
+    from app.services.current_hot_service import CurrentHotService
+
+    def same_float(left: Any, right: Any, tolerance: float = 1e-4) -> bool:
+        if left is None and right is None:
+            return True
+        if left is None or right is None:
+            return False
+        try:
+            return abs(float(left) - float(right)) <= tolerance
+        except (TypeError, ValueError):
+            return False
+
+    row_count = _count_for_date(db, StockDaily, StockDaily.trade_date, target_date)
+    turnover_count = int(
+        db.query(func.count(StockDaily.turnover_rate))
+        .filter(StockDaily.trade_date == target_date)
+        .scalar()
+        or 0
+    )
+    volume_ratio_count = int(
+        db.query(func.count(StockDaily.volume_ratio))
+        .filter(StockDaily.trade_date == target_date)
+        .scalar()
+        or 0
+    )
+    candidate_count = _count_for_date(db, Candidate, Candidate.pick_date, target_date)
+    analysis_count = _count_for_date(db, AnalysisResult, AnalysisResult.pick_date, target_date)
+    trend_start_count = _count_for_date(
+        db,
+        AnalysisResult,
+        AnalysisResult.pick_date,
+        target_date,
+        AnalysisResult.signal_type == "trend_start",
+    )
+    current_hot_candidate_count = _count_for_date(db, CurrentHotCandidate, CurrentHotCandidate.pick_date, target_date)
+    current_hot_analysis_count = _count_for_date(db, CurrentHotAnalysisResult, CurrentHotAnalysisResult.pick_date, target_date)
+    current_hot_b1_count = _count_for_date(
+        db,
+        CurrentHotAnalysisResult,
+        CurrentHotAnalysisResult.pick_date,
+        target_date,
+        CurrentHotAnalysisResult.b1_passed.is_(True),
+    )
+    diagnosis_count = _count_for_date(db, DailyB1Check, DailyB1Check.check_date, target_date)
+
+    hot_service = CurrentHotService(db)
+    pool_entries = hot_service.get_pool_entries()
+    persisted_candidates = {
+        row.code: row
+        for row in db.query(CurrentHotCandidate)
+        .filter(CurrentHotCandidate.pick_date == target_date)
+        .all()
+    }
+    persisted_analysis = {
+        row.code: row
+        for row in db.query(CurrentHotAnalysisResult)
+        .filter(CurrentHotAnalysisResult.pick_date == target_date)
+        .all()
+    }
+    sample_recomputed: list[dict] = []
+    current_hot_mismatches: list[dict[str, Any]] = []
+    for entry in pool_entries:
+        snapshot = hot_service.build_trade_snapshot(entry.code, target_date)
+        recomputed_item = {
+            "code": entry.code,
+            "close_price": snapshot.get("close_price"),
+            "b1_passed": snapshot.get("b1_passed"),
+            "signal_type": snapshot.get("signal_type"),
+            "score": snapshot.get("score"),
+            "turnover_rate": snapshot.get("turnover_rate"),
+            "volume_ratio": snapshot.get("volume_ratio"),
+        }
+        if len(sample_recomputed) < 10:
+            sample_recomputed.append(recomputed_item)
+
+        candidate = persisted_candidates.get(entry.code)
+        analysis = persisted_analysis.get(entry.code)
+        mismatch_fields: list[str] = []
+        if candidate is None:
+            mismatch_fields.append("missing_candidate")
+        else:
+            if not same_float(candidate.close_price, snapshot.get("close_price")):
+                mismatch_fields.append("close_price")
+            if not same_float(candidate.turnover_rate, snapshot.get("turnover_rate")):
+                mismatch_fields.append("turnover_rate")
+            if not same_float(candidate.volume_ratio, snapshot.get("volume_ratio")):
+                mismatch_fields.append("volume_ratio")
+            if candidate.b1_passed != snapshot.get("b1_passed"):
+                mismatch_fields.append("candidate_b1_passed")
+        if analysis is None:
+            mismatch_fields.append("missing_analysis")
+        else:
+            if analysis.b1_passed != snapshot.get("b1_passed"):
+                mismatch_fields.append("analysis_b1_passed")
+            if str(analysis.signal_type or "") != str(snapshot.get("signal_type") or ""):
+                mismatch_fields.append("signal_type")
+            if not same_float(analysis.total_score, snapshot.get("score")):
+                mismatch_fields.append("score")
+        if mismatch_fields:
+            current_hot_mismatches.append(
+                {
+                    "code": entry.code,
+                    "fields": mismatch_fields,
+                    "persisted": {
+                        "close_price": candidate.close_price if candidate else None,
+                        "b1_passed": analysis.b1_passed if analysis else (candidate.b1_passed if candidate else None),
+                        "signal_type": analysis.signal_type if analysis else None,
+                        "score": analysis.total_score if analysis else None,
+                        "turnover_rate": candidate.turnover_rate if candidate else None,
+                        "volume_ratio": candidate.volume_ratio if candidate else None,
+                    },
+                    "recomputed": recomputed_item,
+                }
+            )
+
+    issues: list[str] = []
+    if row_count <= 0:
+        issues.append("该交易日没有行情数据")
+    if row_count > 0 and min(turnover_count, volume_ratio_count) / row_count < 0.90:
+        issues.append("换手率/量比填充比例低于 90%")
+    if candidate_count > 0 and analysis_count < candidate_count:
+        issues.append("明日之星分析数量少于候选数量")
+    if pool_entries and current_hot_candidate_count < len(pool_entries):
+        issues.append("当前热盘候选数量少于配置股票池")
+    if current_hot_candidate_count > 0 and current_hot_analysis_count < current_hot_candidate_count:
+        issues.append("当前热盘分析数量少于候选数量")
+    if current_hot_mismatches:
+        issues.append(f"当前热盘本地重算与持久化结果存在 {len(current_hot_mismatches)} 只股票差异")
+    if diagnosis_count <= 0:
+        issues.append("该交易日没有单股诊断历史")
+
+    return {
+        "success": not issues,
+        "trade_date": target_date.isoformat(),
+        "summary": {
+            "stock_daily_rows": row_count,
+            "turnover_count": turnover_count,
+            "volume_ratio_count": volume_ratio_count,
+            "metric_fill_ratio": round((min(turnover_count, volume_ratio_count) / row_count) if row_count else 0.0, 4),
+            "tomorrow_star_candidates": candidate_count,
+            "tomorrow_star_analysis": analysis_count,
+            "tomorrow_star_trend_start": trend_start_count,
+            "current_hot_pool_size": len(pool_entries),
+            "current_hot_candidates": current_hot_candidate_count,
+            "current_hot_analysis": current_hot_analysis_count,
+            "current_hot_b1_pass": current_hot_b1_count,
+            "current_hot_mismatch_count": len(current_hot_mismatches),
+            "diagnosis_count": diagnosis_count,
+        },
+        "sample_recomputed_current_hot": sample_recomputed,
+        "current_hot_mismatches": current_hot_mismatches[:30],
+        "issues": issues,
+        "message": "指定日期本地重验证通过" if not issues else "指定日期重验证发现差异",
+    }
+
+
 def _resolve_runtime_config_value(db: Session, key: str) -> str:
     env_key = key.upper()
     env_value = os.environ.get(env_key, "").strip()
@@ -613,6 +927,65 @@ async def start_daily_batch_update(
         "existing": result.get("existing", False),
         "task": TaskItem.model_validate(task, from_attributes=True) if task else None,
     }
+
+
+@router.post("/start-recent-120-rebuild")
+async def start_recent_120_rebuild(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """启动近120交易日完整重建任务。"""
+    from app.main import manager
+
+    task_service = TaskService(db, manager=manager)
+    active_full_task = task_service.get_active_full_task()
+    if active_full_task:
+        _raise_initialization_in_progress(active_full_task)
+
+    _ensure_tushare_ready()
+    result = await task_service.create_task(
+        TaskService.RECENT_120_REBUILD_TASK_TYPE,
+        {
+            "window_size": 120,
+            "reviewer": "quant",
+            "trigger_source": "manual_recent_120_rebuild",
+        },
+    )
+    task = db.query(Task).filter(Task.id == result["task_id"]).first()
+    cache.delete("data_status")
+    _clear_all_caches(db)
+
+    return {
+        "success": True,
+        "message": "近120交易日完整重建已启动",
+        "task_id": result["task_id"],
+        "ws_url": result["ws_url"],
+        "existing": result.get("existing", False),
+        "task": TaskItem.model_validate(task, from_attributes=True) if task else None,
+    }
+
+
+@router.get("/data-integrity/recent-120")
+async def check_recent_120_integrity(
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """只读检查近120交易日数据完整性。"""
+    return _build_recent_120_integrity_report(db, window_size=120)
+
+
+@router.post("/data-integrity/revalidate-date")
+async def revalidate_trade_date(
+    trade_date: str = Query(..., description="交易日 YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> dict:
+    """基于本地数据对指定交易日做只读重验证。"""
+    try:
+        target_date = date_class.fromisoformat(str(trade_date).strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="trade_date 必须是 YYYY-MM-DD") from exc
+    return _build_trade_date_revalidation_report(db, target_date)
 
 
 @router.get("/incremental-status")

@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 from app.models import RawDataManifest
+from app.time_utils import utc_now
 
 ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -347,8 +348,9 @@ class TushareService:
 
         try:
             acquire_tushare_slot("trade_cal")
-            today = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+            now = utc_now()
+            today = now.strftime("%Y%m%d")
+            start_date = (now - timedelta(days=10)).strftime("%Y%m%d")
             df = self.pro.trade_cal(exchange="SSE", start_date=start_date, end_date=today)
             if df is None or df.empty:
                 return None
@@ -405,7 +407,7 @@ class TushareService:
             return None
 
         try:
-            bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            bj_now = utc_now().astimezone(ZoneInfo("Asia/Shanghai"))
             latest_dt = datetime.fromisoformat(latest_trade_date).date()
 
             if latest_dt < bj_now.date():
@@ -456,7 +458,7 @@ class TushareService:
         实时查询，不使用缓存。
         """
         result = {
-            "query_time": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+            "query_time": utc_now().astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
             "latest_calendar_trade_date": None,
             "latest_data_date": None,
             "is_latest_data_ready": False,
@@ -469,8 +471,9 @@ class TushareService:
             if not latest_cal or not self.token:
                 return result
 
-            today = datetime.now().strftime("%Y%m%d")
-            recent_start = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
+            now = utc_now()
+            today = now.strftime("%Y%m%d")
+            recent_start = (now - timedelta(days=7)).strftime("%Y%m%d")
 
             acquire_tushare_slot("daily")
             df = self.pro.daily(ts_code="000001.SZ", start_date=recent_start, end_date=today)
@@ -545,7 +548,7 @@ class TushareService:
         from app.database import SessionLocal
         from datetime import timedelta
 
-        end_date = datetime.now().date()
+        end_date = utc_now().date()
         start_date = end_date - timedelta(days=365)
 
         try:

@@ -43,10 +43,10 @@ class CurrentHotService:
     CONFIG_KEY = "current_hot_pool"
     DEFAULT_REVIEWER = "quant"
     DEFAULT_SOURCE = "current_hot"
-    DEFAULT_WINDOW_SIZE = 180
+    DEFAULT_WINDOW_SIZE = 120
     MIN_HISTORY_DAYS = 60
     HISTORY_LOOKBACK_DAYS = 420
-    ACTIVE_TASK_TYPES = ("full_update", "incremental_update", "tomorrow_star")
+    ACTIVE_TASK_TYPES = ("full_update", "incremental_update", "tomorrow_star", "recent_120_rebuild")
 
     def __init__(self, db: Session):
         self.db = db
@@ -68,6 +68,10 @@ class CurrentHotService:
     @staticmethod
     def _signal_sort_priority(signal_type: Optional[str]) -> int:
         return 0 if signal_type == "trend_start" else 1
+
+    @staticmethod
+    def _is_generic_sector_name(value: Optional[str]) -> bool:
+        return str(value or "").strip() in {"", "当前热盘", "热力股票池", "当前热盘AI标的"}
 
     @staticmethod
     def get_board_group(code: str) -> str:
@@ -98,15 +102,89 @@ class CurrentHotService:
             return None
 
     def _load_pool_config(self) -> dict[str, dict[str, str]]:
+        def normalize_pool_config(payload: Any) -> dict[str, dict[str, str]]:
+            if not isinstance(payload, dict) or not payload:
+                return DEFAULT_CURRENT_HOT_POOL
+
+            # 兼容扁平结构：{ "600000": "浦发银行" }
+            if all(isinstance(key, str) and str(key).isdigit() for key in payload.keys()):
+                return {
+                    "当前热盘": {
+                        str(name or code): str(code).zfill(6)
+                        for code, name in payload.items()
+                        if str(code or "").strip()
+                    }
+                }
+
+            normalized: dict[str, dict[str, str]] = {}
+            for sector_name, items in payload.items():
+                if not isinstance(items, dict):
+                    continue
+                sector_items: dict[str, str] = {}
+                for raw_name, raw_code in items.items():
+                    if str(raw_name or "").isdigit():
+                        code = str(raw_name).zfill(6)
+                        name = str(raw_code or code)
+                    else:
+                        code = str(raw_code or "").zfill(6)
+                        name = str(raw_name or code)
+                    if code and code != "000000":
+                        sector_items[name] = code
+                if sector_items:
+                    normalized[str(sector_name or "当前热盘")] = sector_items
+            return normalized or DEFAULT_CURRENT_HOT_POOL
+
         row = self.db.query(Config).filter(Config.key == self.CONFIG_KEY).first()
         if row and row.value:
             try:
                 payload = json.loads(row.value)
-                if isinstance(payload, dict):
-                    return payload
+                return normalize_pool_config(payload)
             except Exception:
                 pass
         return DEFAULT_CURRENT_HOT_POOL
+
+    def _stock_industry_by_code(self, codes: list[str]) -> dict[str, str]:
+        normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return {}
+        rows = (
+            self.db.query(Stock.code, Stock.industry)
+            .filter(Stock.code.in_(normalized_codes))
+            .all()
+        )
+        return {
+            str(code).zfill(6): str(industry).strip()
+            for code, industry in rows
+            if str(industry or "").strip() and not self._is_generic_sector_name(str(industry).strip())
+        }
+
+    def _resolve_sector_names(
+        self,
+        sector_names: Optional[list[str]],
+        *,
+        industry: Optional[str] = None,
+    ) -> list[str]:
+        names = [
+            str(item).strip()
+            for item in (sector_names or [])
+            if str(item or "").strip() and not self._is_generic_sector_name(str(item).strip())
+        ]
+        if names:
+            return names
+        industry_name = str(industry or "").strip()
+        if industry_name and not self._is_generic_sector_name(industry_name) and industry_name not in names:
+            names.append(industry_name)
+            return names
+        return ["当前热盘"]
+
+    def _enrich_pool_entries_with_stock_industry(self, entries: list[CurrentHotPoolEntry]) -> list[CurrentHotPoolEntry]:
+        industry_by_code = self._stock_industry_by_code([entry.code for entry in entries])
+        for entry in entries:
+            industry = industry_by_code.get(entry.code)
+            entry.sector_names = self._resolve_sector_names(entry.sector_names, industry=industry)
+            if self._is_generic_sector_name(entry.primary_sector) and entry.sector_names:
+                entry.primary_sector = entry.sector_names[0]
+        return entries
 
     def get_pool_entries(self) -> list[CurrentHotPoolEntry]:
         merged: dict[str, CurrentHotPoolEntry] = {}
@@ -131,7 +209,7 @@ class CurrentHotService:
                     entry.name = str(stock_name)
                 if sector_name not in entry.sector_names:
                     entry.sector_names.append(str(sector_name))
-        return list(merged.values())
+        return self._enrich_pool_entries_with_stock_industry(list(merged.values()))
 
     def get_latest_trade_date(self) -> Optional[date]:
         return (
@@ -200,6 +278,8 @@ class CurrentHotService:
                     "high": self._safe_float(row.high),
                     "low": self._safe_float(row.low),
                     "volume": self._safe_float(row.volume),
+                    "turnover_rate": self._safe_float(row.turnover_rate),
+                    "volume_ratio": self._safe_float(row.volume_ratio),
                 }
                 for row in ordered_rows
             ]
@@ -210,7 +290,7 @@ class CurrentHotService:
             return 0
 
         normalized_code = str(code or "").zfill(6)
-        records: list[tuple[date, float, float, float, float, float]] = []
+        records: list[tuple[date, float, float, float, float, float, Optional[float], Optional[float]]] = []
         for _, row in frame.iterrows():
             raw_trade_date = row.get("trade_date")
             trade_date = self._normalize_trade_date(raw_trade_date)
@@ -225,6 +305,8 @@ class CurrentHotService:
                         float(row["high"]),
                         float(row["low"]),
                         float(row["volume"]),
+                        self._safe_float(row.get("turnover_rate")),
+                        self._safe_float(row.get("volume_ratio")),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -245,7 +327,7 @@ class CurrentHotService:
         }
 
         persisted = 0
-        for trade_date, open_price, close_price, high_price, low_price, volume in records:
+        for trade_date, open_price, close_price, high_price, low_price, volume, turnover_rate, volume_ratio in records:
             existing = existing_rows.get(trade_date)
             if existing is None:
                 self.db.add(
@@ -257,6 +339,8 @@ class CurrentHotService:
                         high=high_price,
                         low=low_price,
                         volume=volume,
+                        turnover_rate=turnover_rate,
+                        volume_ratio=volume_ratio,
                     )
                 )
             else:
@@ -265,6 +349,8 @@ class CurrentHotService:
                 existing.high = high_price
                 existing.low = low_price
                 existing.volume = volume
+                existing.turnover_rate = turnover_rate
+                existing.volume_ratio = volume_ratio
             persisted += 1
 
         self.db.flush()
@@ -276,10 +362,11 @@ class CurrentHotService:
         trade_date: date,
         *,
         min_days: int = MIN_HISTORY_DAYS,
+        backfill_missing_history: bool = True,
     ) -> dict[str, list[str]]:
-        daily_service = DailyDataService(token=self.tushare_service.token)
         start_date = (trade_date - timedelta(days=self.HISTORY_LOOKBACK_DAYS)).isoformat()
         end_date = trade_date.isoformat()
+        daily_service: Optional[DailyDataService] = None
         backfilled_codes: list[str] = []
         insufficient_codes: list[str] = []
 
@@ -287,7 +374,12 @@ class CurrentHotService:
             current_frame = self.load_stock_frame(entry.code, trade_date, days=min_days)
             if len(current_frame) >= min_days:
                 continue
+            if not backfill_missing_history:
+                insufficient_codes.append(entry.code)
+                continue
 
+            if daily_service is None:
+                daily_service = DailyDataService(token=self.tushare_service.token)
             fetched = daily_service.fetch_daily_data(entry.code, start_date=start_date, end_date=end_date)
             self._persist_history_frame(entry.code, fetched)
 
@@ -359,6 +451,8 @@ class CurrentHotService:
         change_pct = None
         if open_price not in (None, 0) and close_price is not None:
             change_pct = (close_price - open_price) / open_price * 100
+        turnover_rate = self._safe_float(last_row.get("turnover_rate")) if last_row is not None else None
+        volume_ratio = self._safe_float(last_row.get("volume_ratio")) if last_row is not None else None
         return {
             "code": code,
             "trade_date": trade_date,
@@ -366,6 +460,8 @@ class CurrentHotService:
             "close_price": close_price,
             "change_pct": change_pct,
             "turnover": None,
+            "turnover_rate": turnover_rate,
+            "volume_ratio": volume_ratio,
             "b1_passed": False if frame is not None and not frame.empty else None,
             "kdj_j": None,
             "zx_long_pos": None,
@@ -383,6 +479,8 @@ class CurrentHotService:
                 "position_reasoning": None,
                 "volume_reasoning": None,
                 "abnormal_move_reasoning": None,
+                "turnover_rate": turnover_rate,
+                "volume_ratio": volume_ratio,
             },
         }
 
@@ -423,6 +521,8 @@ class CurrentHotService:
                 "close_price": close_price,
                 "change_pct": change_pct,
                 "turnover": None,
+                "turnover_rate": self._safe_float(last_price_row.get("turnover_rate")),
+                "volume_ratio": self._safe_float(last_price_row.get("volume_ratio")),
                 "b1_passed": bool(last_row.get("_vec_pick", False)) if pd.notna(last_row.get("_vec_pick")) else False,
                 "kdj_j": self._safe_float(last_row.get("J")),
                 "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
@@ -443,6 +543,8 @@ class CurrentHotService:
                     "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
                     "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
                     "volume_healthy": analysis_service._calculate_volume_health(prepared),
+                    "turnover_rate": self._safe_float(last_price_row.get("turnover_rate")),
+                    "volume_ratio": self._safe_float(last_price_row.get("volume_ratio")),
                 },
             }
         except Exception as exc:
@@ -550,6 +652,8 @@ class CurrentHotService:
         self,
         trade_date: Optional[str | date] = None,
         reviewer: str = DEFAULT_REVIEWER,
+        *,
+        backfill_missing_history: bool = True,
     ) -> dict[str, Any]:
         target_trade_date = self._normalize_trade_date(trade_date) or self.get_latest_trade_date()
         if target_trade_date is None:
@@ -581,7 +685,12 @@ class CurrentHotService:
 
         try:
             self._ensure_stocks_exist(entries)
-            self._ensure_history_window(entries, target_trade_date)
+            entries = self._enrich_pool_entries_with_stock_industry(entries)
+            self._ensure_history_window(
+                entries,
+                target_trade_date,
+                backfill_missing_history=backfill_missing_history,
+            )
             self.db.query(CurrentHotCandidate).filter(
                 CurrentHotCandidate.pick_date == target_trade_date
             ).delete(synchronize_session=False)
@@ -608,6 +717,8 @@ class CurrentHotService:
                         close_price=payload.get("close_price"),
                         change_pct=payload.get("change_pct"),
                         turnover=payload.get("turnover"),
+                        turnover_rate=payload.get("turnover_rate"),
+                        volume_ratio=payload.get("volume_ratio"),
                         b1_passed=payload.get("b1_passed"),
                         kdj_j=payload.get("kdj_j"),
                     )
@@ -622,6 +733,8 @@ class CurrentHotService:
                         total_score=payload.get("score"),
                         signal_type=payload.get("signal_type"),
                         comment=payload.get("comment"),
+                        turnover_rate=payload.get("turnover_rate"),
+                        volume_ratio=payload.get("volume_ratio"),
                         details_json=payload.get("details_json"),
                     )
                 )
@@ -702,6 +815,19 @@ class CurrentHotService:
             .group_by(CurrentHotAnalysisResult.pick_date)
             .all()
         }
+        b1_pass_counts = {
+            pick_date: int(count or 0)
+            for pick_date, count in self.db.query(
+                CurrentHotCandidate.pick_date,
+                func.count(CurrentHotCandidate.id),
+            )
+            .filter(
+                CurrentHotCandidate.pick_date.in_(target_dates),
+                CurrentHotCandidate.b1_passed.is_(True),
+            )
+            .group_by(CurrentHotCandidate.pick_date)
+            .all()
+        }
         consecutive_counts = {
             pick_date: int(count or 0)
             for pick_date, count in self.db.query(
@@ -724,12 +850,14 @@ class CurrentHotService:
             candidate_count = candidate_counts.get(pick_date, 0)
             analysis_count = analysis_counts.get(pick_date, 0)
             trend_start_count = trend_counts.get(pick_date, 0)
+            b1_pass_count = b1_pass_counts.get(pick_date, 0)
             consecutive_candidate_count = consecutive_counts.get(pick_date, 0)
             history.append(
                 {
                     "pick_date": pick_date.isoformat(),
                     "date": pick_date.isoformat(),
                     "trend_start_count": trend_start_count,
+                    "b1_pass_count": b1_pass_count,
                     "pass_count": trend_start_count,
                     "consecutive_candidate_count": consecutive_candidate_count,
                     "candidate_count": candidate_count,
@@ -756,7 +884,13 @@ class CurrentHotService:
             return {"pick_date": None, "candidates": [], "total": 0}
 
         rows = (
-            self.db.query(CurrentHotCandidate, Stock.name)
+            self.db.query(CurrentHotCandidate, CurrentHotAnalysisResult, Stock.name, Stock.industry)
+            .outerjoin(
+                CurrentHotAnalysisResult,
+                (CurrentHotAnalysisResult.pick_date == CurrentHotCandidate.pick_date)
+                & (CurrentHotAnalysisResult.code == CurrentHotCandidate.code)
+                & (CurrentHotAnalysisResult.reviewer == self.DEFAULT_REVIEWER),
+            )
             .outerjoin(Stock, CurrentHotCandidate.code == Stock.code)
             .filter(CurrentHotCandidate.pick_date == target_date)
             .all()
@@ -767,19 +901,32 @@ class CurrentHotService:
                 "pick_date": target_date,
                 "code": row.code,
                 "name": stock_name,
-                "sector_names": row.sector_names_json or [],
+                "sector_names": self._resolve_sector_names(row.sector_names_json, industry=stock_industry),
                 "board_group": row.board_group,
                 "open_price": row.open_price,
                 "close_price": row.close_price,
                 "change_pct": row.change_pct,
                 "turnover": row.turnover,
-                "b1_passed": row.b1_passed,
+                "turnover_rate": row.turnover_rate if row.turnover_rate is not None else (analysis.turnover_rate if analysis else None),
+                "volume_ratio": row.volume_ratio if row.volume_ratio is not None else (analysis.volume_ratio if analysis else None),
+                "b1_passed": row.b1_passed if row.b1_passed is not None else (analysis.b1_passed if analysis else None),
                 "kdj_j": row.kdj_j,
+                "verdict": analysis.verdict if analysis else None,
+                "total_score": analysis.total_score if analysis else None,
+                "signal_type": analysis.signal_type if analysis else None,
+                "comment": analysis.comment if analysis else None,
                 "consecutive_days": int(row.consecutive_days or 1),
             }
-            for row, stock_name in rows
+            for row, analysis, stock_name, stock_industry in rows
         ]
-        items.sort(key=lambda item: (item.get("board_group") != "kechuang", item["code"]))
+        items.sort(
+            key=lambda item: (
+                self._signal_sort_priority(item.get("signal_type")),
+                0 if item.get("b1_passed") is True else 1,
+                self._sort_score_desc(item.get("total_score")),
+                item["code"],
+            )
+        )
         return {
             "pick_date": target_date,
             "candidates": items[:limit],
@@ -792,7 +939,7 @@ class CurrentHotService:
             return {"pick_date": None, "results": [], "total": 0, "min_score_threshold": 4.0}
 
         rows = (
-            self.db.query(CurrentHotAnalysisResult, CurrentHotCandidate, Stock.name)
+            self.db.query(CurrentHotAnalysisResult, CurrentHotCandidate, Stock.name, Stock.industry)
             .outerjoin(
                 CurrentHotCandidate,
                 (CurrentHotCandidate.pick_date == CurrentHotAnalysisResult.pick_date)
@@ -814,10 +961,12 @@ class CurrentHotService:
                 "total_score": result.total_score,
                 "signal_type": result.signal_type,
                 "comment": result.comment,
-                "sector_names": candidate.sector_names_json if candidate else [],
+                "turnover_rate": result.turnover_rate if result.turnover_rate is not None else (candidate.turnover_rate if candidate else None),
+                "volume_ratio": result.volume_ratio if result.volume_ratio is not None else (candidate.volume_ratio if candidate else None),
+                "sector_names": self._resolve_sector_names(candidate.sector_names_json if candidate else [], industry=stock_industry),
                 "board_group": candidate.board_group if candidate else self.get_board_group(result.code),
             }
-            for result, candidate, stock_name in rows
+            for result, candidate, stock_name, stock_industry in rows
         ]
         items.sort(
             key=lambda item: (
@@ -859,6 +1008,8 @@ class CurrentHotService:
         window_size: int = DEFAULT_WINDOW_SIZE,
         *,
         reviewer: str = DEFAULT_REVIEWER,
+        force: bool = False,
+        backfill_missing_history: bool = True,
     ) -> dict[str, Any]:
         target_dates = list(reversed(self.get_recent_trade_dates(window_size)))
         rebuilt_dates: list[str] = []
@@ -868,10 +1019,14 @@ class CurrentHotService:
         for pick_date in target_dates:
             pick_date_text = pick_date.isoformat()
             item = status_map.get(pick_date_text)
-            if item and item.get("status") == "success":
+            if not force and item and item.get("status") == "success":
                 continue
 
-            result = self.generate_for_trade_date(pick_date, reviewer=reviewer)
+            result = self.generate_for_trade_date(
+                pick_date,
+                reviewer=reviewer,
+                backfill_missing_history=backfill_missing_history,
+            )
             if result.get("status") == "ok":
                 rebuilt_dates.append(pick_date_text)
             else:

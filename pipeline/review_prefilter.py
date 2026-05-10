@@ -716,7 +716,11 @@ class Step4Prefilter:
         if cache_key in self._market_regime_cache:
             return self._market_regime_cache[cache_key]
 
-        pick_ts = pd.to_datetime(trade_date, format="%Y%m%d")
+        # 支持 YYYY-MM-DD 和 YYYYMMDD 两种格式
+        if "-" in trade_date:
+            pick_ts = pd.to_datetime(trade_date, format="%Y-%m-%d")
+        else:
+            pick_ts = pd.to_datetime(trade_date, format="%Y%m%d")
         lookback_days = int(cfg.get("lookback_days", 20))
         ema_fast = int(cfg.get("ema_fast", 20))
         ema_slow = int(cfg.get("ema_slow", 60))
@@ -796,7 +800,82 @@ class Step4Prefilter:
             "passed": pass_count >= min_pass_count,
             "pass_count": pass_count,
             "required_pass_count": min_pass_count,
+            "lookback_days": lookback_days,
             "details": detail_rows,
         }
         self._market_regime_cache[cache_key] = result
         return result
+
+    def check_market_regime_only(self, trade_date: str) -> dict[str, Any]:
+        """仅检查市场环境，用于在候选生成前提前判断。
+
+        Returns:
+            包含以下字段的字典：
+            - passed: bool - 市场环境是否通过
+            - pass_count: int - 通过的指数数量
+            - required_pass_count: int - 要求的通过数量
+            - details: list - 各指数的详细信息
+            - summary: str - 市场环境摘要
+        """
+        if not self.enabled:
+            return {
+                "passed": True,
+                "pass_count": 0,
+                "required_pass_count": 0,
+                "details": [],
+                "summary": "预过滤未启用，默认通过"
+            }
+
+        market_cfg = self.config.get("market_regime", {}) or {}
+        if not bool(market_cfg.get("enabled", False)):
+            return {
+                "passed": True,
+                "pass_count": 0,
+                "required_pass_count": 0,
+                "details": [],
+                "summary": "市场环境检查未启用"
+            }
+
+        market_state = self._market_regime_state(trade_date=trade_date, cfg=market_cfg)
+        return {
+            "passed": market_state.get("passed", True),
+            "pass_count": market_state.get("pass_count", 0),
+            "required_pass_count": market_state.get("required_pass_count", 1),
+            "details": market_state.get("details", []),
+            "summary": self._format_market_regime_summary(market_state)
+        }
+
+    def _format_market_regime_summary(self, market_state: dict[str, Any]) -> str:
+        """格式化市场环境摘要。"""
+        details = market_state.get("details", [])
+        passed = market_state.get("passed", True)
+        pass_count = market_state.get("pass_count", 0)
+        required = market_state.get("required_pass_count", 1)
+        lookback_days = market_state.get("lookback_days", 20)
+
+        if passed:
+            return f"市场环境良好：{pass_count}/{required} 个指数通过"
+
+        # 构建详细的失败原因
+        failed_details = []
+        for item in details:
+            name = item.get("name", "")
+            close = item.get("close")
+            ema_fast = item.get("ema_fast")
+            ema_slow = item.get("ema_slow")
+            ret = item.get("return_lookback")
+
+            reasons = []
+            if close is not None and ema_fast is not None:
+                if close <= ema_fast:
+                    reasons.append(f"收盘({close:.2f}) <= EMA快线({ema_fast:.2f})")
+            if ema_fast is not None and ema_slow is not None:
+                if ema_fast <= ema_slow:
+                    reasons.append(f"EMA快线({ema_fast:.2f}) <= EMA慢线({ema_slow:.2f})")
+            if ret is not None and ret <= 0:
+                reasons.append(f"{int(lookback_days)}日收益率({ret*100:.2f}%) <= 0")
+
+            if reasons:
+                failed_details.append(f"{name}: {', '.join(reasons)}")
+
+        return f"市场环境不佳：{'; '.join(failed_details)}"

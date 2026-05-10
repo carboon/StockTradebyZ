@@ -484,3 +484,49 @@ def test_window_status_includes_consecutive_candidate_metrics(test_db):
     assert summary.items[0]["consecutive_candidate_count"] == 1
     assert summary.items[1]["pick_date"] == "2024-05-06"
     assert summary.items[1]["consecutive_candidate_count"] == 0
+
+
+def test_window_status_includes_tomorrow_star_count(test_db):
+    trade_date = date(2024, 5, 8)
+    test_db.add_all([
+        Stock(code="000001", name="A"),
+        Stock(code="000002", name="B"),
+        Stock(code="000003", name="C"),
+    ])
+    test_db.add_all([
+        StockDaily(code="000001", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100),
+        StockDaily(code="000002", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100),
+        StockDaily(code="000003", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100),
+    ])
+    test_db.add_all([
+        AnalysisResult(
+            pick_date=trade_date,
+            code="000001",
+            reviewer="quant",
+            verdict="WATCH",
+            signal_type="rebound",
+            details_json={"tomorrow_star_pass": True},
+        ),
+        AnalysisResult(
+            pick_date=trade_date,
+            code="000002",
+            reviewer="quant",
+            verdict="PASS",
+            signal_type="trend_start",
+            details_json={"prefilter": {"passed": True}},
+        ),
+        AnalysisResult(
+            pick_date=trade_date,
+            code="000003",
+            reviewer="quant",
+            verdict="PASS",
+            signal_type="trend_start",
+            details_json={"prefilter": {"passed": False}},
+        ),
+    ])
+    test_db.add(TomorrowStarRun(pick_date=trade_date, status="success", candidate_count=3, analysis_count=3, trend_start_count=2))
+    test_db.commit()
+
+    summary = TomorrowStarWindowService(test_db).get_window_status(window_size=1)
+
+    assert summary.items[0]["tomorrow_star_count"] == 2

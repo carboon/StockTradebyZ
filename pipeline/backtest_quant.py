@@ -255,6 +255,7 @@ def run_backtest(
     review_config_path: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    skip_market_regime_check: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     preselect_cfg = load_preselect_config(preselect_config_path)
     review_cfg = load_review_config(Path(review_config_path) if review_config_path else None)
@@ -268,6 +269,39 @@ def run_backtest(
     score_buckets = [float(v) for v in review_cfg.get("backtest", {}).get("score_buckets", [3.2, 3.5, 4.0])]
     disabled_strategies = {str(s).lower() for s in review_cfg.get("disabled_strategies", [])}
     prefilter = Step4Prefilter(review_cfg)
+
+    # 提前检查市场环境，获取需要跳过的日期
+    blocked_trade_dates: set[pd.Timestamp] = set()
+    market_regime_summary: dict[str, Any] = {}
+    if not skip_market_regime_check and prefilter.enabled:
+        market_cfg = prefilter.config.get("market_regime", {}) or {}
+        if bool(market_cfg.get("enabled", False)):
+            logger.info("检查市场环境...")
+            # 获取交易日历中的日期范围
+            all_trade_dates = sorted({
+                dt.strftime("%Y-%m-%d")
+                for df in raw_data.values()
+                if "date" in df.columns
+                for dt in pd.to_datetime(df["date"]).dt.date
+            })
+            if start_date:
+                all_trade_dates = [d for d in all_trade_dates if d >= start_date]
+            if end_date:
+                all_trade_dates = [d for d in all_trade_dates if d <= end_date]
+
+            for trade_date_str in all_trade_dates:
+                result = prefilter.check_market_regime_only(trade_date_str)
+                if not result.get("passed", True):
+                    blocked_trade_dates.add(pd.Timestamp(trade_date_str))
+                    market_regime_summary[trade_date_str] = result
+
+            if blocked_trade_dates:
+                blocked_list = sorted({d.strftime("%Y-%m-%d") for d in blocked_trade_dates})
+                logger.info(
+                    "市场环境不佳，跳过 %d 个交易日: %s",
+                    len(blocked_list),
+                    ", ".join(blocked_list[:5]) + ("..." if len(blocked_list) > 5 else ""),
+                )
 
     logger.info("读取股票数量: %d", len(raw_data))
     base_frames = _prepare_base_frames(raw_data, n_turnover_days=n_turnover_days)
@@ -300,6 +334,10 @@ def run_backtest(
                 codes_today = pool_sets.get(dt)
                 if codes_today and code in codes_today:
                     picked.setdefault(dt, "brick")
+
+        # 过滤掉市场环境不佳的日期
+        if blocked_trade_dates:
+            picked = {dt: strategy for dt, strategy in picked.items() if dt not in blocked_trade_dates}
 
         if not picked:
             continue

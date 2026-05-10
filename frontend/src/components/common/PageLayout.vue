@@ -992,7 +992,7 @@ $space-md: 24px;
 
   .page-shell {
     width: 100%;
-    max-width: 1360px;
+    max-width: min(1920px, calc(100vw - 48px));
     margin: 0 auto;
   }
 

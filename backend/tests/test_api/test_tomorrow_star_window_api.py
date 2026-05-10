@@ -20,6 +20,39 @@ def test_get_tomorrow_star_dates_reads_window_status(test_client_with_db):
     assert data["window_status"]["ready_count"] == 1
 
 
+def test_get_tomorrow_star_dates_exposes_market_regime_block_reason(test_client_with_db):
+    db = test_client_with_db.db
+    db.add(Stock(code="000001", name="PingAn"))
+    db.add(StockDaily(code="000001", trade_date=date(2024, 1, 3), open=10, close=11, high=11, low=9, volume=100))
+    db.add(
+        TomorrowStarRun(
+            pick_date=date(2024, 1, 3),
+            status="success",
+            candidate_count=0,
+            analysis_count=0,
+            trend_start_count=0,
+            meta_json={
+                "market_regime_blocked": True,
+                "market_regime_info": {
+                    "passed": False,
+                    "summary": "中证 500 / 创业板指环境未达标",
+                    "details": ["中证 500 趋势偏弱", "创业板指量价配合不足"],
+                },
+            },
+        )
+    )
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/tomorrow-star/dates")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["history"][0]["status"] == "market_regime_blocked"
+    assert data["history"][0]["market_regime_blocked"] is True
+    assert data["history"][0]["market_regime_info"]["summary"] == "中证 500 / 创业板指环境未达标"
+    assert data["window_status"]["history"][0]["market_regime_info"]["details"] == ["中证 500 趋势偏弱", "创业板指量价配合不足"]
+
+
 def test_get_tomorrow_star_results_reads_db(test_client_with_db):
     db = test_client_with_db.db
     db.add(Stock(code="000001", name="PingAn"))
