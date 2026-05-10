@@ -39,6 +39,7 @@ def create_watchlist_item(
     user_id: int = None,
     reason: str = None,
     entry_price: float = None,
+    entry_date: date = None,
     position_ratio: float = None,
     priority: int = 0,
     is_active: bool = True
@@ -69,6 +70,7 @@ def create_watchlist_item(
         code=code,
         add_reason=reason,
         entry_price=entry_price,
+        entry_date=entry_date,
         position_ratio=position_ratio,
         priority=priority,
         is_active=is_active
@@ -246,6 +248,48 @@ def test_get_watchlist_stock_name_null(test_client_with_db) -> None:
     assert data["items"][0]["name"] is None
 
 
+@pytest.mark.api
+def test_get_watchlist_builds_exit_plan_without_analysis_history(test_client_with_db) -> None:
+    """没有分析历史时，也应基于持仓成本和K线给出基础出场计划。"""
+    test_client_with_db.db.add(Stock(code="002222", name="福晶科技", market="SZ"))
+    user_id = test_client_with_db.db.query(User.id).first()[0]
+    create_watchlist_item(
+        test_client_with_db.db,
+        code="002222",
+        user_id=user_id,
+        entry_price=90.0,
+        entry_date=date(2026, 4, 25),
+        position_ratio=0.2,
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "date": date(2026, 4, 20 + index),
+                "open": close - 0.5,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "vol": 100000 + index,
+            }
+            for index, close in enumerate([84.0, 86.0, 88.0, 89.0, 92.0, 96.0, 101.0, 107.0])
+        ]
+    )
+
+    with patch("app.services.analysis_service.analysis_service.load_stock_data", return_value=frame):
+        response = test_client_with_db.get("/api/v1/watchlist/")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    exit_plan = item["derived"]["exit_plan"]
+    assert item["analysis"] is None
+    assert item["entry_date"] == "2026-04-25"
+    assert item["derived"]["pnl"] == pytest.approx(107.0 / 90.0 - 1.0)
+    assert exit_plan["entry_price"] == 90.0
+    assert exit_plan["current_price"] == 107.0
+    assert exit_plan["target_prices"]["20d"]["p50"] == 101.88
+    assert exit_plan["target_progress"] in {"below_p50", "p50", "p75", "p90"}
+
+
 # ========================================================================
 # 添加到观察列表API测试 (POST /api/v1/watchlist/)
 # ========================================================================
@@ -266,6 +310,7 @@ def test_add_to_watchlist_success(test_client_with_db, sample_stock_data) -> Non
     request_data = {
         "code": "600000",
         "reason": "B1策略通过",
+        "entry_date": "2026-04-25",
         "priority": 1
     }
 
@@ -277,6 +322,7 @@ def test_add_to_watchlist_success(test_client_with_db, sample_stock_data) -> Non
     assert data["code"] == "600000"
     assert data["name"] == "浦发银行"
     assert data["add_reason"] == "B1策略通过"
+    assert data["entry_date"] == "2026-04-25"
     assert data["priority"] == 1
     assert data["is_active"] is True
     assert "id" in data
@@ -289,6 +335,7 @@ def test_add_to_watchlist_success(test_client_with_db, sample_stock_data) -> Non
     ).first()
     assert watchlist_item is not None
     assert watchlist_item.add_reason == "B1策略通过"
+    assert watchlist_item.entry_date == date(2026, 4, 25)
 
 
 @pytest.mark.api
@@ -343,8 +390,7 @@ def test_add_to_watchlist_invalid_code(test_client_with_db) -> None:
     """
     测试添加到观察列表 - 无效股票代码
 
-    验证当添加不存在的股票代码时，
-    API仍能成功创建观察项，但name字段为None。
+    验证当添加明显不受支持的股票代码时，API返回明确的400错误。
     """
     request_data = {
         "code": "999999",
@@ -354,19 +400,24 @@ def test_add_to_watchlist_invalid_code(test_client_with_db) -> None:
 
     response = test_client_with_db.post("/api/v1/watchlist/", json=request_data)
 
-    assert response.status_code == 200
-    data = response.json()
+    assert response.status_code == 400
+    assert "股票代码不在支持的A股范围内" in response.json()["detail"]
 
-    assert data["code"] == "999999"
-    assert data["name"] is None
-    assert data["add_reason"] == "测试股票"
-
-    # 验证数据库中创建了记录
-    test_client_with_db.db.rollback()
     watchlist_item = test_client_with_db.db.query(Watchlist).filter(
         Watchlist.code == "999999"
     ).first()
-    assert watchlist_item is not None
+    assert watchlist_item is None
+
+
+@pytest.mark.api
+def test_add_to_watchlist_rejects_mistyped_prefix(test_client_with_db) -> None:
+    response = test_client_with_db.post(
+        "/api/v1/watchlist/",
+        json={"code": "022222", "entry_price": 90, "position_ratio": 0.2},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "股票代码不在支持的A股范围内: 022222"
 
 
 @pytest.mark.api
@@ -405,6 +456,9 @@ def test_add_to_watchlist_default_values(test_client_with_db) -> None:
     验证当不提供可选参数时，
     API使用正确的默认值。
     """
+    test_client_with_db.db.add(Stock(code="600000", name="浦发银行", market="SH"))
+    test_client_with_db.db.commit()
+
     request_data = {
         "code": "600000"
     }
@@ -416,6 +470,7 @@ def test_add_to_watchlist_default_values(test_client_with_db) -> None:
 
     assert data["code"] == "600000"
     assert data["add_reason"] is None
+    assert data["entry_date"] is None
     assert data["priority"] == 0  # 默认优先级
     assert data["is_active"] is True  # 默认活跃
 
@@ -442,6 +497,7 @@ def test_update_watchlist_item_success(test_client_with_db) -> None:
     request_data = {
         "reason": "更新后的原因",
         "entry_price": 12.3,
+        "entry_date": "2026-04-26",
         "position_ratio": 0.4,
         "priority": 5,
         "is_active": False
@@ -459,6 +515,7 @@ def test_update_watchlist_item_success(test_client_with_db) -> None:
     assert data["code"] == "600000"
     assert data["add_reason"] == "更新后的原因"
     assert data["entry_price"] == 12.3
+    assert data["entry_date"] == "2026-04-26"
     assert data["position_ratio"] == 0.4
     assert data["priority"] == 5
     assert data["is_active"] is False
@@ -470,6 +527,7 @@ def test_update_watchlist_item_success(test_client_with_db) -> None:
     ).first()
     assert updated_item.add_reason == "更新后的原因"
     assert updated_item.entry_price == 12.3
+    assert updated_item.entry_date == date(2026, 4, 26)
     assert updated_item.position_ratio == 0.4
     assert updated_item.priority == 5
     assert updated_item.is_active is False
@@ -520,6 +578,7 @@ def test_update_watchlist_item_allows_clearing_nullable_fields(test_client_with_
         code="600000",
         reason="原始原因",
         entry_price=12.6,
+        entry_date=date(2026, 4, 25),
         position_ratio=0.35,
         priority=1,
     )
@@ -527,6 +586,7 @@ def test_update_watchlist_item_allows_clearing_nullable_fields(test_client_with_
     request_data = {
         "reason": None,
         "entry_price": None,
+        "entry_date": None,
         "position_ratio": None,
     }
 
@@ -539,6 +599,7 @@ def test_update_watchlist_item_allows_clearing_nullable_fields(test_client_with_
     data = response.json()
     assert data["add_reason"] is None
     assert data["entry_price"] is None
+    assert data["entry_date"] is None
     assert data["position_ratio"] is None
 
     test_client_with_db.db.rollback()
@@ -547,6 +608,7 @@ def test_update_watchlist_item_allows_clearing_nullable_fields(test_client_with_
     ).first()
     assert updated_item.add_reason is None
     assert updated_item.entry_price is None
+    assert updated_item.entry_date is None
     assert updated_item.position_ratio is None
 
 
@@ -696,6 +758,7 @@ def test_get_watchlist_analysis_empty(test_client_with_db) -> None:
     item = create_watchlist_item(
         test_client_with_db.db,
         code="600000",
+        entry_date=date(2024, 1, 5),
         entry_price=9.7,
         position_ratio=0.25,
     )
@@ -708,9 +771,32 @@ def test_get_watchlist_analysis_empty(test_client_with_db) -> None:
     data = response.json()
 
     assert data["code"] == "600000"
+    assert data["entry_date"] == "2024-01-05"
     assert "analyses" in data
     assert data["total"] == 0
     assert data["analyses"] == []
+    mock_service.get_stock_history_checks.assert_called_once_with("600000", 5)
+
+
+@pytest.mark.api
+def test_get_watchlist_analysis_accepts_service_tuple_response(test_client_with_db) -> None:
+    item = create_watchlist_item(
+        test_client_with_db.db,
+        code="600000",
+        entry_price=9.7,
+        position_ratio=0.25,
+    )
+
+    with patch("app.api.watchlist.analysis_service") as mock_service:
+        mock_service.get_stock_history_checks.return_value = ([], 0)
+        response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["code"] == "600000"
+    assert data["total"] == 0
+    assert data["analyses"] == []
+    mock_service.get_stock_history_checks.assert_called_once_with("600000", 5)
 
 
 @pytest.mark.api
@@ -789,15 +875,18 @@ def test_get_watchlist_analysis(test_client_with_db) -> None:
     assert first_analysis["risk_recommendation"] == "关注回踩支撑是否有效。"
     assert first_analysis["support_level"] == 9.5
     assert first_analysis["resistance_level"] == 11.0
+    assert first_analysis["exit_plan"]["action"] == "hold_cautious"
+    assert first_analysis["exit_plan"]["target_prices"]["10d"]["p50"] == pytest.approx(11.592)
     assert first_analysis["recommendation"] == "可试仓，不追高；回踩企稳再加。"
+    mock_service.get_stock_history_checks.assert_called_once_with("600000", 5)
 
 
 @pytest.mark.api
 def test_get_watchlist_analysis_limit(test_client_with_db) -> None:
     """
-    测试获取观察股票分析历史 - 数量限制
+    测试获取观察股票分析历史 - 默认数量
 
-    验证API只返回最近30条分析记录。
+    验证API默认请求最近5个交易日的分析记录。
     """
     # 创建观察项
     item = create_watchlist_item(
@@ -819,16 +908,17 @@ def test_get_watchlist_analysis_limit(test_client_with_db) -> None:
     ]
 
     with patch("app.api.watchlist.analysis_service") as mock_service:
-        mock_service.get_stock_history_checks.return_value = mock_history[:30]
+        mock_service.get_stock_history_checks.return_value = mock_history[:5]
         mock_service.load_stock_data.return_value = pd.DataFrame([])
         response = test_client_with_db.get(f"/api/v1/watchlist/{item.id}/analysis")
 
     assert response.status_code == 200
     data = response.json()
 
-    # 应该只返回30条
-    assert data["total"] == 30
-    assert len(data["analyses"]) == 30
+    # 默认只构建最近5个交易日
+    assert data["total"] == 5
+    assert len(data["analyses"]) == 5
+    mock_service.get_stock_history_checks.assert_called_once_with("600000", 5)
 
 
 @pytest.mark.api

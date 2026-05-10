@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Watchlist, Stock, StockAnalysis, StockDaily
 from app.services.analysis_cache import analysis_cache
+from app.services.exit_plan_service import ExitPlanService
 from app.time_utils import utc_now
 
 
@@ -50,6 +51,29 @@ def _resolve_latest_trade_date(df) -> date_class:
     if isinstance(latest_value, date_class):
         return latest_value
     return date_class.fromisoformat(str(latest_value)[:10])
+
+
+def _resolve_watchlist_entry_date(w: Watchlist) -> Optional[date_class]:
+    entry_date = getattr(w, "entry_date", None)
+    if entry_date:
+        if hasattr(entry_date, "date"):
+            return entry_date.date()
+        if isinstance(entry_date, date_class):
+            return entry_date
+        try:
+            return date_class.fromisoformat(str(entry_date)[:10])
+        except ValueError:
+            return None
+
+    added_at = getattr(w, "added_at", None)
+    if added_at:
+        if hasattr(added_at, "date"):
+            return added_at.date()
+        try:
+            return date_class.fromisoformat(str(added_at)[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _calc_support_resistance(df) -> tuple[float | None, float | None]:
@@ -168,6 +192,7 @@ class WatchlistAnalysisService:
 
     def __init__(self, db: Session):
         self.db = db
+        self.exit_plan_service = ExitPlanService()
 
     def get_watchlist_with_analysis(
         self,
@@ -212,6 +237,7 @@ class WatchlistAnalysisService:
                 "name": stock.name if stock else None,
                 "user_config": {
                     "entry_price": w.entry_price,
+                    "entry_date": w.entry_date,
                     "position_ratio": w.position_ratio,
                     "add_reason": w.add_reason,
                     "priority": w.priority,
@@ -245,6 +271,17 @@ class WatchlistAnalysisService:
 
                 # 批量预取近 20 日行情后统一计算支撑/阻力位，避免逐只股票重复查库
                 support_level, resistance_level = levels_map.get(w.code, (None, None))
+                history_df = self._load_exit_history_frame(w.code, end_date=analysis.trade_date)
+                entry_date = _resolve_watchlist_entry_date(w)
+                exit_plan = self.exit_plan_service.build_exit_plan(
+                    code=w.code,
+                    history_df=history_df,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    entry_date=entry_date,
+                    verdict=analysis.verdict,
+                    signal_type=analysis.signal_type,
+                )
 
                 # 派生字段
                 item["derived"] = {
@@ -280,15 +317,88 @@ class WatchlistAnalysisService:
                     ),
                     "support_level": support_level,
                     "resistance_level": resistance_level,
+                    "exit_plan": exit_plan,
                 }
             else:
-                # 没有分析结果
+                history_df = self._load_exit_history_frame(w.code, end_date=trade_date)
+                current_price = self._latest_close(history_df)
+                entry_price = w.entry_price
+                position_ratio = w.position_ratio
+                pnl = current_price / entry_price - 1.0 if entry_price and current_price else None
+                support_level, resistance_level = levels_map.get(w.code, (None, None))
+                exit_plan = self.exit_plan_service.build_exit_plan(
+                    code=w.code,
+                    history_df=history_df,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    entry_date=_resolve_watchlist_entry_date(w),
+                )
+
+                # 没有分析结果时，仍基于成本价和最近K线给出基础持仓计划。
                 item["analysis"] = None
-                item["derived"] = None
+                item["derived"] = {
+                    "pnl": pnl,
+                    "trend_outlook": "neutral",
+                    "buy_action": "wait",
+                    "hold_action": "hold_cautious",
+                    "risk_level": _build_risk_level(
+                        None,
+                        None,
+                        None,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        position_ratio=position_ratio,
+                    ),
+                    "recommendation": "暂无最新分析结果，先按成本价、最近K线和结构线管理持仓。",
+                    "support_level": support_level,
+                    "resistance_level": resistance_level,
+                    "exit_plan": exit_plan,
+                }
 
             results.append(item)
 
         return results
+
+    @staticmethod
+    def _latest_close(history_df: pd.DataFrame) -> Optional[float]:
+        if history_df is None or history_df.empty or "close" not in history_df.columns:
+            return None
+        value = pd.to_numeric(history_df["close"], errors="coerce").dropna()
+        if value.empty:
+            return None
+        return float(value.iloc[-1])
+
+    def _load_exit_history_frame(
+        self,
+        code: str,
+        *,
+        end_date: Optional[date_class] = None,
+    ) -> pd.DataFrame:
+        frame = self.exit_plan_service.load_history_frame(self.db, code, end_date=end_date)
+        if not frame.empty:
+            return frame
+
+        try:
+            from app.services.analysis_service import analysis_service
+            cached = analysis_service.load_stock_data(code)
+        except Exception:
+            return pd.DataFrame()
+
+        if cached is None or cached.empty:
+            return pd.DataFrame()
+        cached = cached.copy()
+        if "trade_date" in cached.columns and "date" not in cached.columns:
+            cached = cached.rename(columns={"trade_date": "date"})
+        if "vol" in cached.columns and "volume" not in cached.columns:
+            cached = cached.rename(columns={"vol": "volume"})
+        required = {"date", "open", "high", "low", "close"}
+        if not required.issubset(set(cached.columns)):
+            return pd.DataFrame()
+        cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
+        if end_date is not None:
+            cached = cached[cached["date"] <= pd.Timestamp(end_date)]
+        columns = ["date", "open", "high", "low", "close"] + (["volume"] if "volume" in cached.columns else [])
+        return cached[columns].dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
 
     def _load_analysis_map(
         self,

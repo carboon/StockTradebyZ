@@ -6,6 +6,7 @@ Analysis API
 阶段5改造：长任务统一通过TaskService管理，不再使用BackgroundTasks。
 """
 import json
+import logging
 import os
 import math
 from datetime import date, datetime
@@ -59,7 +60,9 @@ from app.schemas import (
     DiagnosisResponse,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+DIAGNOSIS_HISTORY_WINDOW_DAYS = analysis_service.HISTORY_WINDOW_DAYS
 
 ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -717,6 +720,7 @@ async def get_current_hot_candidates(
             turnover=item.get("turnover"),
             turnover_rate=item.get("turnover_rate"),
             volume_ratio=item.get("volume_ratio"),
+            active_pool_rank=item.get("active_pool_rank"),
             b1_passed=item.get("b1_passed"),
             kdj_j=item.get("kdj_j"),
             verdict=item.get("verdict"),
@@ -758,6 +762,7 @@ async def get_current_hot_results(
             comment=item.get("comment"),
             turnover_rate=item.get("turnover_rate"),
             volume_ratio=item.get("volume_ratio"),
+            active_pool_rank=item.get("active_pool_rank"),
         )
         for item in payload.get("results", [])
     ]
@@ -783,10 +788,10 @@ async def generate_current_hot(
 @router.get("/current-hot/intraday/status")
 async def get_current_hot_intraday_status(
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> dict:
     service = CurrentHotIntradayAnalysisService(db)
-    status = service.get_status(is_admin=getattr(user, "role", None) == "admin")
+    status = service.get_status(is_admin=True)
     return {
         "trade_date": status.trade_date,
         "source_pick_date": status.source_pick_date,
@@ -801,10 +806,10 @@ async def get_current_hot_intraday_status(
 @router.get("/current-hot/intraday/data", response_model=CurrentHotIntradayAnalysisResponse)
 async def get_current_hot_intraday_data(
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> CurrentHotIntradayAnalysisResponse:
     service = CurrentHotIntradayAnalysisService(db)
-    payload = service.get_snapshot_payload(is_admin=getattr(user, "role", None) == "admin")
+    payload = service.get_snapshot_payload(is_admin=True)
     return CurrentHotIntradayAnalysisResponse(**payload)
 
 
@@ -822,10 +827,10 @@ async def generate_current_hot_intraday(
 @router.get("/intraday/status")
 async def get_intraday_analysis_status(
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> dict:
     service = IntradayAnalysisService(db)
-    status = service.get_status(is_admin=getattr(user, "role", None) == "admin")
+    status = service.get_status(is_admin=True)
     return {
         "trade_date": status.trade_date,
         "source_pick_date": status.source_pick_date,
@@ -840,10 +845,10 @@ async def get_intraday_analysis_status(
 @router.get("/intraday/data", response_model=IntradayAnalysisResponse)
 async def get_intraday_analysis_data(
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> IntradayAnalysisResponse:
     service = IntradayAnalysisService(db)
-    payload = service.get_snapshot_payload(is_admin=getattr(user, "role", None) == "admin")
+    payload = service.get_snapshot_payload(is_admin=True)
     return IntradayAnalysisResponse(**payload)
 
 
@@ -861,7 +866,7 @@ async def generate_intraday_analysis(
 @router.get("/diagnosis/{code}/history", response_model=DiagnosisHistoryResponse)
 async def get_diagnosis_history(
     code: str,
-    days: int = analysis_service.HISTORY_WINDOW_DAYS,
+    days: int = DIAGNOSIS_HISTORY_WINDOW_DAYS,
     page: int = 1,
     page_size: int = 10,
     refresh: bool = Query(default=False, description="是否同步补齐当前页历史数据"),
@@ -872,7 +877,19 @@ async def get_diagnosis_history(
     code = code.zfill(6)
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), days, 50))
-    days = max(1, min(int(days), analysis_service.HISTORY_WINDOW_DAYS))
+    days = max(1, min(int(days), DIAGNOSIS_HISTORY_WINDOW_DAYS))
+
+    if refresh:
+        result = analysis_service.ensure_history_page(
+            code,
+            days=days,
+            page=page,
+            page_size=page_size,
+            force=True,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "刷新历史数据失败"))
+        diagnosis_history_cache_service.invalidate(code)
 
     try:
         payload = diagnosis_history_cache_service.get_page(
@@ -881,10 +898,29 @@ async def get_diagnosis_history(
             page=page,
             page_size=page_size,
             force=refresh,
-            generate_if_missing=True,
+            generate_if_missing=False,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"读取诊断历史失败: {exc}") from exc
+        logger.warning("诊断历史缓存读取失败，回退到只读 DB 查询: code=%s error=%s", code, exc)
+        history, total = analysis_service.get_stock_history_checks(code, days, page, page_size)
+        stock_name = db.query(Stock.name).filter(Stock.code == code).scalar()
+        payload = {
+            "code": code,
+            "name": stock_name,
+            "history": history,
+            "total": total,
+            "generated_count": len(history),
+            "trend_start_dates": [
+                str(item.get("check_date"))[:10]
+                for item in history
+                if item.get("signal_type") == "trend_start" and item.get("check_date")
+            ],
+            "tomorrow_star_dates": [
+                str(item.get("check_date"))[:10]
+                for item in history
+                if item.get("tomorrow_star_pass") is True and item.get("check_date")
+            ],
+        }
 
     return DiagnosisHistoryResponse(
         code=code,
@@ -905,7 +941,7 @@ async def get_diagnosis_history(
 @router.post("/diagnosis/{code}/generate-history")
 async def generate_diagnosis_history(
     code: str,
-    days: int = Query(default=analysis_service.HISTORY_WINDOW_DAYS, description="生成最近N个交易日的历史数据"),
+    days: int = Query(default=DIAGNOSIS_HISTORY_WINDOW_DAYS, description="生成最近N个交易日的历史数据"),
     page: int = Query(default=1, description="当前页码"),
     page_size: int = Query(default=10, description="当前页大小"),
     force: bool = Query(default=False, description="是否强制刷新当前页"),
@@ -949,7 +985,7 @@ async def generate_diagnosis_history(
 @router.get("/diagnosis/{code}/history-status")
 async def get_history_status(
     code: str,
-    days: int = analysis_service.HISTORY_WINDOW_DAYS,
+    days: int = DIAGNOSIS_HISTORY_WINDOW_DAYS,
     page: int = 1,
     page_size: int = 10,
     db: Session = Depends(get_db),

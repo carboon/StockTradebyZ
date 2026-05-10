@@ -164,6 +164,7 @@ class BackgroundLatestTradeDayUpdateService:
         cache.delete(build_freshness_cache_key())
         cache.delete_prefix("candidates:")
         cache.delete_prefix("analysis_results:")
+        cache.delete_prefix("active_pool_rank:")
         TushareService.clear_data_status_cache()
 
     @staticmethod
@@ -392,6 +393,24 @@ class BackgroundLatestTradeDayUpdateService:
             else:
                 self.log.info("跳过行情更新，直接重建明日之星 trade_date=%s", trade_date)
 
+            active_rank_started_at = time.perf_counter()
+            try:
+                from app.services.active_pool_rank_service import active_pool_rank_service
+                from app.services.analysis_service import analysis_service
+
+                preselect_cfg = analysis_service._load_preselect_config()
+                global_cfg = preselect_cfg.get("global", {})
+                active_rank_result = active_pool_rank_service.compute_for_dates(
+                    [trade_date],
+                    top_m=int(global_cfg.get("top_m", 2000)),
+                    n_turnover_days=int(global_cfg.get("n_turnover_days", 43)),
+                    force=force or freshness.needs_market_update,
+                )
+            except Exception as exc:
+                active_rank_result = {"success": False, "error": str(exc)}
+                self.log.warning("活跃池排名因子构建失败 trade_date=%s error=%s", trade_date, exc)
+            active_rank_elapsed = round(max(0.0, time.perf_counter() - active_rank_started_at), 3)
+
             tomorrow_started_at = time.perf_counter()
             self.log.info("开始重建明日之星 trade_date=%s reviewer=%s", trade_date, reviewer)
             self._push_market_state(
@@ -458,6 +477,7 @@ class BackgroundLatestTradeDayUpdateService:
             timings = {
                 "freshness_check": freshness_elapsed,
                 **batch_timings,
+                "active_pool_rank": active_rank_elapsed,
                 "tomorrow_star_rebuild": tomorrow_elapsed,
                 "current_hot_rebuild": current_hot_elapsed,
                 "total": total_elapsed,
@@ -484,6 +504,7 @@ class BackgroundLatestTradeDayUpdateService:
                 "batch_result": batch_result,
                 "tomorrow_star_result": tomorrow_result,
                 "current_hot_result": current_hot_result,
+                "active_pool_rank_result": active_rank_result,
                 "tomorrow_star_stats": tomorrow_stats,
                 "diagnosis_cache_prewarm": diagnosis_cache_result,
                 "timings": timings,

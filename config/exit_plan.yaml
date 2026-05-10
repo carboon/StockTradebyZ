@@ -1,0 +1,25 @@
+profiles_path: data/exit/exit_profiles.json
+
+fallback_targets:
+  "5d":
+    p50: 0.060
+    p75: 0.102
+    p90: 0.173
+  "10d":
+    p50: 0.104
+    p75: 0.185
+    p90: 0.344
+  "20d":
+    p50: 0.132
+    p75: 0.349
+    p90: 0.589
+
+risk:
+  atr_period: 14
+  ema_period: 20
+  recent_low_lookback: 5
+  hard_stop_pct: 0.08
+  initial_trailing_drawdown: 0.10
+  protect_trailing_drawdown: 0.08
+  distribution_volume_ratio: 1.50
+  distribution_intraday_drop: 0.03

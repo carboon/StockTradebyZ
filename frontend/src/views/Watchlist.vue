@@ -51,29 +51,15 @@
                   <span class="value">{{ item.entry_price != null ? item.entry_price.toFixed(2) : '-' }}</span>
                 </div>
                 <div class="mobile-stock-card__meta-item">
+                  <span class="label">买入日期</span>
+                  <span class="value">{{ formatEntryDate(item.entry_date) }}</span>
+                </div>
+                <div class="mobile-stock-card__meta-item">
                   <span class="label">仓位</span>
                   <span class="value">{{ formatPositionRatio(item.position_ratio) }}</span>
                 </div>
               </div>
               <div class="mobile-stock-card__footer">
-                <div class="mobile-stock-card__risk">
-                  <span class="label">最新结论</span>
-                  <el-tag
-                    v-if="getLatestAnalysisForStock(item.id)?.risk_level"
-                    :type="getRiskLevelType(getLatestAnalysisForStock(item.id)?.risk_level)"
-                    size="small"
-                  >
-                    风险{{ getRiskLevelLabel(getLatestAnalysisForStock(item.id)?.risk_level) }}
-                  </el-tag>
-                  <el-tag
-                    v-else-if="getLatestAnalysisForStock(item.id)?.verdict"
-                    :type="getVerdictType(getLatestAnalysisForStock(item.id)?.verdict)"
-                    size="small"
-                  >
-                    {{ getLatestAnalysisForStock(item.id)?.verdict }}
-                  </el-tag>
-                  <span v-else class="value">{{ item.add_reason || '待分析' }}</span>
-                </div>
                 <div class="mobile-stock-card__actions">
                   <el-button text type="primary" size="small" @click.stop="openEditDialog(item)">编辑</el-button>
                   <el-button text type="danger" size="small" @click.stop="removeStock(item)">删除</el-button>
@@ -82,41 +68,41 @@
             </button>
           </div>
 
-          <el-table
-            v-else
-            :data="watchlist"
-            @row-click="selectStock"
-            highlight-current-row
-            class="watchlist-table"
-            height="100%"
-          >
-          <el-table-column prop="code" label="代码" width="80" />
-          <el-table-column prop="name" label="名称" />
-            <el-table-column label="操作" width="120" align="center">
-              <template #default="{ row }">
-                <div class="row-actions">
-                  <el-button
-                    text
-                    type="primary"
-                    size="small"
-                    @click.stop="openEditDialog(row)"
-                  >
-                    编辑
-                  </el-button>
-                  <el-divider direction="vertical" />
-                  <el-button
-                    text
-                    type="danger"
-                    size="small"
-                    :icon="Delete"
-                    @click.stop="removeStock(row)"
-                  >
-                    删除
-                  </el-button>
+          <div v-else class="watchlist-desktop-list">
+            <el-empty v-if="watchlist.length === 0" description="暂无观察股票" :image-size="60" />
+            <div v-else class="watchlist-desktop-table">
+              <div class="watchlist-desktop-header">
+                <span>编号</span>
+                <span>股名</span>
+                <span>成本</span>
+                <span>买入日</span>
+                <span>仓位</span>
+                <span>操作</span>
+              </div>
+              <div
+                v-for="item in watchlist"
+                :key="item.id"
+                class="watchlist-desktop-item"
+                :class="{ active: selectedStock?.id === item.id }"
+                role="button"
+                tabindex="0"
+                @click="selectStock(item)"
+                @keydown.enter.prevent="selectStock(item)"
+              >
+                <div class="watchlist-desktop-item__identity">
+                  <span class="watchlist-desktop-item__code">{{ item.code }}</span>
                 </div>
-              </template>
-            </el-table-column>
-          </el-table>
+                <div class="watchlist-desktop-item__name">{{ item.name || item.code }}</div>
+                <div class="watchlist-desktop-item__value">{{ formatPlanPrice(item.entry_price ?? null) }}</div>
+                <div class="watchlist-desktop-item__value">{{ formatEntryDate(item.entry_date) }}</div>
+                <div class="watchlist-desktop-item__value">{{ formatPositionRatio(item.position_ratio) }}</div>
+                <div class="watchlist-desktop-item__actions">
+                  <el-button text type="primary" size="small" @click.stop="openEditDialog(item)">编辑</el-button>
+                  <el-button text type="danger" size="small" @click.stop="removeStock(item)">删除</el-button>
+                </div>
+              </div>
+            </div>
+          </div>
       </el-card>
 
       <el-card v-if="selectedStock" class="detail-card">
@@ -142,7 +128,7 @@
             <div class="trend-section">
               <h4>趋势分析 (基于技术指标)</h4>
               <el-row :gutter="20" class="position-row">
-                <el-col :span="summarySpan">
+                <el-col :span="positionSummarySpan">
                   <div class="trend-box">
                     <div class="trend-label">买入成本</div>
                     <div class="price-range">
@@ -150,7 +136,15 @@
                     </div>
                   </div>
                 </el-col>
-                <el-col :span="summarySpan">
+                <el-col :span="positionSummarySpan">
+                  <div class="trend-box">
+                    <div class="trend-label">实际买入日</div>
+                    <div class="price-range">
+                      <span>{{ formatEntryDate(selectedStock.entry_date) }}</span>
+                    </div>
+                  </div>
+                </el-col>
+                <el-col :span="positionSummarySpan">
                   <div class="trend-box">
                     <div class="trend-label">当前仓位</div>
                     <div class="price-range">
@@ -211,6 +205,85 @@
                   <div class="decision-title">风控建议</div>
                   <div class="decision-text">{{ latestAnalysis.risk_recommendation || latestAnalysis.recommendation || '-' }}</div>
                 </div>
+              </div>
+              <div v-if="selectedExitPlan" class="holding-plan-section">
+                <h4>持仓计划</h4>
+                <div class="holding-plan-summary">
+                  <div class="holding-plan-summary__main">
+                    <el-tag :type="getExitPlanActionType(selectedExitPlan.action)" size="small">
+                      {{ getExitPlanActionLabel(selectedExitPlan) }}
+                    </el-tag>
+                    <span v-if="selectedExitPlan.phase" class="holding-plan-phase">{{ getExitPlanPhaseLabel(selectedExitPlan.phase) }}</span>
+                    <span v-if="selectedExitPlan.target_progress" class="holding-plan-progress">
+                      {{ getTargetProgressLabel(selectedExitPlan.target_progress) }}
+                    </span>
+                  </div>
+                  <div class="holding-plan-reason">{{ getExitPlanReason(selectedExitPlan) }}</div>
+                </div>
+                <div class="holding-plan-grid holding-plan-grid--summary">
+                  <div class="holding-plan-item">
+                    <span class="holding-plan-label">价格带</span>
+                    <span class="holding-plan-value">
+                      成本 {{ formatPlanPrice(selectedExitPlan.entry_price ?? selectedStock.entry_price ?? null) }}
+                      / 现价 {{ formatPlanPrice(selectedExitPlan.current_price ?? latestAnalysis?.close_price ?? null) }}
+                    </span>
+                  </div>
+                  <div class="holding-plan-item">
+                    <span class="holding-plan-label">计算口径</span>
+                    <span class="holding-plan-value">{{ getExitPlanDynamicNote() }}</span>
+                  </div>
+                </div>
+                <div class="holding-plan-metrics">
+                  <div class="holding-plan-metric-block">
+                    <div class="holding-plan-metric-heading">
+                      <span>目标分位</span>
+                      <small>MFE 代表入场后曾经出现过的最大浮盈</small>
+                    </div>
+                    <div class="exit-metric-row">
+                      <el-tooltip
+                        v-for="metric in getTargetMetricItems(selectedExitPlan)"
+                        :key="`detail-${metric.key}`"
+                        placement="top"
+                        effect="light"
+                      >
+                        <template #content>
+                          <div class="exit-metric-tooltip">{{ metric.tooltip }}</div>
+                        </template>
+                        <div class="exit-metric exit-metric--large">
+                          <span class="exit-metric__label">{{ metric.label }}</span>
+                          <span class="exit-metric__value">{{ formatPlanPrice(metric.value) }}</span>
+                          <span class="exit-metric__hint">{{ metric.hint }}</span>
+                        </div>
+                      </el-tooltip>
+                    </div>
+                  </div>
+                  <div class="holding-plan-metric-block">
+                    <div class="holding-plan-metric-heading">
+                      <span>风控线</span>
+                      <small>不是预测价，是持仓过程中用来判断去留的参照线</small>
+                    </div>
+                    <div class="exit-metric-row">
+                      <el-tooltip
+                        v-for="metric in getRiskMetricItems(selectedExitPlan)"
+                        :key="`detail-${metric.key}`"
+                        placement="top"
+                        effect="light"
+                      >
+                        <template #content>
+                          <div class="exit-metric-tooltip">{{ metric.tooltip }}</div>
+                        </template>
+                        <div class="exit-metric exit-metric--large">
+                          <span class="exit-metric__label">{{ metric.label }}</span>
+                          <span class="exit-metric__value">{{ formatPlanPrice(metric.value) }}</span>
+                          <span class="exit-metric__hint">{{ metric.hint }}</span>
+                        </div>
+                      </el-tooltip>
+                    </div>
+                  </div>
+                </div>
+                <ul v-if="selectedExitPlan.rules?.length" class="holding-plan-rules">
+                  <li v-for="rule in selectedExitPlan.rules" :key="rule">{{ formatExitRule(rule) }}</li>
+                </ul>
               </div>
               <el-row :gutter="20">
                 <el-col :span="summarySpan">
@@ -389,6 +462,15 @@
             placeholder="可选，如 12.35"
           />
         </el-form-item>
+        <el-form-item label="实际买入日">
+          <el-date-picker
+            v-model="addForm.entryDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="可选，选择日期"
+            class="watchlist-date-picker"
+          />
+        </el-form-item>
         <el-form-item label="仓位">
           <el-input
             v-model="addForm.positionRatio"
@@ -427,6 +509,15 @@
             placeholder="可选，如 12.35"
           />
         </el-form-item>
+        <el-form-item label="实际买入日">
+          <el-date-picker
+            v-model="editForm.entryDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="可选，选择日期"
+            class="watchlist-date-picker"
+          />
+        </el-form-item>
         <el-form-item label="仓位">
           <el-input
             v-model="editForm.positionRatio"
@@ -454,13 +545,21 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Delete } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { apiWatchlist, apiStock, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
 import { useAuthStore } from '@/store/auth'
-import type { KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
+import type { ExitPlan, KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
 import type { ECharts } from 'echarts/core'
+
+type ExitMetricItem = {
+  key: string
+  label: string
+  hint: string
+  value: number | null
+  tooltip: string
+}
 
 const router = useRouter()
 const { isMobile } = useResponsive()
@@ -509,8 +608,8 @@ const analysisHistory = ref<WatchlistAnalysis[]>([])
 
 const showAddDialog = ref(false)
 const showEditDialog = ref(false)
-const addForm = ref({ code: '', reason: '', entryPrice: '', positionRatio: '' })
-const editForm = ref({ id: 0, code: '', reason: '', entryPrice: '', positionRatio: '' })
+const addForm = ref({ code: '', reason: '', entryPrice: '', entryDate: '', positionRatio: '' })
+const editForm = ref({ id: 0, code: '', reason: '', entryPrice: '', entryDate: '', positionRatio: '' })
 const analyzing = ref(false)
 
 // 缓存优化
@@ -548,6 +647,8 @@ const trendText = computed(() => {
 })
 
 const latestAnalysis = computed(() => analysisHistory.value[0] || null)
+const selectedExitPlan = computed(() => latestAnalysis.value?.exit_plan || getItemExitPlan(selectedStock.value))
+const positionSummarySpan = computed(() => (isMobile.value ? 24 : 8))
 const summarySpan = computed(() => (isMobile.value ? 24 : 12))
 const actionSpan = computed(() => (isMobile.value ? 24 : 8))
 const historyPage = ref(1)
@@ -573,13 +674,8 @@ function resetHistoryPagination() {
   historyPage.value = 1
 }
 
-function getLatestAnalysisForStock(id: number): WatchlistAnalysis | null {
-  if (selectedStock.value?.id === id && analysisHistory.value.length > 0) {
-    return analysisHistory.value[0] || null
-  }
-
-  const cached = analysisCache.get(id)
-  return cached?.[0] || null
+function getItemExitPlan(item?: WatchlistItem | null): ExitPlan | null {
+  return item?.derived?.exit_plan || item?.exit_plan || null
 }
 
 function beginRequest(key: string): AbortSignal {
@@ -1015,20 +1111,22 @@ async function addToWatchlist() {
 
   try {
     const entryPrice = (addForm.value.entryPrice || '').trim()
+    const entryDate = (addForm.value.entryDate || '').trim()
     const positionRatio = (addForm.value.positionRatio || '').trim()
-    if (entryPrice || positionRatio) {
+    if (entryPrice || entryDate || positionRatio) {
       await apiWatchlist.add(
         code,
         addForm.value.reason,
         0,
         entryPrice ? Number(entryPrice) : undefined,
         positionRatio ? Number(positionRatio) / 100 : undefined,
+        entryDate || undefined,
       )
     } else {
       await apiWatchlist.add(code, addForm.value.reason)
     }
     showAddDialog.value = false
-    addForm.value = { code: '', reason: '', entryPrice: '', positionRatio: '' }
+    addForm.value = { code: '', reason: '', entryPrice: '', entryDate: '', positionRatio: '' }
     await loadWatchlist()
     persistWatchlistState()
     ElMessage.success('添加成功')
@@ -1043,6 +1141,7 @@ function openEditDialog(row: WatchlistItem) {
     code: row.code,
     reason: row.add_reason || '',
     entryPrice: row.entry_price != null ? String(row.entry_price) : '',
+    entryDate: row.entry_date || '',
     positionRatio: row.position_ratio != null ? String(row.position_ratio * 100) : '',
   }
   showEditDialog.value = true
@@ -1051,12 +1150,14 @@ function openEditDialog(row: WatchlistItem) {
 async function saveEdit() {
   try {
     const entryPrice = (editForm.value.entryPrice || '').trim()
+    const entryDate = (editForm.value.entryDate || '').trim()
     const positionRatio = (editForm.value.positionRatio || '').trim()
-    const hasNewData = entryPrice || positionRatio
+    const hasNewData = entryPrice || entryDate || positionRatio
 
     await apiWatchlist.update(editForm.value.id, {
       reason: editForm.value.reason || undefined,
       entry_price: entryPrice ? Number(entryPrice) : null,
+      entry_date: entryDate || null,
       position_ratio: positionRatio ? Number(positionRatio) / 100 : null,
     })
     showEditDialog.value = false
@@ -1065,7 +1166,7 @@ async function saveEdit() {
       const updated = watchlist.value.find((item) => item.id === editForm.value.id) || null
       selectedStock.value = updated
 
-      // 如果填写了买入成本或仓位信息，自动触发分析
+      // 如果填写了持仓信息，自动触发分析
       if (hasNewData) {
         // 清除缓存
         analysisCache.delete(editForm.value.id)
@@ -1125,6 +1226,25 @@ function formatPositionRatio(value?: number | null): string {
   return `${(value * 100).toFixed(0)}%`
 }
 
+function formatEntryDate(value?: string | null): string {
+  if (!value) return '-'
+  return value.slice(0, 10) || '-'
+}
+
+function formatPlanPrice(value?: number | string | null): string {
+  const numeric = toFiniteNumber(value)
+  return numeric === null ? '-' : numeric.toFixed(2)
+}
+
+function toFiniteNumber(value?: number | string | null): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
 function formatTradeDate(dateStr: string): string {
   return normalizeAnalysisDate(dateStr)
 }
@@ -1179,6 +1299,160 @@ function getHoldActionType(action?: string): string {
     add_on_pullback: 'primary',
   }
   return types[action || ''] || 'info'
+}
+
+function getExitPlanActionLabel(plan?: ExitPlan | null): string {
+  if (!plan) return '-'
+  if (plan.action_label) return plan.action_label
+  const labels: Record<string, string> = {
+    hold: '持有',
+    wash_observe: '洗盘观察',
+    hold_cautious: '谨慎持有',
+    take_profit_partial: '部分止盈',
+    trim: '减仓',
+    exit: '退出',
+  }
+  return labels[plan.action || ''] || plan.action || '-'
+}
+
+function getExitPlanActionType(action?: string): string {
+  const types: Record<string, string> = {
+    hold: 'success',
+    wash_observe: 'warning',
+    hold_cautious: 'warning',
+    take_profit_partial: 'primary',
+    trim: 'warning',
+    exit: 'danger',
+  }
+  return types[action || ''] || 'info'
+}
+
+function getExitPlanPhaseLabel(phase?: string | null): string {
+  const labels: Record<string, string> = {
+    initial: '初始观察',
+    expansion: '趋势扩展',
+    profit_protect: '利润保护',
+    trend_trailing: '移动止盈',
+    risk_control: '风险控制',
+  }
+  return labels[phase || ''] || phase || '-'
+}
+
+function getPreferredTargetBand(plan?: ExitPlan | null): Record<string, number | null> | null {
+  const targetPrices = plan?.target_prices
+  if (!targetPrices) return null
+  return targetPrices['20d'] || targetPrices['10d'] || null
+}
+
+function getBandValue(band: Record<string, number | null> | null | undefined, keys: string[]): number | null {
+  if (!band) return null
+  for (const key of keys) {
+    const value = band[key]
+    if (toFiniteNumber(value) !== null) return value
+  }
+  return null
+}
+
+function getTargetMetricItems(plan?: ExitPlan | null): ExitMetricItem[] {
+  const band = getPreferredTargetBand(plan)
+  return [
+    {
+      key: 'p50',
+      label: 'P50',
+      hint: '中位目标',
+      value: getBandValue(band, ['p50', 'P50']),
+      tooltip: 'P50 是历史相似信号的 MFE 中位目标，约半数样本曾达到或超过这个最大浮盈水平。',
+    },
+    {
+      key: 'p75',
+      label: 'P75',
+      hint: '偏强目标',
+      value: getBandValue(band, ['p75', 'P75']),
+      tooltip: 'P75 是偏强行情目标，只有约四分之一历史样本能达到或超过，常用于分批止盈观察。',
+    },
+    {
+      key: 'p90',
+      label: 'P90',
+      hint: '强势目标',
+      value: getBandValue(band, ['p90', 'P90']),
+      tooltip: 'P90 是高分位强势目标，代表少数主升浪样本的延展空间，不应当作为必须卖到的价格。',
+    },
+  ]
+}
+
+function getRiskLineValue(plan: ExitPlan | null | undefined, keys: string[]): number | null {
+  const lines = plan?.risk_lines
+  if (!lines) return null
+  for (const key of keys) {
+    const value = lines[key]
+    if (toFiniteNumber(value) !== null) return value
+  }
+  return null
+}
+
+function getRiskMetricItems(plan?: ExitPlan | null): ExitMetricItem[] {
+  return [
+    {
+      key: 'structure',
+      label: '结构',
+      hint: '趋势防守',
+      value: getRiskLineValue(plan, ['structure_line', 'structure', 'support']),
+      tooltip: '结构线由近期低点、信号低点、EMA20 等综合生成，用来判断趋势结构是否被有效破坏。',
+    },
+    {
+      key: 'trailing',
+      label: '移动',
+      hint: '利润保护',
+      value: getRiskLineValue(plan, ['trailing_stop', 'moving_take_profit', 'take_profit_line']),
+      tooltip: '移动止盈线基于入场后的最高价和允许回撤幅度滚动上移，用来防止主升浪利润被大幅回吐。',
+    },
+    {
+      key: 'hard_stop',
+      label: '止损',
+      hint: '硬防线',
+      value: getRiskLineValue(plan, ['hard_stop', 'stop_loss', 'risk_stop']),
+      tooltip: '硬止损线是入场价下方的最大亏损防线；若收盘或策略规则确认跌破，应优先控制风险。',
+    },
+  ]
+}
+
+function getExitPlanDynamicNote(): string {
+  return '目标分位来自回测画像或默认配置；目标价按成本价换算。结构/移动/止损会随最新K线、买入日和入场后最高价滚动更新。'
+}
+
+function formatExitRule(rule: string): string {
+  const labels: Record<string, string> = {
+    no_entry_price: '未设置入场价，仅按结构和当前价谨慎参考。',
+    intraday_reclaim_structure: '盘中刺破结构线后收回，继续观察能否站稳。',
+    hard_stop_broken: '跌破硬止损线，风险控制优先。',
+    verdict_fail: '量价复核转弱，降低持仓风险。',
+    distribution_risk: '出现派发风险，先减仓锁定主动权。',
+    trailing_stop_broken: '跌破移动止盈线，保护已有利润。',
+    structure_line_broken: '跌破结构线，趋势结构需要重新确认。',
+    target_p50_reached: '已达到 P50 中位目标，继续观察 P75。',
+    target_p75_reached: '已达到 P75 偏强目标，适合部分止盈并保护剩余仓位。',
+    target_p90_reached: '已达到 P90 强势目标，优先保护利润。',
+    below_entry: '仍在入场价下方，控制仓位并盯结构线。',
+    trend_intact: '价格仍在结构线上方，趋势暂未破坏。',
+    insufficient_history: '行情数据不足，暂按谨慎持有处理。',
+  }
+  return labels[rule] || rule
+}
+
+function getTargetProgressLabel(progress?: string | null): string {
+  if (!progress) return '-'
+  const labels: Record<string, string> = {
+    unknown: '进度未知',
+    below_p50: '未达P50',
+    p50: '达到P50',
+    p75: '达到P75',
+    p90: '达到P90',
+  }
+  return labels[progress] || progress
+}
+
+function getExitPlanReason(plan?: ExitPlan | null): string {
+  return plan?.reason?.trim() || '-'
 }
 
 function getRiskLevelLabel(level?: string): string {
@@ -1417,7 +1691,9 @@ async function refreshAnalysisInBackground(id: number) {
   }
 
   .list-card {
-    flex: 0 0 320px;
+    flex: 0 0 560px;
+    max-width: 38vw;
+    min-width: 520px;
     display: flex;
     flex-direction: column;
 
@@ -1427,8 +1703,98 @@ async function refreshAnalysisInBackground(id: number) {
       overflow: hidden;
     }
 
-    .watchlist-table {
+    .watchlist-desktop-list {
+      display: flex;
       height: 100%;
+      flex-direction: column;
+      padding: 12px;
+      overflow: auto;
+    }
+
+    .watchlist-desktop-table {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .watchlist-desktop-header,
+    .watchlist-desktop-item {
+      display: grid;
+      grid-template-columns: 78px minmax(64px, 1fr) 72px 96px 48px 98px;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .watchlist-desktop-header {
+      padding: 0 10px 6px;
+      color: var(--color-text-light);
+      font-size: 12px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--el-border-color-lighter);
+    }
+
+    .watchlist-desktop-item {
+      min-height: 44px;
+      padding: 8px 10px;
+      border: 1px solid var(--el-border-color-light);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+
+      &:hover {
+        border-color: var(--el-color-primary-light-5);
+        background: #fbfdff;
+      }
+
+      &.active {
+        border-color: var(--el-color-primary);
+        box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.12);
+      }
+    }
+
+    .watchlist-desktop-item__identity {
+      display: flex;
+      align-items: baseline;
+      min-width: 0;
+    }
+
+    .watchlist-desktop-item__code {
+      flex-shrink: 0;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--color-text-primary);
+    }
+
+    .watchlist-desktop-item__name {
+      min-width: 0;
+      color: var(--color-text-secondary);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .watchlist-desktop-item__value {
+      min-width: 0;
+      color: var(--color-text-secondary);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .watchlist-desktop-item__actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+
+      :deep(.el-button + .el-button) {
+        margin-left: 0;
+      }
     }
 
     .watchlist-mobile-list {
@@ -1438,6 +1804,48 @@ async function refreshAnalysisInBackground(id: number) {
       padding: 12px;
       overflow: auto;
     }
+  }
+
+  .exit-metric-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .exit-metric {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+    padding: 8px 10px;
+    border: 1px solid #e3eaf3;
+    border-radius: 8px;
+    background: #f8fafc;
+  }
+
+  .exit-metric__label {
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .exit-metric__value {
+    color: var(--color-text-primary);
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.25;
+  }
+
+  .exit-metric__hint {
+    color: var(--color-text-light);
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
+  .exit-metric-tooltip {
+    max-width: 280px;
+    line-height: 1.6;
+    white-space: normal;
   }
 
   .detail-card {
@@ -1501,6 +1909,10 @@ async function refreshAnalysisInBackground(id: number) {
     }
   }
 
+  :deep(.watchlist-date-picker) {
+    width: 100%;
+  }
+
   .card-header {
     display: flex;
     justify-content: space-between;
@@ -1531,32 +1943,6 @@ async function refreshAnalysisInBackground(id: number) {
         opacity: 1;
         pointer-events: auto;
       }
-    }
-  }
-
-  .watchlist-table {
-    .row-actions {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      white-space: nowrap;
-
-      .el-divider--vertical {
-        margin: 0 4px;
-      }
-    }
-
-    :deep(.el-table__row) {
-      cursor: pointer;
-
-      &.current-row {
-        background-color: #e6f7ff;
-      }
-    }
-
-    :deep(.el-table__cell) {
-      padding: 8px 0;
     }
   }
 
@@ -1595,6 +1981,7 @@ async function refreshAnalysisInBackground(id: number) {
       display: flex;
       justify-content: space-between;
       gap: 12px;
+      flex-wrap: wrap;
     }
 
     &__header,
@@ -1621,11 +2008,11 @@ async function refreshAnalysisInBackground(id: number) {
       word-break: break-all;
     }
 
-    &__meta-item,
-    &__risk {
+    &__meta-item {
       display: flex;
       flex-direction: column;
       gap: 4px;
+      min-width: 72px;
     }
 
     .label {
@@ -1644,6 +2031,10 @@ async function refreshAnalysisInBackground(id: number) {
       align-items: center;
       gap: 4px;
       flex-shrink: 0;
+
+      :deep(.el-button + .el-button) {
+        margin-left: 0;
+      }
     }
   }
 
@@ -1779,6 +2170,116 @@ async function refreshAnalysisInBackground(id: number) {
       line-height: 1.6;
       color: var(--color-text-primary);
     }
+
+    .holding-plan-section {
+      margin-bottom: 16px;
+      padding: 14px 0 2px;
+      border-top: 1px solid var(--el-border-color-lighter);
+
+      h4 {
+        margin-bottom: 12px;
+      }
+    }
+
+    .holding-plan-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .holding-plan-summary__main {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .holding-plan-phase,
+    .holding-plan-progress,
+    .holding-plan-reason {
+      color: var(--color-text-secondary);
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .holding-plan-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+
+      &.holding-plan-grid--summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-bottom: 12px;
+      }
+    }
+
+    .holding-plan-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .holding-plan-label {
+      color: var(--color-text-light);
+      font-size: 12px;
+    }
+
+    .holding-plan-value {
+      color: var(--color-text-primary);
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .holding-plan-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .holding-plan-metric-block {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--el-border-color-lighter);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .holding-plan-metric-heading {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+
+      span {
+        color: var(--color-text-primary);
+        font-weight: 700;
+      }
+
+      small {
+        color: var(--color-text-secondary);
+        line-height: 1.45;
+      }
+    }
+
+    .exit-metric--large {
+      padding: 10px;
+
+      .exit-metric__value {
+        font-size: 16px;
+      }
+    }
+
+    .holding-plan-rules {
+      margin: 12px 0 0;
+      padding-left: 18px;
+      color: var(--color-text-secondary);
+      line-height: 1.7;
+    }
   }
 
   .history-section {
@@ -1912,6 +2413,16 @@ async function refreshAnalysisInBackground(id: number) {
       .decision-section {
         grid-template-columns: 1fr;
       }
+
+      .holding-plan-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .holding-plan-grid.holding-plan-grid--summary,
+      .holding-plan-metrics,
+      .exit-metric-row {
+        grid-template-columns: 1fr;
+      }
     }
 
     :deep(.el-dialog.is-fullscreen) {
@@ -1933,6 +2444,8 @@ async function refreshAnalysisInBackground(id: number) {
     .list-card {
       flex: none;
       width: 100%;
+      max-width: none;
+      min-width: 0;
     }
   }
 }

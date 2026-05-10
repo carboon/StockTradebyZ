@@ -21,6 +21,7 @@ from app.models import Watchlist, Stock, StockAnalysis
 from app.services.analysis_cache import analysis_cache
 from app.services.tushare_service import TushareService
 from app.services.analysis_service import analysis_service
+from app.services.exit_plan_service import ExitPlanService
 # TaskService 不再在此模块使用（阶段2改造：不再创建后台分析任务）
 from app.services.watchlist_analysis_service import WatchlistAnalysisService
 from app.schemas import (
@@ -34,6 +35,85 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+SUPPORTED_A_SHARE_PREFIXES = (
+    "000",
+    "001",
+    "002",
+    "003",
+    "300",
+    "301",
+    "600",
+    "601",
+    "603",
+    "605",
+    "688",
+    "689",
+    "430",
+    "830",
+    "831",
+    "832",
+    "833",
+    "834",
+    "835",
+    "836",
+    "837",
+    "838",
+    "839",
+    "870",
+    "871",
+    "872",
+    "873",
+    "920",
+)
+
+
+def _normalize_watchlist_code(raw_code: str) -> str:
+    text = str(raw_code or "").strip().upper()
+    if text.endswith((".SZ", ".SH", ".BJ")):
+        text = text.split(".", 1)[0]
+    if not text.isdigit() or len(text) > 6:
+        raise HTTPException(status_code=400, detail="股票代码格式错误，请输入 1-6 位数字代码")
+    code = text.zfill(6)
+    if not code.startswith(SUPPORTED_A_SHARE_PREFIXES):
+        raise HTTPException(status_code=400, detail=f"股票代码不在支持的A股范围内: {code}")
+    return code
+
+
+def _ensure_stock_exists(db: Session, code: str) -> Stock:
+    stock = db.query(Stock).filter(Stock.code == code).first()
+    if stock is not None:
+        return stock
+    try:
+        stock = TushareService().sync_stock_to_db(db, code)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"股票代码不存在或无法同步: {code}") from exc
+    if stock is None:
+        raise HTTPException(status_code=400, detail=f"股票代码不存在或无法同步: {code}")
+    return stock
+
+
+def _resolve_watchlist_entry_date(w: Watchlist) -> date_class | None:
+    entry_date = getattr(w, "entry_date", None)
+    if entry_date:
+        if hasattr(entry_date, "date"):
+            return entry_date.date()
+        if isinstance(entry_date, date_class):
+            return entry_date
+        try:
+            return date_class.fromisoformat(str(entry_date)[:10])
+        except ValueError:
+            return None
+
+    added_at = getattr(w, "added_at", None)
+    if added_at:
+        if hasattr(added_at, "date"):
+            return added_at.date()
+        try:
+            return date_class.fromisoformat(str(added_at)[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _resolve_analysis_trade_date(result: dict, df) -> date_class:
@@ -219,6 +299,21 @@ def _calc_support_resistance(df) -> tuple[float | None, float | None]:
     return support, resistance
 
 
+def _unpack_history_checks(result) -> tuple[list[dict], int]:
+    if isinstance(result, tuple):
+        records = result[0] if len(result) > 0 else []
+        total = result[1] if len(result) > 1 else None
+    else:
+        records = result
+        total = None
+
+    if not isinstance(records, list):
+        records = []
+
+    normalized = [item for item in records if isinstance(item, dict)]
+    return normalized, int(total if total is not None else len(normalized))
+
+
 def _build_watchlist_history_item(
     *,
     watchlist_id: int,
@@ -227,6 +322,7 @@ def _build_watchlist_history_item(
     position_ratio: float | None,
     support_level: float | None,
     resistance_level: float | None,
+    exit_plan: dict | None,
     synthetic_id: int,
 ) -> WatchlistAnalysisItem:
     score = history_item.get("score")
@@ -276,6 +372,7 @@ def _build_watchlist_history_item(
         ),
         support_level=support_level,
         resistance_level=resistance_level,
+        exit_plan=exit_plan,
         recommendation=_build_recommendation(
             verdict,
             signal_type,
@@ -345,6 +442,7 @@ async def get_watchlist(
             name=item["name"],
             add_reason=item["user_config"]["add_reason"],
             entry_price=item["user_config"]["entry_price"],
+            entry_date=item["user_config"].get("entry_date"),
             position_ratio=item["user_config"]["position_ratio"],
             priority=item["user_config"]["priority"],
             is_active=True,
@@ -367,7 +465,8 @@ async def get_watchlist(
 @router.post("/", response_model=WatchlistItem)
 async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistItem:
     """添加到当前用户的观察列表"""
-    code = request.code.zfill(6)
+    code = _normalize_watchlist_code(request.code)
+    stock = _ensure_stock_exists(db, code)
 
     # 检查当前用户的列表中是否已存在
     existing = db.query(Watchlist).filter(Watchlist.user_id == user.id, Watchlist.code == code).first()
@@ -376,6 +475,7 @@ async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(g
         existing.is_active = True
         existing.add_reason = request.reason
         existing.entry_price = request.entry_price
+        existing.entry_date = request.entry_date
         existing.position_ratio = request.position_ratio
         existing.priority = request.priority
         db.commit()
@@ -387,6 +487,7 @@ async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(g
             code=code,
             add_reason=request.reason,
             entry_price=request.entry_price,
+            entry_date=request.entry_date,
             position_ratio=request.position_ratio,
             priority=request.priority,
         )
@@ -396,19 +497,13 @@ async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(g
 
     invalidate_watchlist_cache(user.id)
 
-    stock = db.query(Stock).filter(Stock.code == w.code).first()
-    if stock is None:
-        try:
-            stock = TushareService().sync_stock_to_db(db, w.code)
-        except Exception:
-            stock = None
-
     return WatchlistItem(
         id=w.id,
         code=w.code,
         name=stock.name if stock else None,
         add_reason=w.add_reason,
         entry_price=w.entry_price,
+        entry_date=w.entry_date,
         position_ratio=w.position_ratio,
         priority=w.priority,
         is_active=w.is_active,
@@ -434,6 +529,8 @@ async def update_watchlist_item(
         w.add_reason = request.reason
     if "entry_price" in fields_set:
         w.entry_price = request.entry_price
+    if "entry_date" in fields_set:
+        w.entry_date = request.entry_date
     if "position_ratio" in fields_set:
         w.position_ratio = request.position_ratio
     if "priority" in fields_set:
@@ -453,6 +550,7 @@ async def update_watchlist_item(
         name=stock.name if stock else None,
         add_reason=w.add_reason,
         entry_price=w.entry_price,
+        entry_date=w.entry_date,
         position_ratio=w.position_ratio,
         priority=w.priority,
         is_active=w.is_active,
@@ -476,7 +574,12 @@ async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), use
 
 
 @router.get("/{item_id}/analysis")
-async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+async def get_watchlist_analysis(
+    item_id: int,
+    days: int = 5,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
     """获取当前用户的观察股票分析历史。
 
     历史展示统一复用个股历史检查文件，不再读取废弃的 watchlist_analysis 表。
@@ -485,26 +588,36 @@ async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), us
     if not w:
         raise HTTPException(status_code=404, detail="观察项不存在")
 
-    history = analysis_service.get_stock_history_checks(w.code, 30)
+    days = max(1, min(int(days), 30))
+    history, history_total = _unpack_history_checks(analysis_service.get_stock_history_checks(w.code, days))
     if not history:
         return {
             "code": w.code,
+            "entry_date": w.entry_date,
             "analyses": [],
-            "total": 0,
+            "total": history_total,
         }
 
     df = analysis_service.load_stock_data(w.code)
+    if df is not None and not df.empty:
+        df = df.copy()
+        if "date" not in df.columns and "trade_date" in df.columns:
+            df = df.rename(columns={"trade_date": "date"})
     price_windows: dict[str, tuple[float | None, float | None]] = {}
     analyses: list[WatchlistAnalysisItem] = []
+    exit_plan_service = ExitPlanService()
+    entry_date = _resolve_watchlist_entry_date(w)
 
     if df is not None and not df.empty and "date" in df.columns:
-        df = df.copy()
         df["trade_date_key"] = df["date"].astype(str).str[:10]
+    else:
+        df = None
 
     for index, item in enumerate(history):
         check_date = str(item.get("check_date") or "")[:10]
         support_level = None
         resistance_level = None
+        history_frame = pd.DataFrame()
 
         if check_date and check_date not in price_windows and df is not None and not df.empty:
             df_until_date = df[df["trade_date_key"] <= check_date]
@@ -512,6 +625,19 @@ async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), us
 
         if check_date in price_windows:
             support_level, resistance_level = price_windows[check_date]
+
+        if df is not None and not df.empty:
+            history_frame = df[df["trade_date_key"] <= check_date].copy() if check_date else df.copy()
+
+        exit_plan = exit_plan_service.build_exit_plan(
+            code=w.code,
+            history_df=history_frame,
+            entry_price=w.entry_price,
+            current_price=item.get("close_price"),
+            entry_date=entry_date,
+            verdict=item.get("verdict"),
+            signal_type=item.get("signal_type"),
+        )
 
         analyses.append(
             _build_watchlist_history_item(
@@ -521,14 +647,16 @@ async def get_watchlist_analysis(item_id: int, db: Session = Depends(get_db), us
                 position_ratio=w.position_ratio,
                 support_level=support_level,
                 resistance_level=resistance_level,
+                exit_plan=exit_plan,
                 synthetic_id=item_id * 100000 + index + 1,
             )
         )
 
     return {
         "code": w.code,
+        "entry_date": w.entry_date,
         "analyses": analyses,
-        "total": len(analyses),
+        "total": history_total,
     }
 
 

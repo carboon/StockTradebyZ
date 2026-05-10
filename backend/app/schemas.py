@@ -123,6 +123,7 @@ class CurrentHotCandidateItem(BaseModel):
     turnover: Optional[float] = None
     turnover_rate: Optional[float] = None
     volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
     b1_passed: Optional[bool] = None
     kdj_j: Optional[float] = None
     verdict: Optional[str] = None
@@ -153,6 +154,7 @@ class AnalysisItem(BaseModel):
     comment: Optional[str] = None
     turnover_rate: Optional[float] = None
     volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
     tomorrow_star_pass: Optional[bool] = None
     prefilter_passed: Optional[bool] = None
     prefilter_summary: Optional[str] = None
@@ -190,6 +192,7 @@ class CurrentHotAnalysisItem(BaseModel):
     comment: Optional[str] = None
     turnover_rate: Optional[float] = None
     volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
 
 
 class CurrentHotAnalysisResultResponse(BaseModel):
@@ -224,6 +227,7 @@ class IntradayAnalysisItem(BaseModel):
     zx_long_pos: Optional[bool] = None
     weekly_ma_aligned: Optional[bool] = None
     volume_healthy: Optional[bool] = None
+    exit_plan: Optional[Dict[str, Any]] = None
 
 
 class IntradayAnalysisResponse(BaseModel):
@@ -278,6 +282,7 @@ class CurrentHotIntradayAnalysisItem(BaseModel):
     zx_long_pos: Optional[bool] = None
     weekly_ma_aligned: Optional[bool] = None
     volume_healthy: Optional[bool] = None
+    exit_plan: Optional[Dict[str, Any]] = None
 
 
 class CurrentHotIntradayAnalysisResponse(BaseModel):
@@ -476,6 +481,7 @@ class WatchlistDerivedData(BaseModel):
     recommendation: Optional[str] = None
     support_level: Optional[float] = None
     resistance_level: Optional[float] = None
+    exit_plan: Optional[Dict[str, Any]] = None
 
 
 class WatchlistItem(BaseModel):
@@ -485,6 +491,7 @@ class WatchlistItem(BaseModel):
     name: Optional[str] = None
     add_reason: Optional[str] = None
     entry_price: Optional[float] = None
+    entry_date: Optional[date_class] = None
     position_ratio: Optional[float] = None
     priority: int
     is_active: bool
@@ -502,6 +509,7 @@ class WatchlistAddRequest(BaseModel):
     code: str
     reason: Optional[str] = None
     entry_price: Optional[float] = None
+    entry_date: Optional[date_class] = None
     position_ratio: Optional[float] = None
     priority: int = 0
 
@@ -510,6 +518,7 @@ class WatchlistUpdateRequest(BaseModel):
     """更新观察项"""
     reason: Optional[str] = None
     entry_price: Optional[float] = None
+    entry_date: Optional[date_class] = None
     position_ratio: Optional[float] = None
     priority: Optional[int] = None
     is_active: Optional[bool] = None
@@ -532,6 +541,7 @@ class WatchlistAnalysisItem(BaseModel):
     risk_recommendation: Optional[str] = None
     support_level: Optional[float] = None
     resistance_level: Optional[float] = None
+    exit_plan: Optional[Dict[str, Any]] = None
     recommendation: Optional[str] = None
 
 

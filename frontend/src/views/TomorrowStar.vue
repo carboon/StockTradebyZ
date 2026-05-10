@@ -191,6 +191,9 @@
                     <el-tag v-if="isCurrentHotTab" :type="getBooleanTagType(getAnalysisB1Passed(row))" size="small">
                       B1 {{ getBooleanTagLabel(getAnalysisB1Passed(row)) }}
                     </el-tag>
+                    <el-tag v-if="isCurrentHotTab" type="info" size="small">
+                      活跃 {{ formatActivePoolRank(row.active_pool_rank) }}
+                    </el-tag>
                     <el-tooltip
                       v-if="showAnalysisPrefilter && getAnalysisPrefilterPassed(row) === false && getAnalysisPrefilterSummary(getAnalysisPrefilterLike(row))"
                       :content="getAnalysisPrefilterSummary(getAnalysisPrefilterLike(row))"
@@ -424,6 +427,11 @@
                       </el-tag>
                     </template>
                   </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="active_pool_rank" label="活跃" width="62" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatActivePoolRank(row.active_pool_rank) }}
+                    </template>
+                  </el-table-column>
                   <el-table-column prop="open_price" label="开盘" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
@@ -517,7 +525,7 @@
         </template>
       </el-tab-pane>
 
-      <el-tab-pane label="中盘分析" name="midday-analysis">
+      <el-tab-pane v-if="canUseMiddayAnalysis" label="中盘分析" name="midday-analysis">
         <div v-if="isMobile" class="mobile-layout">
           <el-card class="mobile-section-card midday-card" v-loading="loadingMidday">
             <template #header>
@@ -571,7 +579,7 @@
 
             <div class="table-header-tip mobile-tip">
               <span class="tip-item">· 仅展示当前交易日盘中候选与评分结果</span>
-              <span class="tip-item">· 普通用户仅在 12:00-15:00 且后端已有数据时可见</span>
+              <span class="tip-item">· 管理员调试入口，生成后用于制定下午交易预案</span>
             </div>
 
             <div class="midday-meta midday-meta--mobile">
@@ -612,6 +620,16 @@
                     <el-tag :type="getTrendReversalTagType(row)" size="small">
                       反转 {{ getTrendReversalLabel(row) }}
                     </el-tag>
+                    <el-tag
+                      v-if="row.exit_plan?.action || row.exit_plan?.action_label"
+                      :type="getExitPlanActionType(row.exit_plan?.action)"
+                      size="small"
+                    >
+                      {{ getExitPlanActionLabel(row.exit_plan) }}
+                    </el-tag>
+                  </div>
+                  <div v-if="getMiddayPlanBrief(row) !== '-'" class="midday-mobile-plan">
+                    {{ getMiddayPlanBrief(row) }}
                   </div>
                   <span class="mobile-analysis-item__comment">{{ getMiddayRowComment(row) }}</span>
                 </div>
@@ -688,7 +706,7 @@
 
             <div class="table-header-tip">
               <span class="tip-item">· 仅展示当前交易日盘中候选与评分结果</span>
-              <span class="tip-item">· 普通用户仅在 12:00-15:00 且后端已有数据时可见</span>
+              <span class="tip-item">· 管理员调试入口，生成后用于制定下午交易预案</span>
             </div>
 
             <div class="midday-meta">
@@ -755,6 +773,30 @@
                     </span>
                   </template>
                 </el-table-column>
+                <el-table-column label="上午状态" min-width="130" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ row.exit_plan?.morning_state || '-' }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="下午策略" min-width="130" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <div class="midday-plan-action">
+                      <el-tag
+                        v-if="row.exit_plan?.action || row.exit_plan?.action_label"
+                        :type="getExitPlanActionType(row.exit_plan?.action)"
+                        size="small"
+                      >
+                        {{ getExitPlanActionLabel(row.exit_plan) }}
+                      </el-tag>
+                      <span>{{ row.exit_plan?.afternoon_action || '-' }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="关键价位/计划说明" min-width="240" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ getMiddayPlanDetail(row) }}
+                  </template>
+                </el-table-column>
                 <el-table-column label="说明" min-width="220" show-overflow-tooltip>
                   <template #default="{ row }">
                     {{ getMiddayRowComment(row) }}
@@ -788,6 +830,7 @@ import type {
   CurrentHotAnalysisResult,
   CurrentHotCandidate,
   IncrementalUpdateStatus,
+  ExitPlan,
   IntradayAnalysisItem,
   IntradayAnalysisResponse,
   IntradayAnalysisStatusResponse,
@@ -1010,6 +1053,7 @@ const showCachedHint = computed(() => hydratedFromCache.value && !incrementalUpd
 const showInitializationAlert = computed(() => authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized)
 const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && latestCandidates.value.length === 0)
 const currentHotShowInitializationEmpty = computed(() => showInitializationAlert.value && currentHotHistoryData.value.length === 0 && currentHotLatestCandidates.value.length === 0)
+const canUseMiddayAnalysis = computed(() => authStore.isAdmin)
 const middayRows = computed<IntradayAnalysisItem[]>(() => middayData.value.items || [])
 const middayCanViewData = computed(() => Boolean(middayData.value.has_data && middayRows.value.length > 0))
 const middayShowEmpty = computed(() => !loadingMidday.value && !middayCanViewData.value)
@@ -1058,6 +1102,7 @@ function mergeTomorrowStarCandidateAnalysis(candidate: Candidate): Candidate {
     b1_passed: candidate.b1_passed ?? (analysis.verdict === 'PASS'),
     turnover_rate: candidate.turnover_rate ?? analysis.turnover_rate,
     volume_ratio: candidate.volume_ratio ?? analysis.volume_ratio,
+    active_pool_rank: candidate.active_pool_rank ?? analysis.active_pool_rank,
     verdict: candidate.verdict ?? analysis.verdict,
     total_score: candidate.total_score ?? analysis.total_score,
     signal_type: candidate.signal_type ?? analysis.signal_type,
@@ -1077,6 +1122,7 @@ function mergeCurrentHotCandidateAnalysis(candidate: CurrentHotCandidate): Curre
     b1_passed: candidate.b1_passed ?? analysis.b1_passed,
     turnover_rate: candidate.turnover_rate ?? analysis.turnover_rate,
     volume_ratio: candidate.volume_ratio ?? analysis.volume_ratio,
+    active_pool_rank: candidate.active_pool_rank ?? analysis.active_pool_rank,
     verdict: candidate.verdict ?? analysis.verdict,
     total_score: candidate.total_score ?? analysis.total_score,
     signal_type: candidate.signal_type ?? analysis.signal_type,
@@ -2347,6 +2393,7 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
 }
 
 async function loadMiddayData(forceRefresh: boolean = false) {
+  if (!canUseMiddayAnalysis.value) return
   if (loadingMidday.value && !forceRefresh) return
 
   const source = middaySource.value
@@ -2447,9 +2494,8 @@ function getAnalysisResultComment(result: AnalysisDisplayRow): string {
 
 function getCandidateInlineNote(row: Candidate | CurrentHotCandidate): string {
   if (isCurrentHotTab.value) {
-    const board = getCurrentHotBoardLabel(row as CurrentHotCandidate)
     const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
-    return comment ? `${board}｜${comment}` : board
+    return comment || '点击查看单股诊断'
   }
   const candidate = row as Candidate
   const prefilterSummary = typeof candidate.prefilter_summary === 'string' ? candidate.prefilter_summary.trim() : ''
@@ -2647,7 +2693,76 @@ function getTrendReversalLabel(row: IntradayAnalysisItem): string {
   return isMiddayTrendReversal(row) ? '是' : '否'
 }
 
+function getExitPlanActionLabel(plan?: ExitPlan | null): string {
+  if (!plan) return '-'
+  if (plan.action_label) return plan.action_label
+  const labels: Record<string, string> = {
+    hold: '持有',
+    wash_observe: '洗盘观察',
+    hold_cautious: '谨慎持有',
+    take_profit_partial: '部分止盈',
+    trim: '减仓',
+    exit: '退出',
+  }
+  return labels[plan.action || ''] || plan.action || '-'
+}
+
+function getExitPlanActionType(action?: string | null): string {
+  const types: Record<string, string> = {
+    hold: 'success',
+    wash_observe: 'warning',
+    hold_cautious: 'warning',
+    take_profit_partial: 'primary',
+    trim: 'warning',
+    exit: 'danger',
+  }
+  return types[action || ''] || 'info'
+}
+
+function formatPlanPrice(value?: number | string | null): string {
+  const numeric = toFiniteNumber(value)
+  return numeric === null ? '-' : numeric.toFixed(2)
+}
+
+function formatKeyLevels(levels?: Record<string, number | null> | null): string {
+  if (!levels) return '-'
+  const labelMap: Record<string, string> = {
+    support: '支撑',
+    pressure: '压力',
+    resistance: '压力',
+    structure_line: '结构线',
+    trailing_stop: '移动止盈',
+    stop_loss: '止损',
+  }
+  const entries = Object.entries(levels)
+    .filter(([, value]) => toFiniteNumber(value) !== null)
+    .map(([key, value]) => `${labelMap[key] || key} ${formatPlanPrice(value)}`)
+  return entries.length > 0 ? entries.join(' / ') : '-'
+}
+
+function getMiddayPlanDetail(row: IntradayAnalysisItem): string {
+  const plan = row.exit_plan
+  if (!plan) return '-'
+  const parts = [
+    formatKeyLevels(plan.key_levels),
+    plan.reason?.trim() || '',
+  ].filter((item) => item && item !== '-')
+  return parts.length > 0 ? parts.join(' · ') : '-'
+}
+
+function getMiddayPlanBrief(row: IntradayAnalysisItem): string {
+  const plan = row.exit_plan
+  if (!plan) return '-'
+  const parts = [
+    plan.morning_state || '',
+    plan.afternoon_action || getExitPlanActionLabel(plan),
+    formatKeyLevels(plan.key_levels) !== '-' ? formatKeyLevels(plan.key_levels) : '',
+  ].filter((item) => item && item !== '-')
+  return parts.length > 0 ? parts.join(' · ') : '-'
+}
+
 function getMiddayRowComment(row: IntradayAnalysisItem): string {
+  if (row.exit_plan?.reason?.trim()) return row.exit_plan.reason.trim()
   if (isMiddayTrendReversal(row)) return 'B1 通过且信号转为趋势启动，存在趋势反转迹象'
   if (row.signal_type === 'trend_start') return '趋势启动信号，建议结合单股诊断复核'
   if (row.signal_type === 'distribution_risk') return '盘中风险信号，建议关注量价变化'
@@ -2874,13 +2989,15 @@ onMounted(() => {
 
   // 检查增量更新状态
   void checkIncrementalStatus()
-  void loadMiddayData()
+  if (canUseMiddayAnalysis.value) {
+    void loadMiddayData()
+  }
 })
 
 onActivated(() => {
   void refreshAfterStatusReady()
   void checkIncrementalStatus()
-  if (activeTab.value === 'midday-analysis') {
+  if (activeTab.value === 'midday-analysis' && canUseMiddayAnalysis.value) {
     void loadMiddayData(true)
   } else if (activeTab.value === 'current-hot') {
     if (currentHotLoaded.value) {
@@ -2892,6 +3009,10 @@ onActivated(() => {
 })
 
 watch(activeTab, (value) => {
+  if (value === 'midday-analysis' && !canUseMiddayAnalysis.value) {
+    activeTab.value = 'tomorrow-star'
+    return
+  }
   if (value === 'midday-analysis' && !middayLoaded.value) {
     void loadMiddayData()
     return
@@ -2902,8 +3023,14 @@ watch(activeTab, (value) => {
 })
 
 watch(middaySource, () => {
-  if (activeTab.value === 'midday-analysis') {
+  if (activeTab.value === 'midday-analysis' && canUseMiddayAnalysis.value) {
     void loadMiddayData()
+  }
+})
+
+watch(canUseMiddayAnalysis, (allowed) => {
+  if (!allowed && activeTab.value === 'midday-analysis') {
+    activeTab.value = 'tomorrow-star'
   }
 })
 
@@ -3207,6 +3334,12 @@ $space-lg: 32px;
     gap: 6px;
   }
 
+  .midday-mobile-plan {
+    line-height: 1.5;
+    color: #374151;
+    word-break: break-word;
+  }
+
   .mobile-pagination {
     flex-direction: column;
     align-items: center;
@@ -3480,6 +3613,19 @@ $space-lg: 32px;
 
   .analysis-section {
     flex-shrink: 0;
+  }
+}
+
+.midday-plan-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+
+  span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 

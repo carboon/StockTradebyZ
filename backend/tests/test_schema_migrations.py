@@ -55,3 +55,22 @@ def test_apply_startup_sql_migrations_skips_when_schema_already_satisfied(tmp_pa
     with engine.begin() as conn:
         rows = conn.execute(text("SELECT name, status FROM schema_migrations")).fetchall()
     assert rows == [("add_steps_completed_column.sql", "skipped_existing")]
+
+
+def test_apply_startup_sql_migrations_adds_watchlist_entry_date(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "add_watchlist_entry_date.sql").write_text(
+        "ALTER TABLE watchlist ADD COLUMN entry_date DATE;",
+        encoding="utf-8",
+    )
+
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE watchlist (id INTEGER PRIMARY KEY, code TEXT NOT NULL)"))
+
+    result = apply_startup_sql_migrations(engine, migrations_dir)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("watchlist")}
+    assert "entry_date" in columns
+    assert result["applied"] == ["add_watchlist_entry_date.sql"]

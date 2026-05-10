@@ -18,6 +18,7 @@ from app.models import (
     CurrentHotCandidate,
     CurrentHotRun,
     Stock,
+    StockActivePoolRank,
     StockDaily,
     Task,
 )
@@ -68,6 +69,10 @@ class CurrentHotService:
     @staticmethod
     def _signal_sort_priority(signal_type: Optional[str]) -> int:
         return 0 if signal_type == "trend_start" else 1
+
+    @staticmethod
+    def _sort_active_pool_rank(value: Optional[int]) -> int:
+        return int(value) if value is not None else 999999
 
     @staticmethod
     def _is_generic_sector_name(value: Optional[str]) -> bool:
@@ -883,8 +888,24 @@ class CurrentHotService:
         if target_date is None:
             return {"pick_date": None, "candidates": [], "total": 0}
 
+        active_rank_sq = (
+            self.db.query(
+                StockActivePoolRank.trade_date.label("trade_date"),
+                StockActivePoolRank.code.label("code"),
+                func.min(StockActivePoolRank.active_pool_rank).label("active_pool_rank"),
+            )
+            .filter(StockActivePoolRank.trade_date == target_date)
+            .group_by(StockActivePoolRank.trade_date, StockActivePoolRank.code)
+            .subquery()
+        )
         rows = (
-            self.db.query(CurrentHotCandidate, CurrentHotAnalysisResult, Stock.name, Stock.industry)
+            self.db.query(
+                CurrentHotCandidate,
+                CurrentHotAnalysisResult,
+                Stock.name,
+                Stock.industry,
+                active_rank_sq.c.active_pool_rank,
+            )
             .outerjoin(
                 CurrentHotAnalysisResult,
                 (CurrentHotAnalysisResult.pick_date == CurrentHotCandidate.pick_date)
@@ -892,6 +913,11 @@ class CurrentHotService:
                 & (CurrentHotAnalysisResult.reviewer == self.DEFAULT_REVIEWER),
             )
             .outerjoin(Stock, CurrentHotCandidate.code == Stock.code)
+            .outerjoin(
+                active_rank_sq,
+                (active_rank_sq.c.trade_date == CurrentHotCandidate.pick_date)
+                & (active_rank_sq.c.code == CurrentHotCandidate.code),
+            )
             .filter(CurrentHotCandidate.pick_date == target_date)
             .all()
         )
@@ -909,6 +935,7 @@ class CurrentHotService:
                 "turnover": row.turnover,
                 "turnover_rate": row.turnover_rate if row.turnover_rate is not None else (analysis.turnover_rate if analysis else None),
                 "volume_ratio": row.volume_ratio if row.volume_ratio is not None else (analysis.volume_ratio if analysis else None),
+                "active_pool_rank": int(active_pool_rank) if active_pool_rank is not None else None,
                 "b1_passed": row.b1_passed if row.b1_passed is not None else (analysis.b1_passed if analysis else None),
                 "kdj_j": row.kdj_j,
                 "verdict": analysis.verdict if analysis else None,
@@ -917,13 +944,14 @@ class CurrentHotService:
                 "comment": analysis.comment if analysis else None,
                 "consecutive_days": int(row.consecutive_days or 1),
             }
-            for row, analysis, stock_name, stock_industry in rows
+            for row, analysis, stock_name, stock_industry, active_pool_rank in rows
         ]
         items.sort(
             key=lambda item: (
                 self._signal_sort_priority(item.get("signal_type")),
                 0 if item.get("b1_passed") is True else 1,
                 self._sort_score_desc(item.get("total_score")),
+                self._sort_active_pool_rank(item.get("active_pool_rank")),
                 item["code"],
             )
         )
@@ -938,14 +966,35 @@ class CurrentHotService:
         if target_date is None:
             return {"pick_date": None, "results": [], "total": 0, "min_score_threshold": 4.0}
 
+        active_rank_sq = (
+            self.db.query(
+                StockActivePoolRank.trade_date.label("trade_date"),
+                StockActivePoolRank.code.label("code"),
+                func.min(StockActivePoolRank.active_pool_rank).label("active_pool_rank"),
+            )
+            .filter(StockActivePoolRank.trade_date == target_date)
+            .group_by(StockActivePoolRank.trade_date, StockActivePoolRank.code)
+            .subquery()
+        )
         rows = (
-            self.db.query(CurrentHotAnalysisResult, CurrentHotCandidate, Stock.name, Stock.industry)
+            self.db.query(
+                CurrentHotAnalysisResult,
+                CurrentHotCandidate,
+                Stock.name,
+                Stock.industry,
+                active_rank_sq.c.active_pool_rank,
+            )
             .outerjoin(
                 CurrentHotCandidate,
                 (CurrentHotCandidate.pick_date == CurrentHotAnalysisResult.pick_date)
                 & (CurrentHotCandidate.code == CurrentHotAnalysisResult.code),
             )
             .outerjoin(Stock, CurrentHotAnalysisResult.code == Stock.code)
+            .outerjoin(
+                active_rank_sq,
+                (active_rank_sq.c.trade_date == CurrentHotAnalysisResult.pick_date)
+                & (active_rank_sq.c.code == CurrentHotAnalysisResult.code),
+            )
             .filter(CurrentHotAnalysisResult.pick_date == target_date)
             .all()
         )
@@ -963,16 +1012,18 @@ class CurrentHotService:
                 "comment": result.comment,
                 "turnover_rate": result.turnover_rate if result.turnover_rate is not None else (candidate.turnover_rate if candidate else None),
                 "volume_ratio": result.volume_ratio if result.volume_ratio is not None else (candidate.volume_ratio if candidate else None),
+                "active_pool_rank": int(active_pool_rank) if active_pool_rank is not None else None,
                 "sector_names": self._resolve_sector_names(candidate.sector_names_json if candidate else [], industry=stock_industry),
                 "board_group": candidate.board_group if candidate else self.get_board_group(result.code),
             }
-            for result, candidate, stock_name, stock_industry in rows
+            for result, candidate, stock_name, stock_industry, active_pool_rank in rows
         ]
         items.sort(
             key=lambda item: (
-                0 if item.get("b1_passed") is True else 1,
                 self._signal_sort_priority(item.get("signal_type")),
+                0 if item.get("b1_passed") is True else 1,
                 self._sort_score_desc(item.get("total_score")),
+                self._sort_active_pool_rank(item.get("active_pool_rank")),
                 item["code"],
             )
         )

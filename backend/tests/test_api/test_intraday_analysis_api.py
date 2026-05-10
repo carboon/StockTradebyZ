@@ -1,9 +1,9 @@
 from datetime import date, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+from fastapi import HTTPException
 
 from app.models import Candidate, IntradayAnalysisSnapshot, Stock, StockDaily
 from app.services.intraday_analysis_service import ASIA_SHANGHAI
@@ -38,7 +38,20 @@ def _seed_stock_history(test_client_with_db: Any, code: str, trade_date: date, d
     db.commit()
 
 
-def test_intraday_status_blocks_normal_user_outside_window_without_snapshot(test_client_with_db: Any) -> None:
+def test_intraday_status_requires_admin(test_client_with_db: Any) -> None:
+    from app.api import deps
+
+    def deny_admin() -> None:
+        raise HTTPException(status_code=403, detail="Admin required")
+
+    test_client_with_db.app.dependency_overrides[deps.get_admin_user] = deny_admin
+
+    response = test_client_with_db.get("/api/v1/analysis/intraday/status")
+
+    assert response.status_code == 403
+
+
+def test_intraday_status_returns_admin_debug_state_without_snapshot(test_client_with_db: Any) -> None:
     fake_now = datetime(2026, 5, 8, 10, 30, tzinfo=ASIA_SHANGHAI)
 
     with patch("app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai", return_value=fake_now):
@@ -46,7 +59,7 @@ def test_intraday_status_blocks_normal_user_outside_window_without_snapshot(test
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "window_closed"
+    assert data["status"] == "not_generated"
     assert data["window_open"] is False
     assert data["has_data"] is False
 
@@ -83,11 +96,8 @@ def test_intraday_data_returns_snapshot_for_admin_when_exists(test_client_with_d
     )
     db.commit()
 
-    from app.api import deps
-    admin_user = SimpleNamespace(id=999, role="admin", is_active=True)
-    test_client_with_db.app.dependency_overrides[deps.require_user] = lambda: admin_user
-
-    response = test_client_with_db.get("/api/v1/analysis/intraday/data")
+    with patch("app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai", return_value=snapshot_time):
+        response = test_client_with_db.get("/api/v1/analysis/intraday/data")
 
     assert response.status_code == 200
     data = response.json()

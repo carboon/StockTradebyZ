@@ -92,7 +92,7 @@ class DiagnosisHistoryCacheService:
                 if check_date and check_date not in seen_dates:
                     seen_dates.add(check_date)
                     history.append(row_dict)
-            if not rows or page * page_size >= max(total, len(history), 1):
+            if page * page_size >= max(total, len(history), 1):
                 break
             page += 1
             if page > 10:

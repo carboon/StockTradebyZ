@@ -1093,6 +1093,11 @@ class TaskService:
             token,
             progress_callback,
         )
+        active_pool_rank_result = await asyncio.to_thread(
+            self._build_active_pool_rank_sync,
+            trade_date,
+            True,
+        )
 
         task.task_stage = "daily_batch_rebuild_star"
         task.progress = 90
@@ -1149,6 +1154,7 @@ class TaskService:
             "mode": "daily_batch",
             "trade_date": trade_date,
             "source": source,
+            "active_pool_rank": active_pool_rank_result,
             "tomorrow_star_rebuild": consistency_result,
             "current_hot_rebuild": current_hot_result,
             **result,
@@ -1234,6 +1240,12 @@ class TaskService:
             MarketService.fail_update(message)
             raise Exception(message)
 
+        active_pool_rank_result = await asyncio.to_thread(
+            self._build_active_pool_rank_sync,
+            trade_date,
+            True,
+        )
+
         task.task_stage = "daily_batch_rebuild_star"
         task.progress = 90
         task.progress_meta_json = self._build_stage_meta(
@@ -1302,6 +1314,7 @@ class TaskService:
             "trade_date": trade_date,
             "source": params["source"],
             "message": message,
+            "active_pool_rank": active_pool_rank_result,
             "tomorrow_star_rebuild": consistency_result,
             "current_hot_rebuild": current_hot_result,
             **result,
@@ -1332,6 +1345,20 @@ class TaskService:
                 source=source,
                 progress_callback=progress_callback,
             )
+
+    @staticmethod
+    def _build_active_pool_rank_sync(trade_date: str, force: bool = True) -> dict[str, Any]:
+        from app.services.active_pool_rank_service import active_pool_rank_service
+        from app.services.analysis_service import analysis_service
+
+        preselect_cfg = analysis_service._load_preselect_config()
+        global_cfg = preselect_cfg.get("global", {})
+        return active_pool_rank_service.compute_for_dates(
+            [trade_date],
+            top_m=int(global_cfg.get("top_m", 2000)),
+            n_turnover_days=int(global_cfg.get("n_turnover_days", 43)),
+            force=force,
+        )
 
     @staticmethod
     def _run_current_hot_rebuild_sync(
@@ -1382,6 +1409,7 @@ class TaskService:
         cache.delete_prefix("candidates:")
         cache.delete_prefix("analysis_results:")
         cache.delete_prefix("diagnosis:history:")
+        cache.delete_prefix("active_pool_rank:")
         cache.delete(build_freshness_cache_key())
 
     async def _run_tomorrow_star(self, task: Any, db: Session):

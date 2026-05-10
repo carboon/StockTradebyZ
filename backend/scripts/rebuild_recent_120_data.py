@@ -49,9 +49,11 @@ from app.models import (
     DailyB1Check,
     DailyB1CheckDetail,
     Stock,
+    StockActivePoolRank,
     StockDaily,
     TomorrowStarRun,
 )
+from app.services.active_pool_rank_service import active_pool_rank_service
 from app.services.analysis_service import analysis_service
 from app.services.current_hot_service import CurrentHotService
 from app.services.daily_batch_update_service import DailyBatchUpdateService
@@ -802,6 +804,9 @@ def clean_derived_data(trade_dates: list[str], *, clean_diagnosis: bool) -> dict
         counts["current_hot_runs"] = db.query(CurrentHotRun).filter(
             CurrentHotRun.pick_date.in_(dates)
         ).delete(synchronize_session=False)
+        counts["stock_active_pool_ranks"] = db.query(StockActivePoolRank).filter(
+            StockActivePoolRank.trade_date.in_(dates)
+        ).delete(synchronize_session=False)
         counts["analysis_results"] = db.query(AnalysisResult).filter(
             AnalysisResult.pick_date.in_(dates)
         ).delete(synchronize_session=False)
@@ -880,35 +885,35 @@ def resolve_diagnosis_codes(scope: str, target_dates: list[str], preclean_existi
 
 
 def _prewarm_diagnosis_active_pool(codes: list[str], target_dates: list[str]) -> dict[str, Any]:
-    if not codes or not target_dates:
-        return {"skipped": True, "reason": "empty_codes_or_dates"}
+    if not target_dates:
+        return {"skipped": True, "reason": "empty_dates"}
+    result = build_active_pool_rank_factors(target_dates, force=False)
+    return {
+        **result,
+        "skipped": False,
+        "codes_count": len(codes),
+    }
+
+
+def build_active_pool_rank_factors(target_dates: list[str], *, force: bool) -> dict[str, Any]:
+    if not target_dates:
+        return {"success": True, "skipped": True, "reason": "empty_dates"}
     try:
-        target_ts = [pd.Timestamp(item).normalize() for item in target_dates]
-        start_ts = min(target_ts)
-        end_ts = max(target_ts)
         preselect_cfg = analysis_service._load_preselect_config()
-        print(f"[diagnosis] prewarm active pool cache for {len(codes)} stocks")
-        pool_sets = analysis_service._safe_build_active_pool_sets(
-            start_ts=start_ts,
-            end_ts=end_ts,
-            preselect_cfg=preselect_cfg,
+        global_cfg = preselect_cfg.get("global", {})
+        top_m = int(global_cfg.get("top_m", 2000))
+        n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
+        print(f"[active-pool-rank] build factors for {len(target_dates)} dates")
+        result = active_pool_rank_service.compute_for_dates(
+            target_dates,
+            top_m=top_m,
+            n_turnover_days=n_turnover_days,
+            force=force,
         )
-        rankings = analysis_service._safe_build_active_pool_rankings(
-            start_ts=start_ts,
-            end_ts=end_ts,
-            preselect_cfg=preselect_cfg,
-            target_codes=set(codes),
-        )
-        return {
-            "skipped": False,
-            "date_range": [start_ts.date().isoformat(), end_ts.date().isoformat()],
-            "codes_count": len(codes),
-            "pool_dates_count": len(pool_sets or {}),
-            "ranking_codes_count": len(rankings or {}),
-        }
+        return {**result, "skipped": False}
     except Exception as exc:
-        print(f"[diagnosis] active pool cache prewarm failed: {exc}")
-        return {"skipped": True, "error": str(exc)}
+        print(f"[active-pool-rank] build failed: {exc}")
+        return {"success": False, "skipped": True, "error": str(exc)}
 
 
 def _clear_runtime_caches() -> dict[str, Any]:
@@ -923,6 +928,7 @@ def _clear_runtime_caches() -> dict[str, Any]:
             "analysis_results": cache.delete_prefix("analysis_results:"),
             "kline": cache.delete_prefix("kline:"),
             "diagnosis_history": cache.delete_prefix("diagnosis:history:"),
+            "active_pool_rank": cache.delete_prefix("active_pool_rank:"),
             "freshness": cache.delete(build_freshness_cache_key()),
             "analysis_memory": "cleared",
         }
@@ -1098,6 +1104,15 @@ def main() -> int:
             target_dates,
             clean_diagnosis=args.diagnosis_scope != "none",
         )
+
+    print("[rebuild] active-pool-rank")
+    results["active_pool_rank"] = build_active_pool_rank_factors(
+        target_dates,
+        force=not args.skip_clean,
+    )
+    if not results["active_pool_rank"].get("success"):
+        print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
+        return 1
 
     if not args.skip_tomorrow_star:
         print("[rebuild] tomorrow-star")

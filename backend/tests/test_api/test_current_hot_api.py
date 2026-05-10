@@ -10,6 +10,7 @@ from app.models import (
     CurrentHotIntradaySnapshot,
     CurrentHotRun,
     Stock,
+    StockActivePoolRank,
     StockDaily,
 )
 from app.services.current_hot_intraday_service import ASIA_SHANGHAI
@@ -146,6 +147,17 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
             details_json={"comment": "ok"},
         )
     )
+    db.add(
+        StockActivePoolRank(
+            trade_date=pick_date,
+            code="688001",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=100000.0,
+            active_pool_rank=18,
+            in_active_pool=True,
+        )
+    )
     db.commit()
 
     candidates_response = test_client_with_db.get("/api/v1/analysis/current-hot/candidates?date=2026-05-08")
@@ -159,6 +171,7 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
     assert candidates_data["candidates"][0]["sector_names"] == ["光芯片"]
     assert candidates_data["candidates"][0]["turnover_rate"] == 12.3
     assert candidates_data["candidates"][0]["volume_ratio"] == 1.5
+    assert candidates_data["candidates"][0]["active_pool_rank"] == 18
     assert candidates_data["candidates"][0]["b1_passed"] is True
     assert candidates_data["candidates"][0]["total_score"] == 5.3
     assert candidates_data["candidates"][0]["signal_type"] == "trend_start"
@@ -166,6 +179,7 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
     assert results_data["results"][0]["total_score"] == 5.3
     assert results_data["results"][0]["turnover_rate"] == 12.3
     assert results_data["results"][0]["volume_ratio"] == 1.5
+    assert results_data["results"][0]["active_pool_rank"] == 18
 
 
 def test_current_hot_replaces_generic_sector_with_stock_industry(test_client_with_db: Any) -> None:
@@ -205,7 +219,7 @@ def test_current_hot_replaces_generic_sector_with_stock_industry(test_client_wit
     assert results_response.json()["results"][0]["sector_names"] == ["通信设备"]
 
 
-def test_get_current_hot_results_prioritizes_b1_then_trend_start_then_score(test_client_with_db: Any) -> None:
+def test_get_current_hot_results_prioritizes_trend_start_then_b1_then_score(test_client_with_db: Any) -> None:
     db = test_client_with_db.db
     pick_date = date(2026, 5, 8)
     db.add_all([
@@ -238,7 +252,7 @@ def test_get_current_hot_results_prioritizes_b1_then_trend_start_then_score(test
 
     assert response.status_code == 200
     data = response.json()
-    assert [item["code"] for item in data["results"]] == ["688002", "688001", "600001", "600002"]
+    assert [item["code"] for item in data["results"]] == ["688002", "600001", "688001", "600002"]
 
 
 def test_get_current_hot_candidates_prioritizes_trend_start_then_b1_then_score(test_client_with_db: Any) -> None:

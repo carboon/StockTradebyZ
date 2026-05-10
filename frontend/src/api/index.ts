@@ -358,8 +358,8 @@ export const apiWatchlist = {
   getAll: (options?: RequestOptions) => api.get<never, WatchlistResponse>('/v1/watchlist/', withRequestOptions(options, TIMEOUTS.standard)),
 
   // 添加到观察列表
-  add: (code: string, reason?: string, priority: number = 0, entry_price?: number, position_ratio?: number) =>
-    api.post<{ code: string; reason?: string; priority: number; entry_price?: number; position_ratio?: number }, WatchlistItem>('/v1/watchlist/', { code, reason, priority, entry_price, position_ratio }),
+  add: (code: string, reason?: string, priority: number = 0, entry_price?: number, position_ratio?: number, entry_date?: string | null) =>
+    api.post<{ code: string; reason?: string; priority: number; entry_price?: number; position_ratio?: number; entry_date?: string | null }, WatchlistItem>('/v1/watchlist/', { code, reason, priority, entry_price, position_ratio, entry_date }),
 
   // 更新观察项
   update: (id: number, data: Record<string, unknown>) => api.put<Record<string, unknown>, WatchlistItem>(`/v1/watchlist/${id}`, data),
@@ -368,7 +368,11 @@ export const apiWatchlist = {
   delete: (id: number) => api.delete<never, { status: string; message: string }>(`/v1/watchlist/${id}`),
 
   // 获取观察项分析历史
-  getAnalysis: (id: number, options?: RequestOptions) => api.get<never, WatchlistAnalysisResponse>(`/v1/watchlist/${id}/analysis`, withRequestOptions(options, TIMEOUTS.standard)),
+  getAnalysis: (id: number, options?: RequestOptions) =>
+    api.get<never, WatchlistAnalysisResponse>(`/v1/watchlist/${id}/analysis`, {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { days: 5 },
+    }),
 
   // 立即分析观察项
   analyze: (id: number, options?: RequestOptions) => api.post<null, WatchlistAnalyzeResponse>(`/v1/watchlist/${id}/analyze`, null, withRequestOptions(options, TIMEOUTS.long)),

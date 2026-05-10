@@ -140,6 +140,24 @@ def _daily_b1_check_market_metrics_migration_satisfied(inspector: Any) -> bool:
     return all(_has_column(inspector, "daily_b1_checks", column) for column in required_columns)
 
 
+def _active_pool_rank_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_table(inspector, "stock_active_pool_ranks")
+        and _has_unique_constraint(
+            inspector,
+            "stock_active_pool_ranks",
+            "uq_stock_active_pool_ranks_date_code_params",
+        )
+        and _has_index(inspector, "stock_active_pool_ranks", "ix_stock_active_pool_ranks_date_rank")
+        and _has_index(inspector, "stock_active_pool_ranks", "ix_stock_active_pool_ranks_code_date")
+        and _has_index(inspector, "stock_active_pool_ranks", "ix_stock_active_pool_ranks_code_date_params")
+    )
+
+
+def _watchlist_entry_date_migration_satisfied(inspector: Any) -> bool:
+    return _has_column(inspector, "watchlist", "entry_date")
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
@@ -150,6 +168,8 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_current_hot_tables.sql": _current_hot_tables_migration_satisfied,
     "add_stock_daily_market_metrics.sql": _stock_daily_market_metrics_migration_satisfied,
     "add_daily_b1_check_market_metrics.sql": _daily_b1_check_market_metrics_migration_satisfied,
+    "add_stock_active_pool_ranks.sql": _active_pool_rank_migration_satisfied,
+    "add_watchlist_entry_date.sql": _watchlist_entry_date_migration_satisfied,
 }
 
 

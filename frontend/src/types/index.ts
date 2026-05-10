@@ -58,6 +58,7 @@ export interface AnalysisResult {
   comment?: string
   turnover_rate?: number | null
   volume_ratio?: number | null
+  active_pool_rank?: number | null
   tomorrow_star_pass?: boolean | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
@@ -80,6 +81,7 @@ export interface CurrentHotCandidate {
   turnover?: number
   turnover_rate?: number | null
   volume_ratio?: number | null
+  active_pool_rank?: number | null
   b1_passed?: boolean | null
   kdj_j?: number
   verdict?: 'PASS' | 'WATCH' | 'FAIL'
@@ -103,9 +105,55 @@ export interface CurrentHotAnalysisResult {
   comment?: string
   turnover_rate?: number | null
   volume_ratio?: number | null
+  active_pool_rank?: number | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
+}
+
+export interface ExitPlan {
+  action?: 'hold' | 'wash_observe' | 'hold_cautious' | 'take_profit_partial' | 'trim' | 'exit' | string
+  action_label?: string
+  phase?: string
+  entry_price?: number | null
+  current_price?: number | null
+  pnl?: number | null
+  mfe_since_entry?: number | null
+  mae_since_entry?: number | null
+  drawdown_from_mfe?: number | null
+  target_progress?: string | null
+  target_prices?: Record<string, Record<string, number | null>>
+  risk_lines?: Record<string, number | null>
+  morning_state?: string | null
+  afternoon_action?: string | null
+  key_levels?: Record<string, number | null>
+  reason?: string | null
+  rules?: string[]
+}
+
+export interface WatchlistAnalysisResult {
+  trade_date?: string | null
+  close_price?: number | null
+  verdict?: 'PASS' | 'WATCH' | 'FAIL' | string | null
+  score?: number | null
+  signal_type?: string | null
+  b1_passed?: boolean | null
+  kdj_j?: number | null
+  zx_long_pos?: boolean | null
+  weekly_ma_aligned?: boolean | null
+  volume_healthy?: boolean | null
+}
+
+export interface WatchlistDerivedData {
+  pnl?: number | null
+  trend_outlook?: 'bullish' | 'bearish' | 'neutral' | string | null
+  buy_action?: 'buy' | 'wait' | 'avoid' | string | null
+  hold_action?: 'hold' | 'hold_cautious' | 'trim' | 'add_on_pullback' | string | null
+  risk_level?: 'low' | 'medium' | 'high' | string | null
+  recommendation?: string | null
+  support_level?: number | null
+  resistance_level?: number | null
+  exit_plan?: ExitPlan | null
 }
 
 export interface IntradayAnalysisItem {
@@ -131,6 +179,7 @@ export interface IntradayAnalysisItem {
   zx_long_pos?: boolean | null
   weekly_ma_aligned?: boolean | null
   volume_healthy?: boolean | null
+  exit_plan?: ExitPlan | null
 }
 
 export interface B1Check {
@@ -192,11 +241,15 @@ export interface WatchlistItem {
   code: string
   name?: string
   add_reason?: string
-  entry_price?: number
-  position_ratio?: number
+  entry_price?: number | null
+  entry_date?: string | null
+  position_ratio?: number | null
   priority: number
   is_active: boolean
   added_at: string
+  analysis?: WatchlistAnalysisResult | null
+  derived?: WatchlistDerivedData | null
+  exit_plan?: ExitPlan | null
 }
 
 export interface WatchlistAnalysis {
@@ -216,6 +269,7 @@ export interface WatchlistAnalysis {
   support_level?: number
   resistance_level?: number
   recommendation?: string
+  exit_plan?: ExitPlan | null
 }
 
 export interface Task {

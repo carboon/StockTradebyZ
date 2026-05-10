@@ -43,6 +43,11 @@ class AnalysisService:
         self._history_active_pool_cache: dict[tuple[str, str, int, int], dict[pd.Timestamp, set[str]]] = {}
         self._history_active_pool_rank_cache: dict[tuple[str, str, int, int, tuple[str, ...]], dict[str, dict[pd.Timestamp, int]]] = {}
 
+    def clear_active_pool_factor_cache(self) -> None:
+        """清理进程内活跃池派生因子缓存。"""
+        self._history_active_pool_cache.clear()
+        self._history_active_pool_rank_cache.clear()
+
     def load_stock_data(self, code: str, days: int = 365) -> Optional[pd.DataFrame]:
         """加载股票数据。
 
@@ -290,7 +295,7 @@ class AnalysisService:
         start_ts: pd.Timestamp,
         end_ts: pd.Timestamp,
         preselect_cfg: dict[str, Any],
-    ) -> dict[pd.Timestamp, set[str]]:
+    ) -> Optional[dict[pd.Timestamp, set[str]]]:
         """构建指定时间窗的流动性池成员集合。"""
         global_cfg = preselect_cfg.get("global", {})
         top_m = int(global_cfg.get("top_m", 2000))
@@ -305,32 +310,16 @@ class AnalysisService:
         if cached is not None:
             return cached
 
-        pipeline_dir = ROOT / "pipeline"
-        if str(pipeline_dir) not in sys.path:
-            sys.path.insert(0, str(pipeline_dir))
-        agent_dir = ROOT / "agent"
-        if str(agent_dir) not in sys.path:
-            sys.path.insert(0, str(agent_dir))
+        from app.services.active_pool_rank_service import active_pool_rank_service
 
-        from pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
-        from select_stock import load_raw_data
-
-        raw_data = load_raw_data(str(ROOT / settings.raw_data_dir), end_date=end_ts.strftime("%Y-%m-%d"))
-        preparer = MarketDataPreparer(
+        pool_sets = active_pool_rank_service.get_pool_sets(
             start_date=start_ts,
             end_date=end_ts,
-            warmup_bars=n_turnover_days,
+            top_m=top_m,
             n_turnover_days=n_turnover_days,
-            selector=None,
-            n_jobs=4,
         )
-        prepared = preparer.prepare_base_only(raw_data)
-        pool_by_date = TopTurnoverPoolBuilder(top_m=top_m).build(prepared)
-        pool_sets = {
-            dt: set(codes)
-            for dt, codes in pool_by_date.items()
-            if start_ts <= dt <= end_ts
-        }
+        if pool_sets is None:
+            return None
         self._history_active_pool_cache[cache_key] = pool_sets
         return pool_sets
 
@@ -375,47 +364,15 @@ class AnalysisService:
             self._history_active_pool_rank_cache[cache_key] = subset
             return subset
 
-        pipeline_dir = ROOT / "pipeline"
-        if str(pipeline_dir) not in sys.path:
-            sys.path.insert(0, str(pipeline_dir))
-        agent_dir = ROOT / "agent"
-        if str(agent_dir) not in sys.path:
-            sys.path.insert(0, str(agent_dir))
+        from app.services.active_pool_rank_service import active_pool_rank_service
 
-        from pipeline_core import MarketDataPreparer
-        from select_stock import load_raw_data
-
-        raw_data = load_raw_data(str(ROOT / settings.raw_data_dir), end_date=end_ts.strftime("%Y-%m-%d"))
-        preparer = MarketDataPreparer(
+        rankings = active_pool_rank_service.get_rankings(
             start_date=start_ts,
             end_date=end_ts,
-            warmup_bars=n_turnover_days,
+            target_codes=set(normalized_codes),
+            top_m=top_m,
             n_turnover_days=n_turnover_days,
-            selector=None,
-            n_jobs=4,
-        )
-        prepared = preparer.prepare_base_only(raw_data)
-
-        turnover_by_date: dict[pd.Timestamp, list[tuple[float, str]]] = {}
-        for code, df in prepared.items():
-            normalized_code = str(code or "").zfill(6)
-            for dt, val in df["turnover_n"].items():
-                if start_ts <= dt <= end_ts:
-                    turnover_by_date.setdefault(dt, []).append((float(val), normalized_code))
-
-        rankings: dict[str, dict[pd.Timestamp, int]] = {code: {} for code in normalized_codes}
-        target_code_set = set(normalized_codes)
-        for dt, items in turnover_by_date.items():
-            if not items:
-                continue
-            sorted_items = sorted(items, key=lambda item: item[0], reverse=True)
-            remaining = set(target_code_set)
-            for rank, (_, code) in enumerate(sorted_items, start=1):
-                if code in remaining:
-                    rankings[code][dt] = rank
-                    remaining.remove(code)
-                    if not remaining:
-                        break
+        ) or {code: {} for code in normalized_codes}
 
         self._history_active_pool_rank_cache[cache_key] = rankings
         return rankings
@@ -455,6 +412,27 @@ class AnalysisService:
         except Exception as exc:
             logger.warning("Active pool ranking calculation failed: %s", exc, exc_info=True)
             return None
+
+    def _safe_get_active_pool_factor_dates(
+        self,
+        *,
+        start_ts: pd.Timestamp,
+        end_ts: pd.Timestamp,
+        preselect_cfg: dict[str, Any],
+    ) -> set[date_class]:
+        try:
+            from app.services.active_pool_rank_service import active_pool_rank_service
+
+            global_cfg = preselect_cfg.get("global", {})
+            return active_pool_rank_service.get_available_dates(
+                start_date=start_ts,
+                end_date=end_ts,
+                top_m=int(global_cfg.get("top_m", 2000)),
+                n_turnover_days=int(global_cfg.get("n_turnover_days", 43)),
+            )
+        except Exception as exc:
+            logger.warning("Active pool factor date lookup failed: %s", exc, exc_info=True)
+            return set()
 
     def _normalize_pick_date(self, pick_date: Optional[str]) -> Optional[str]:
         """将日期统一规范为 YYYY-MM-DD。"""
@@ -703,22 +681,25 @@ class AnalysisService:
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config)
         preselect_cfg = self._load_preselect_config()
+        top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
 
         target_ts_map = {
             pd.Timestamp(item).normalize(): item
             for item in sorted(set(target_dates))
         }
-        active_pool_sets = self._safe_build_active_pool_sets(
-            start_ts=min(target_ts_map.keys()),
-            end_ts=max(target_ts_map.keys()),
-            preselect_cfg=preselect_cfg,
-        )
+        start_ts = min(target_ts_map.keys())
+        end_ts = max(target_ts_map.keys())
         active_pool_rankings = self._safe_build_active_pool_rankings(
-            start_ts=min(target_ts_map.keys()),
-            end_ts=max(target_ts_map.keys()),
+            start_ts=start_ts,
+            end_ts=end_ts,
             preselect_cfg=preselect_cfg,
             target_codes={code},
         ) or {}
+        active_pool_factor_dates = self._safe_get_active_pool_factor_dates(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            preselect_cfg=preselect_cfg,
+        )
 
         generated_count = 0
         generated_dates: list[str] = []
@@ -751,7 +732,9 @@ class AnalysisService:
                     zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
                     weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
                     active_pool_rank = active_pool_rankings.get(code, {}).get(row_ts)
-                    in_active_pool = None if active_pool_sets is None else code in active_pool_sets.get(row_ts, set())
+                    in_active_pool = active_pool_rank is not None and active_pool_rank <= top_m
+                    if active_pool_rank is None and row_ts.date() not in active_pool_factor_dates:
+                        in_active_pool = None
                     turnover_rate = self._extract_market_metric(last_row, "turnover_rate")
                     volume_ratio = self._extract_market_metric(last_row, "volume_ratio")
 
@@ -1226,6 +1209,7 @@ class AnalysisService:
             if analysis_date_text:
                 check_ts = pd.Timestamp(analysis_date_text).normalize()
                 preselect_cfg = self._load_preselect_config()
+                top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
                 active_pool_rankings = self._safe_build_active_pool_rankings(
                     start_ts=check_ts,
                     end_ts=check_ts,
@@ -1234,9 +1218,16 @@ class AnalysisService:
                 )
                 if active_pool_rankings is not None:
                     active_pool_rank = active_pool_rankings.get(code, {}).get(check_ts)
-                    top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
                     result["active_pool_rank"] = active_pool_rank
-                    result["in_active_pool"] = active_pool_rank is not None and active_pool_rank <= top_m
+                    if active_pool_rank is not None:
+                        result["in_active_pool"] = active_pool_rank <= top_m
+                    else:
+                        factor_dates = self._safe_get_active_pool_factor_dates(
+                            start_ts=check_ts,
+                            end_ts=check_ts,
+                            preselect_cfg=preselect_cfg,
+                        )
+                        result["in_active_pool"] = False if check_ts.date() in factor_dates else None
 
             # 执行评分
             if reviewer == "quant":
@@ -1736,17 +1727,18 @@ class AnalysisService:
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config)
         preselect_cfg = self._load_preselect_config()
-        active_pool_sets = self._safe_build_active_pool_sets(
-            start_ts=target_ts.normalize(),
-            end_ts=target_ts.normalize(),
-            preselect_cfg=preselect_cfg,
-        )
+        top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
         active_pool_rankings = self._safe_build_active_pool_rankings(
             start_ts=target_ts.normalize(),
             end_ts=target_ts.normalize(),
             preselect_cfg=preselect_cfg,
             target_codes={code},
         ) or {}
+        active_pool_factor_dates = self._safe_get_active_pool_factor_dates(
+            start_ts=target_ts.normalize(),
+            end_ts=target_ts.normalize(),
+            preselect_cfg=preselect_cfg,
+        )
 
         df_prepared = selector.prepare_df(df_before)
         last_row = df_prepared.iloc[-1]
@@ -1755,7 +1747,9 @@ class AnalysisService:
         prefilter_passed = bool(prefilter_result.get("passed", True))
         prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
         active_pool_rank = active_pool_rankings.get(code, {}).get(target_ts.normalize())
-        in_active_pool = None if active_pool_sets is None else code in active_pool_sets.get(target_ts.normalize(), set())
+        in_active_pool = active_pool_rank is not None and active_pool_rank <= top_m
+        if active_pool_rank is None and target_ts.date() not in active_pool_factor_dates:
+            in_active_pool = None
         b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
         record = {
             "check_date": check_date_obj.isoformat(),

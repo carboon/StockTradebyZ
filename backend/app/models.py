@@ -3,7 +3,7 @@ SQLAlchemy Database Models
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 数据库表模型定义
 """
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
@@ -329,6 +329,7 @@ class Watchlist(Base):
     code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
     add_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    entry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     position_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -603,6 +604,37 @@ class StockDaily(Base):
     sell_elg_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     net_mf_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StockActivePoolRank(Base):
+    """每日活跃池排名因子表。
+
+    该表是 stock_daily 的派生结果，供单股诊断、历史回放等在线接口直接读取，
+    避免在用户请求中读取全市场 CSV 并临时重算活跃池。
+    """
+    __tablename__ = "stock_active_pool_ranks"
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "code",
+            "top_m",
+            "n_turnover_days",
+            name="uq_stock_active_pool_ranks_date_code_params",
+        ),
+        Index("ix_stock_active_pool_ranks_date_rank", "trade_date", "top_m", "n_turnover_days", "active_pool_rank"),
+        Index("ix_stock_active_pool_ranks_code_date", "code", "trade_date"),
+        Index("ix_stock_active_pool_ranks_code_date_params", "code", "trade_date", "top_m", "n_turnover_days"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    top_m: Mapped[int] = mapped_column(Integer, nullable=False, default=2000)
+    n_turnover_days: Mapped[int] = mapped_column(Integer, nullable=False, default=43)
+    turnover_n: Mapped[float] = mapped_column(Float, nullable=False)
+    active_pool_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    in_active_pool: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class AdminSummaryMetadata(Base):

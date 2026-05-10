@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Candidate, IntradayAnalysisSnapshot, Stock, StockDaily
 from app.services.analysis_service import analysis_service
+from app.services.exit_plan_service import ExitPlanService
 from app.services.tushare_service import TushareService
 
 
@@ -41,6 +42,7 @@ class IntradayAnalysisService:
     def __init__(self, db: Session):
         self.db = db
         self.tushare_service = TushareService()
+        self.exit_plan_service = ExitPlanService()
 
     def now_shanghai(self) -> datetime:
         return datetime.now(ASIA_SHANGHAI)
@@ -188,7 +190,7 @@ class IntradayAnalysisService:
             "close": self._to_float(quote_row.get("close")),
             "high": self._to_float(quote_row.get("high")),
             "low": self._to_float(quote_row.get("low")),
-            "volume": self._to_float(quote_row.get("vol")),
+            "volume": self._normalize_intraday_volume(history_df, quote_row),
             "amount": self._to_float(quote_row.get("amount")),
         }
         snapshot_df = pd.DataFrame([snapshot_row])
@@ -208,12 +210,23 @@ class IntradayAnalysisService:
             return None
         return result
 
+    def _normalize_intraday_volume(self, history_df: pd.DataFrame, quote_row: pd.Series) -> Optional[float]:
+        """Normalize Tushare rt_k volume before appending the temporary intraday candle."""
+        volume = self._to_float(quote_row.get("vol"))
+        if volume is None or history_df is None or history_df.empty or "volume" not in history_df.columns:
+            return volume
+        avg20 = pd.to_numeric(history_df["volume"], errors="coerce").dropna().tail(20).mean()
+        if pd.notna(avg20) and avg20 > 0 and volume > avg20 * 20:
+            return volume / 100.0
+        return volume
+
     def _compute_snapshot(
         self,
         *,
         code: str,
         trade_date: date,
         source_pick_date: date,
+        entry_price: Optional[float],
         quote_row: pd.Series,
         snapshot_time: datetime,
     ) -> Optional[dict[str, Any]]:
@@ -241,6 +254,16 @@ class IntradayAnalysisService:
         change_pct = None
         if close_price is not None and prev_close not in (None, 0):
             change_pct = (close_price - prev_close) / prev_close * 100
+        exit_plan = self.exit_plan_service.build_exit_plan(
+            code=code,
+            history_df=frame,
+            entry_price=entry_price,
+            current_price=close_price,
+            entry_date=source_pick_date,
+            verdict=score_result.get("verdict"),
+            signal_type=score_result.get("signal_type"),
+            is_intraday=True,
+        )
 
         return {
             "trade_date": trade_date,
@@ -251,7 +274,7 @@ class IntradayAnalysisService:
             "close_price": close_price,
             "high_price": self._to_float(quote_row.get("high")),
             "low_price": self._to_float(quote_row.get("low")),
-            "volume": self._to_float(quote_row.get("vol")),
+            "volume": self._normalize_intraday_volume(history_df, quote_row),
             "amount": self._to_float(quote_row.get("amount")),
             "change_pct": change_pct,
             "turnover": None,
@@ -272,6 +295,7 @@ class IntradayAnalysisService:
                 "volume_reasoning": score_result.get("volume_reasoning"),
                 "abnormal_move_reasoning": score_result.get("abnormal_move_reasoning"),
                 "quote_trade_time": quote_row.get("trade_time"),
+                "exit_plan": exit_plan,
             },
         }
 
@@ -330,11 +354,13 @@ class IntradayAnalysisService:
             if quote_row is None:
                 skipped_count += 1
                 continue
+            candidate = next((item for item in candidates if item.code.zfill(6) == code), None)
 
             snapshot = self._compute_snapshot(
                 code=code,
                 trade_date=target_trade_date,
                 source_pick_date=source_pick_date,
+                entry_price=candidate.close_price if candidate else None,
                 quote_row=quote_row,
                 snapshot_time=snapshot_time,
             )
@@ -431,6 +457,7 @@ class IntradayAnalysisService:
                 "zx_long_pos": row.zx_long_pos,
                 "weekly_ma_aligned": row.weekly_ma_aligned,
                 "volume_healthy": row.volume_healthy,
+                "exit_plan": (row.details_json or {}).get("exit_plan"),
             }
             for row in rows
         ]

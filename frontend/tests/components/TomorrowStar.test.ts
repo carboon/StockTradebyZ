@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import TomorrowStar from '@/views/TomorrowStar.vue'
+import { useAuthStore } from '@/store/auth'
 
 const mockPush = vi.fn()
 
@@ -130,10 +131,26 @@ function buildIncrementalStatus(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function mountComponent() {
+function mountComponent({ isAdmin = true } = {}) {
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const authStore = useAuthStore(pinia)
+  authStore.token = 'test-token'
+  authStore.user = {
+    id: isAdmin ? 1 : 2,
+    username: isAdmin ? 'admin' : 'user',
+    display_name: isAdmin ? '管理员' : '普通用户',
+    role: isAdmin ? 'admin' : 'user',
+    is_active: true,
+    daily_quota: 1000,
+    used_today: 0,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+  } as any
+
   return mount(TomorrowStar, {
     global: {
-      plugins: [ElementPlus, createPinia()],
+      plugins: [ElementPlus, pinia],
       stubs: {
         'el-tabs': { template: '<div><slot /></div>', props: ['modelValue'] },
         'el-tab-pane': { template: '<div><slot /></div>' },
@@ -219,7 +236,21 @@ describe('TomorrowStar.vue', () => {
       trade_date: '2024-01-15',
       snapshot_time: '2024-01-15T12:30:00',
       source_pick_date: '2024-01-15',
-      items: [{ code: '600000', name: '浦发银行', b1_passed: true, verdict: 'PASS', signal_type: 'trend_start', score: 4.6 }],
+      items: [{
+        code: '600000',
+        name: '浦发银行',
+        b1_passed: true,
+        verdict: 'PASS',
+        signal_type: 'trend_start',
+        score: 4.6,
+        exit_plan: {
+          action: 'take_profit_partial',
+          morning_state: '冲高回落',
+          afternoon_action: '靠近P75先兑现',
+          key_levels: { support: 10.2, resistance: 11.1 },
+          reason: '放量后回落，下午观察承接',
+        },
+      }],
       total: 1,
     } as any)
     vi.mocked(apiAnalysis.getCurrentHotMiddayStatus).mockResolvedValue({
@@ -626,5 +657,36 @@ describe('TomorrowStar.vue', () => {
     expect(apiAnalysis.getCurrentHotMiddayStatus).toHaveBeenCalled()
     expect(apiAnalysis.getCurrentHotMiddayCurrent).toHaveBeenCalled()
     expect(wrapper.vm.middayRows[0].code).toBe('688001')
+  })
+
+  it('hides midday analysis and skips intraday requests for normal users', async () => {
+    const wrapper = mountComponent({ isAdmin: false })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('中盘分析')
+    expect(apiAnalysis.getMiddayStatus).not.toHaveBeenCalled()
+    expect(apiAnalysis.getMiddayCurrent).not.toHaveBeenCalled()
+
+    wrapper.vm.activeTab = 'midday-analysis'
+    await flushPromises()
+
+    expect(wrapper.vm.activeTab).toBe('tomorrow-star')
+    expect(apiAnalysis.getCurrentHotMiddayStatus).not.toHaveBeenCalled()
+    expect(apiAnalysis.getCurrentHotMiddayCurrent).not.toHaveBeenCalled()
+  })
+
+  it('formats midday exit plan fields for table and mobile list', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.activeTab = 'midday-analysis'
+    await flushPromises()
+
+    const row = wrapper.vm.middayRows[0]
+    expect(wrapper.vm.getExitPlanActionLabel(row.exit_plan)).toBe('部分止盈')
+    expect(wrapper.vm.getExitPlanActionType(row.exit_plan.action)).toBe('primary')
+    expect(wrapper.vm.getMiddayPlanDetail(row)).toBe('支撑 10.20 / 压力 11.10 · 放量后回落，下午观察承接')
+    expect(wrapper.vm.getMiddayPlanBrief(row)).toContain('冲高回落 · 靠近P75先兑现')
+    expect(wrapper.vm.getMiddayRowComment(row)).toBe('放量后回落，下午观察承接')
   })
 })
