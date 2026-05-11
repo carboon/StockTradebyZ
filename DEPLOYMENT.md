@@ -133,15 +133,29 @@ docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up
 - 后端 API：`http://127.0.0.1:8000`
 - API 文档：`http://127.0.0.1:8000/docs`
 
-## 后台交易日更新
+## 停服维护更新
 
-仓库已提供独立后台更新脚本：
+仓库已提供统一停服维护脚本：
+
+```bash
+./maintenance.sh
+```
+
+该脚本会停止对外服务、构建镜像、仅启动最小依赖、执行最近 120 交易日补数和校验，校验通过后再拉起完整服务。只读预热由服务启动后自行完成。
+
+## 旧的在线更新入口
+
+历史在线更新入口：
 
 ```bash
 ./deploy/scripts/start.sh update-latest
 ```
 
-如需用 systemd 以受限资源方式在宿主机后台执行，可使用：
+默认已禁用，避免服务对外期间执行重负载更新导致整机失联。只有在明确接受风险时，才建议临时设置 `STOCKTRADE_ENABLE_LEGACY_ONLINE_UPDATE=1` 后继续使用。
+
+## 可选的宿主机后台限流方案
+
+如仍需用 systemd 以受限资源方式在宿主机后台执行，可使用：
 
 ```bash
 deploy/systemd/stocktrade-background-update.service

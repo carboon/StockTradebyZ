@@ -66,12 +66,16 @@ def resolve_preselect_output_dir(
 def load_raw_data(
     data_dir: str,
     end_date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    warmup_bars: int = 0,
 ) -> Dict[str, pd.DataFrame]:
     """读取 data_dir 下所有 *.csv，统一处理列名/日期/排序."""
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"data_dir 不存在: {data_dir}")
 
+    start_ts = pd.to_datetime(start_date) if start_date else None
     end_ts = pd.to_datetime(end_date) if end_date else None
+    warmup_bars = max(0, int(warmup_bars))
     data: Dict[str, pd.DataFrame] = {}
 
     for fname in os.listdir(data_dir):
@@ -89,8 +93,18 @@ def load_raw_data(
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").reset_index(drop=True)
 
-        if end_ts is not None:
-            df = df[df["date"] <= end_ts].reset_index(drop=True)
+        if start_ts is not None or end_ts is not None:
+            dates = df["date"].to_numpy(dtype="datetime64[ns]")
+            left = 0
+            right = len(df)
+            if start_ts is not None:
+                start_idx = int(np.searchsorted(dates, start_ts.to_datetime64(), side="left"))
+                left = max(0, start_idx - warmup_bars)
+            if end_ts is not None:
+                right = int(np.searchsorted(dates, end_ts.to_datetime64(), side="right"))
+            if right <= left:
+                continue
+            df = df.iloc[left:right].reset_index(drop=True)
 
         if not df.empty:
             data[code] = df

@@ -4,6 +4,7 @@ Current hot pool service.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -27,6 +28,9 @@ from app.services.current_hot_pool import DEFAULT_CURRENT_HOT_POOL
 from app.services.daily_data_service import DailyDataService
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -579,6 +583,18 @@ class CurrentHotService:
         return run
 
     def _refresh_run_counts(self, run: CurrentHotRun) -> None:
+        self._refresh_run_summary_counts(run)
+        run.consecutive_candidate_count = int(
+            self.db.query(func.count(CurrentHotCandidate.id))
+            .filter(
+                CurrentHotCandidate.pick_date == run.pick_date,
+                CurrentHotCandidate.consecutive_days >= 2,
+            )
+            .scalar()
+            or 0
+        )
+
+    def _refresh_run_summary_counts(self, run: CurrentHotRun) -> None:
         pick_date = run.pick_date
         run.candidate_count = int(
             self.db.query(func.count(CurrentHotCandidate.id))
@@ -601,18 +617,9 @@ class CurrentHotService:
             .scalar()
             or 0
         )
-        run.consecutive_candidate_count = int(
-            self.db.query(func.count(CurrentHotCandidate.id))
-            .filter(
-                CurrentHotCandidate.pick_date == pick_date,
-                CurrentHotCandidate.consecutive_days >= 2,
-            )
-            .scalar()
-            or 0
-        )
 
     @staticmethod
-    def recalculate_consecutive_metrics(db: Session, *, commit: bool = True) -> None:
+    def recalculate_consecutive_metrics(db: Session, *, commit: bool = True) -> dict[str, int]:
         pick_dates = [
             value
             for value, in db.query(CurrentHotCandidate.pick_date)
@@ -652,6 +659,16 @@ class CurrentHotService:
             db.commit()
         else:
             db.flush()
+        return {
+            "candidate_rows": int(db.query(func.count(CurrentHotCandidate.id)).scalar() or 0),
+            "run_rows": int(db.query(func.count(CurrentHotRun.id)).scalar() or 0),
+            "days_with_consecutive_candidates": int(
+                db.query(func.count(func.distinct(CurrentHotCandidate.pick_date)))
+                .filter(CurrentHotCandidate.consecutive_days >= 2)
+                .scalar()
+                or 0
+            ),
+        }
 
     def generate_for_trade_date(
         self,
@@ -659,6 +676,7 @@ class CurrentHotService:
         reviewer: str = DEFAULT_REVIEWER,
         *,
         backfill_missing_history: bool = True,
+        recalculate_consecutive: bool = True,
     ) -> dict[str, Any]:
         target_trade_date = self._normalize_trade_date(trade_date) or self.get_latest_trade_date()
         if target_trade_date is None:
@@ -750,11 +768,16 @@ class CurrentHotService:
                 self.db.add_all(analysis_rows)
             self.db.flush()
 
-            self.recalculate_consecutive_metrics(self.db, commit=False)
+            if recalculate_consecutive:
+                self.recalculate_consecutive_metrics(self.db, commit=False)
             run = self._get_or_create_run(target_trade_date, reviewer=reviewer, status="success")
             run.finished_at = utc_now()
             run.error_message = None
-            self._refresh_run_counts(run)
+            if recalculate_consecutive:
+                self._refresh_run_counts(run)
+            else:
+                self._refresh_run_summary_counts(run)
+                run.consecutive_candidate_count = 0
             self.db.commit()
             return {
                 "trade_date": target_trade_date,
@@ -1067,22 +1090,57 @@ class CurrentHotService:
         failed_dates: list[str] = []
 
         status_map = {item["pick_date"]: item for item in self.get_dates(window_size).get("history", [])}
-        for pick_date in target_dates:
+        if target_dates:
+            logger.info(
+                "[current-hot] window rebuild start: window_size=%s total_dates=%s force=%s backfill_missing_history=%s",
+                window_size,
+                len(target_dates),
+                force,
+                backfill_missing_history,
+            )
+        for index, pick_date in enumerate(target_dates, start=1):
             pick_date_text = pick_date.isoformat()
             item = status_map.get(pick_date_text)
             if not force and item and item.get("status") == "success":
+                logger.info(
+                    "[current-hot] skip %s (%s/%s) already success",
+                    pick_date_text,
+                    index,
+                    len(target_dates),
+                )
                 continue
 
+            logger.info(
+                "[current-hot] rebuilding %s (%s/%s)",
+                pick_date_text,
+                index,
+                len(target_dates),
+            )
             result = self.generate_for_trade_date(
                 pick_date,
                 reviewer=reviewer,
                 backfill_missing_history=backfill_missing_history,
+                recalculate_consecutive=False,
             )
             if result.get("status") == "ok":
                 rebuilt_dates.append(pick_date_text)
+                logger.info(
+                    "[current-hot] rebuilt %s generated=%s skipped=%s",
+                    pick_date_text,
+                    result.get("generated_count", 0),
+                    result.get("skipped_count", 0),
+                )
             else:
                 failed_dates.append(pick_date_text)
+                logger.warning(
+                    "[current-hot] rebuild failed %s: %s",
+                    pick_date_text,
+                    result.get("message"),
+                )
 
+        if rebuilt_dates:
+            logger.info("[current-hot] recalculating consecutive metrics once for %s rebuilt dates", len(rebuilt_dates))
+            self.recalculate_consecutive_metrics(self.db, commit=False)
         prune_result = self.prune_window(window_size)
         return {
             "window_size": window_size,

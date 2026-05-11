@@ -47,4 +47,5 @@ def test_tomorrow_star_run_table_definition():
         "started_at",
         "finished_at",
         "error_message",
+        "meta_json",
     }.issubset(column_names)

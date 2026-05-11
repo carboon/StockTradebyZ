@@ -36,20 +36,22 @@ NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
 deploy/systemd/stocktrade-prod.service
 ```
 
-后台交易日更新：
+停服维护更新（推荐）：
 
 ```bash
-./deploy/scripts/start.sh update-latest
+./maintenance.sh
 ```
 
-如需宿主机后台限流运行，可使用：
+只读预热仍由服务启动后自行完成；补数、更新、校验、重启由维护脚本统一负责。
+
+旧的在线更新入口和自动后台更新不再推荐默认启用。如确需保留宿主机后台限流方案，可使用：
 
 ```bash
 deploy/systemd/stocktrade-background-update.service
 deploy/systemd/stocktrade-background-update.timer
 ```
 
-当前仓库内的 service 已按这台服务器预设为 `/root/StockTradebyZ`、`root:root`，并把后台任务限制为最多 `1 vCPU + 1500M` 内存。systemd 默认会在交易日北京时间 `16:30` 首次触发；若当天交易数据尚未就绪，则脚本返回 `TEMPFAIL(75)`，service 会每 `10` 分钟自动重试，直到成功；普通脚本错误返回 `1`，不会自动重试。
+当前仓库内的 service 已按这台服务器预设为 `/root/StockTradebyZ`、`root:root`，并把后台任务限制为最多 `1 vCPU + 1500M` 内存。若继续启用 timer，它会在交易日北京时间 `16:30` 首次触发；若当天交易数据尚未就绪，则脚本返回 `TEMPFAIL(75)`，service 会每 `10` 分钟自动重试，直到成功；普通脚本错误返回 `1`，不会自动重试。
 
 访问地址：
 
@@ -110,5 +112,5 @@ deploy/systemd/stocktrade-background-update.timer
 - `postgres` 是 Docker Compose 服务名，只在 Compose 网络内有效
 - 容器内运行后端或测试时，`DATABASE_URL=...@postgres:5432/...` 是正确的
 - 宿主机直接运行测试且未通过 Docker 网络访问数据库时，应改用 `127.0.0.1` 或 `localhost`
-- 当前推荐通过 `./deploy/scripts/start.sh update-latest` 在 `backend` 容器内执行后台更新，避免宿主机单独处理数据库地址
+- 当前推荐通过仓库根目录 `./maintenance.sh` 执行停服维护更新；旧的 `./deploy/scripts/start.sh update-latest` 在线入口默认禁用
 - 当前测试基座仍使用内存 SQLite 做隔离，这不属于生产部署能力

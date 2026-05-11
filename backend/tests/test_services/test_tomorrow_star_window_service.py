@@ -64,6 +64,56 @@ def test_get_window_status_normalizes_stale_running_rows_without_active_task(tes
     assert summary.items[1]["status"] == "missing"
 
 
+def test_market_regime_blocked_item_is_effectively_ready(test_db):
+    test_db.add(Stock(code="000001", name="PingAn"))
+    test_db.add(StockDaily(code="000001", trade_date=date(2024, 1, 3), open=10, close=11, high=11, low=9, volume=100))
+    test_db.add(
+        TomorrowStarRun(
+            pick_date=date(2024, 1, 3),
+            status="success",
+            candidate_count=0,
+            analysis_count=0,
+            trend_start_count=0,
+            meta_json={
+                "market_regime_blocked": True,
+                "market_regime_info": {"summary": "blocked"},
+            },
+        )
+    )
+    test_db.commit()
+
+    service = TomorrowStarWindowService(test_db)
+    summary = service.get_window_status(window_size=1)
+
+    assert summary.items[0]["status"] == "market_regime_blocked"
+    assert service._is_effectively_ready_item(summary.items[0]) is True
+
+
+def test_ensure_window_recovers_stale_running_rows_before_rebuild(test_db, mocker):
+    test_db.add(Stock(code="000001", name="PingAn"))
+    test_db.add_all([
+        StockDaily(code="000001", trade_date=date(2024, 1, 3), open=10, close=11, high=11, low=9, volume=100),
+        StockDaily(code="000001", trade_date=date(2024, 1, 2), open=10, close=10.5, high=11, low=9, volume=100),
+    ])
+    test_db.add_all([
+        TomorrowStarRun(pick_date=date(2024, 1, 3), status="running", candidate_count=0, analysis_count=0, trend_start_count=0),
+        TomorrowStarRun(pick_date=date(2024, 1, 2), status="running", candidate_count=0, analysis_count=0, trend_start_count=0),
+    ])
+    test_db.commit()
+
+    mocker.patch(
+        "app.services.tomorrow_star_window_service.TomorrowStarWindowService._build_window_via_backtest",
+        return_value={"success": True, "built_dates": [], "failed_dates": []},
+    )
+
+    result = TomorrowStarWindowService(test_db).ensure_window(window_size=2, source="bootstrap")
+
+    assert result["recovered_incomplete_runs"] == 2
+    rows = test_db.query(TomorrowStarRun).order_by(TomorrowStarRun.pick_date.desc()).all()
+    assert [row.status for row in rows] == ["failed", "failed"]
+    assert all(row.source == "bootstrap_recovered" for row in rows)
+
+
 def test_prune_window_removes_old_rows(test_db):
     test_db.add(Stock(code="000001", name="PingAn"))
     dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]

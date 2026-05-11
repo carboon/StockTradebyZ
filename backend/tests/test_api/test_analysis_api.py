@@ -1189,3 +1189,29 @@ def test_get_diagnosis_history_read_only_no_recalc(test_client: TestClient) -> N
 
         # 确保没有调用任何计算方法（只读模式）
         mock_service.get_stock_history_checks.assert_called_once_with("600000", 120, 1, 10)
+
+
+@pytest.mark.api
+def test_diagnosis_history_prewarm_read_only_no_generate(mocker) -> None:
+    from app.services.diagnosis_history_cache_service import DiagnosisHistoryCacheService
+
+    mocker.patch.object(
+        DiagnosisHistoryCacheService,
+        "collect_prewarm_codes",
+        return_value=["000001"],
+    )
+    ensure_cached = mocker.patch.object(
+        DiagnosisHistoryCacheService,
+        "ensure_cached",
+        return_value={"code": "000001", "history": [], "generated_count": 0, "total": 0},
+    )
+
+    result = DiagnosisHistoryCacheService.prewarm(generate_if_missing=False)
+
+    assert result["success"] is True
+    ensure_cached.assert_called_once_with(
+        "000001",
+        days=DiagnosisHistoryCacheService.DEFAULT_DAYS,
+        force=False,
+        generate_if_missing=False,
+    )

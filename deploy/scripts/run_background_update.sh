@@ -34,6 +34,16 @@ prepare_runtime_dirs() {
     mkdir -p "$DOCKER_CONFIG_DIR" "$LOG_DIR" "$RUN_DIR"
 }
 
+require_legacy_opt_in() {
+    if [ "${STOCKTRADE_ENABLE_LEGACY_ONLINE_UPDATE:-0}" = "1" ]; then
+        return 0
+    fi
+    log_error "在线 update-latest 入口默认已禁用，避免服务对外期间执行重负载更新导致机器卡死。"
+    log_error "请改用仓库根目录 maintenance.sh 执行停服维护更新。"
+    log_error "仅在明确接受风险时，才可临时设置 STOCKTRADE_ENABLE_LEGACY_ONLINE_UPDATE=1 后继续使用本脚本。"
+    exit 1
+}
+
 check_docker() {
     export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
 
@@ -89,6 +99,7 @@ check_backend_running() {
 
 main() {
     prepare_runtime_dirs
+    require_legacy_opt_in
     check_docker
     check_backend_running
 

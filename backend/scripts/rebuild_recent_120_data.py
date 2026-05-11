@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import logging
 import shutil
 import sys
 from collections import defaultdict
@@ -61,6 +62,12 @@ from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
 from app.schema_migrations import apply_startup_sql_migrations
 from app.utils.tushare_rate_limit import acquire_tushare_slot
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
 
 CRITICAL_CSV_COLUMNS = {
@@ -980,7 +987,11 @@ def prewarm_diagnosis_cache(limit: int = 0) -> dict[str, Any]:
     try:
         from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 
-        return diagnosis_history_cache_service.prewarm(limit=limit, force=True)
+        return diagnosis_history_cache_service.prewarm(
+            limit=limit,
+            force=True,
+            generate_if_missing=False,
+        )
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

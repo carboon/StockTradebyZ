@@ -243,6 +243,7 @@ class DiagnosisHistoryCacheService:
         days: int = DEFAULT_DAYS,
         limit: int = 0,
         force: bool = False,
+        generate_if_missing: bool = True,
     ) -> dict[str, Any]:
         target_codes = [str(code).zfill(6) for code in (codes or cls.collect_prewarm_codes()) if str(code or "").strip()]
         if limit > 0:
@@ -250,9 +251,23 @@ class DiagnosisHistoryCacheService:
 
         success_codes: list[str] = []
         failed: list[dict[str, str]] = []
-        for code in target_codes:
+        total = len(target_codes)
+        for index, code in enumerate(target_codes, start=1):
             try:
-                cls.ensure_cached(code, days=days, force=force, generate_if_missing=True)
+                logger.info(
+                    "诊断历史缓存预热 %s/%s: code=%s force=%s generate_if_missing=%s",
+                    index,
+                    total,
+                    code,
+                    force,
+                    generate_if_missing,
+                )
+                cls.ensure_cached(
+                    code,
+                    days=days,
+                    force=force,
+                    generate_if_missing=generate_if_missing,
+                )
                 success_codes.append(code)
             except Exception as exc:
                 failed.append({"code": code, "error": str(exc)})

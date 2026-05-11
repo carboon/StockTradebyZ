@@ -137,7 +137,7 @@ class TomorrowStarWindowService:
 
         # 检查市场环境阻断
         if run.meta_json and run.meta_json.get("market_regime_blocked"):
-            return "market_regime_blocked"
+            return "success"
 
         status = str(run.status or "").strip().lower() or "missing"
         if status == "success":
@@ -148,6 +148,10 @@ class TomorrowStarWindowService:
             if not has_active_task:
                 return "missing"
         return status
+
+    @staticmethod
+    def _is_stale_incomplete_status(status: str) -> bool:
+        return status in {"running", "pending"}
 
     @staticmethod
     def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -1001,7 +1005,10 @@ class TomorrowStarWindowService:
         )
 
     def _is_effectively_ready_item(self, item: dict[str, Any]) -> bool:
-        if item.get("status") != "success":
+        status = str(item.get("status") or "").strip().lower()
+        if status == "market_regime_blocked":
+            return True
+        if status != "success":
             return False
         candidate_count = int(item.get("candidate_count", 0) or 0)
         analysis_count = int(item.get("analysis_count", 0) or 0)
@@ -1018,6 +1025,41 @@ class TomorrowStarWindowService:
             return False
 
         return True
+
+    def reset_stale_incomplete_runs(
+        self,
+        window_size: int = DEFAULT_WINDOW_SIZE,
+        *,
+        source: str = "startup_recovered",
+    ) -> int:
+        summary = self.get_window_status(window_size)
+        updated = 0
+        for item in summary.items:
+            status = str(item.get("status") or "").strip().lower()
+            if not self._is_stale_incomplete_status(status):
+                continue
+            if item.get("candidate_count") or item.get("analysis_count"):
+                continue
+            pick_date = item.get("pick_date")
+            if not pick_date:
+                continue
+            run = (
+                self.db.query(TomorrowStarRun)
+                .filter(TomorrowStarRun.pick_date == date.fromisoformat(pick_date))
+                .first()
+            )
+            if run is None:
+                continue
+            run.status = "failed"
+            run.source = source
+            run.error_message = (
+                "Recovered stale startup status: previous rebuild was interrupted before producing data."
+            )
+            run.finished_at = utc_now()
+            updated += 1
+        if updated:
+            self.db.commit()
+        return updated
 
     @staticmethod
     def _extract_prefilter_passed(details_json: Optional[dict[str, Any]]) -> Optional[bool]:
@@ -1369,6 +1411,7 @@ class TomorrowStarWindowService:
         reviewer: str = DEFAULT_REVIEWER,
         source: str = DEFAULT_SOURCE,
     ) -> dict[str, Any]:
+        recovered_incomplete_runs = self.reset_stale_incomplete_runs(window_size, source=f"{source}_recovered")
         summary = self.get_window_status(window_size)
         target_dates = [item["pick_date"] for item in summary.items]
         missing_dates = [
@@ -1403,6 +1446,7 @@ class TomorrowStarWindowService:
         return {
             "window_size": window_size,
             "target_dates": target_dates,
+            "recovered_incomplete_runs": recovered_incomplete_runs,
             "rebuilt_dates": [item.get("pick_date") for item in results if item.get("success")],
             "failed_dates": [item.get("pick_date") for item in results if not item.get("success")],
             "pruned_dates": pruned.get("deleted_dates", []),

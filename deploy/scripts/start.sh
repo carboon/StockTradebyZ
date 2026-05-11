@@ -50,7 +50,7 @@ StockTrader 统一运行脚本
   ps            查看服务状态
   restart       重启服务
   exec-backend  进入后端容器
-  update-latest 在 backend 容器内执行最新交易日后台更新
+  update-latest 调用旧的在线更新入口（默认禁用，不推荐）
 
 选项:
   --build       启动前构建镜像 (dev 默认启用，prod 需显式指定)
@@ -69,9 +69,7 @@ StockTrader 统一运行脚本
   $0 ps                     # 查看服务状态
   $0 restart                # 重启服务
   $0 exec-backend           # 进入后端容器
-  $0 update-latest          # 更新最新交易日数据并重建明日之星
-  $0 update-latest -- --force
-                           # 将参数透传给后台更新脚本
+  $0 update-latest          # 调用旧入口；默认会拒绝并提示改用 maintenance.sh
 
 访问地址:
   开发环境:
@@ -365,7 +363,7 @@ cmd_exec_backend() {
 }
 
 cmd_update_latest() {
-    log_info "执行最新交易日后台更新..."
+    log_warning "update-latest 为旧入口，默认已禁用。推荐改用 maintenance.sh 停服维护。"
     exec "$PROJECT_ROOT/deploy/scripts/run_background_update.sh" "${TARGETS[@]}"
 }
 

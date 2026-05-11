@@ -90,6 +90,10 @@ def _candidate_consecutive_metrics_migration_satisfied(inspector: Any) -> bool:
     )
 
 
+def _tomorrow_star_run_meta_json_migration_satisfied(inspector: Any) -> bool:
+    return _has_column(inspector, "tomorrow_star_runs", "meta_json")
+
+
 def _current_hot_tables_migration_satisfied(inspector: Any) -> bool:
     return (
         _has_table(inspector, "current_hot_runs")
@@ -165,6 +169,7 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_steps_completed_column.sql": _task_steps_completed_migration_satisfied,
     "add_raw_data_manifest_tables.sql": _raw_data_manifest_migration_satisfied,
     "add_candidate_consecutive_metrics.sql": _candidate_consecutive_metrics_migration_satisfied,
+    "tomorrow_star_run_meta_json.sql": _tomorrow_star_run_meta_json_migration_satisfied,
     "add_current_hot_tables.sql": _current_hot_tables_migration_satisfied,
     "add_stock_daily_market_metrics.sql": _stock_daily_market_metrics_migration_satisfied,
     "add_daily_b1_check_market_metrics.sql": _daily_b1_check_market_metrics_migration_satisfied,

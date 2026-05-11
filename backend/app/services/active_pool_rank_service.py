@@ -6,9 +6,10 @@ compute path for rebuild/update jobs.
 """
 from __future__ import annotations
 
+from collections import deque
 import logging
 from datetime import date as date_class, datetime, timedelta
-from typing import Any, Iterable, Optional
+from typing import Any, Deque, Iterable, Optional
 
 import pandas as pd
 from sqlalchemy import func
@@ -224,6 +225,36 @@ class ActivePoolRankService:
 
         return pool_sets or None
 
+    @staticmethod
+    def _flush_rank_rows(
+        db,
+        *,
+        day: Optional[date_class],
+        rank_inputs: list[tuple[float, str]],
+        top_m: int,
+        n_turnover_days: int,
+        now: datetime,
+    ) -> tuple[int, Optional[str]]:
+        if day is None or not rank_inputs:
+            return 0, None
+
+        ranked = sorted(rank_inputs, key=lambda item: (-item[0], item[1]))
+        mappings = [
+            {
+                "trade_date": day,
+                "code": code,
+                "top_m": top_m,
+                "n_turnover_days": n_turnover_days,
+                "turnover_n": float(turnover_n),
+                "active_pool_rank": rank,
+                "in_active_pool": rank <= top_m,
+                "computed_at": now,
+            }
+            for rank, (turnover_n, code) in enumerate(ranked, start=1)
+        ]
+        db.bulk_insert_mappings(StockActivePoolRank, mappings)
+        return len(mappings), day.isoformat()
+
     def compute_for_dates(
         self,
         trade_dates: Iterable[Any],
@@ -306,30 +337,11 @@ class ActivePoolRankService:
                     StockDaily.trade_date >= start_date,
                     StockDaily.trade_date <= end_date,
                 )
-                .order_by(StockDaily.code.asc(), StockDaily.trade_date.asc())
-                .all()
-            )
-
-            if not rows:
-                return {"success": False, "error": "stock_daily 无可用数据"}
-
-            frame = pd.DataFrame(rows, columns=["code", "trade_date", "open", "close", "volume"])
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-            frame["code"] = frame["code"].map(self._normalize_code)
-            frame["signed_turnover"] = (frame["open"] + frame["close"]) / 2 * frame["volume"]
-            frame = frame.sort_values(["code", "trade_date"]).reset_index(drop=True)
-            frame["turnover_n"] = (
-                frame.groupby("code", sort=False)["signed_turnover"]
-                .rolling(n_turnover_days, min_periods=1)
-                .sum()
-                .reset_index(level=0, drop=True)
+                .order_by(StockDaily.trade_date.asc(), StockDaily.code.asc())
+                .yield_per(2000)
             )
 
             target_date_set = set(dates_to_compute)
-            target_frame = frame[frame["trade_date"].dt.date.isin(target_date_set)].copy()
-            if target_frame.empty:
-                return {"success": False, "error": "目标交易日无 stock_daily 数据"}
-
             db.query(StockActivePoolRank).filter(
                 StockActivePoolRank.trade_date.in_(dates_to_compute),
                 StockActivePoolRank.top_m == top_m,
@@ -338,26 +350,65 @@ class ActivePoolRankService:
             db.flush()
 
             now = utc_now()
-            mappings: list[dict[str, Any]] = []
+            rolling_windows: dict[str, Deque[float]] = {}
+            rolling_sums: dict[str, float] = {}
+            saw_rows = False
+            current_day: Optional[date_class] = None
+            current_rank_inputs: list[tuple[float, str]] = []
             computed_dates: list[str] = []
-            for day, day_frame in target_frame.groupby(target_frame["trade_date"].dt.date):
-                ranked = day_frame.sort_values(["turnover_n", "code"], ascending=[False, True]).reset_index(drop=True)
-                computed_dates.append(day.isoformat())
-                for index, row in ranked.iterrows():
-                    rank = index + 1
-                    mappings.append({
-                        "trade_date": day,
-                        "code": row["code"],
-                        "top_m": top_m,
-                        "n_turnover_days": n_turnover_days,
-                        "turnover_n": float(row["turnover_n"]),
-                        "active_pool_rank": rank,
-                        "in_active_pool": rank <= top_m,
-                        "computed_at": now,
-                    })
+            inserted_count = 0
+            for code, trade_date, open_price, close_price, volume in rows:
+                saw_rows = True
+                day = self._normalize_date(trade_date)
+                if day is None:
+                    continue
+                if current_day is not None and day != current_day:
+                    inserted, computed_day = self._flush_rank_rows(
+                        db,
+                        day=current_day,
+                        rank_inputs=current_rank_inputs,
+                        top_m=top_m,
+                        n_turnover_days=n_turnover_days,
+                        now=now,
+                    )
+                    inserted_count += inserted
+                    if computed_day:
+                        computed_dates.append(computed_day)
+                    current_rank_inputs = []
+                current_day = day
 
-            if mappings:
-                db.bulk_insert_mappings(StockActivePoolRank, mappings)
+                normalized_code = self._normalize_code(code)
+                signed_turnover = float(((open_price or 0.0) + (close_price or 0.0)) / 2 * (volume or 0.0))
+                window = rolling_windows.get(normalized_code)
+                if window is None:
+                    window = deque()
+                    rolling_windows[normalized_code] = window
+                    rolling_sums[normalized_code] = 0.0
+                if len(window) >= n_turnover_days:
+                    rolling_sums[normalized_code] -= window.popleft()
+                window.append(signed_turnover)
+                rolling_sums[normalized_code] += signed_turnover
+
+                if day in target_date_set:
+                    current_rank_inputs.append((rolling_sums[normalized_code], normalized_code))
+
+            if not saw_rows:
+                return {"success": False, "error": "stock_daily 无可用数据"}
+
+            inserted, computed_day = self._flush_rank_rows(
+                db,
+                day=current_day,
+                rank_inputs=current_rank_inputs,
+                top_m=top_m,
+                n_turnover_days=n_turnover_days,
+                now=now,
+            )
+            inserted_count += inserted
+            if computed_day:
+                computed_dates.append(computed_day)
+
+            if not computed_dates:
+                return {"success": False, "error": "目标交易日无 stock_daily 数据"}
             db.commit()
 
         self.invalidate(dates_to_compute)
@@ -376,7 +427,7 @@ class ActivePoolRankService:
             "success": True,
             "computed_dates": sorted(set(computed_dates), reverse=True),
             "computed_dates_count": len(set(computed_dates)),
-            "inserted_count": len(mappings),
+            "inserted_count": inserted_count,
             "top_m": top_m,
             "n_turnover_days": n_turnover_days,
             "source": "stock_daily",

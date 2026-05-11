@@ -353,3 +353,31 @@ def test_ensure_window_rebuilds_missing_trade_dates(test_db) -> None:
     assert result["failed_dates"] == []
     assert [item["pick_date"] for item in result["summary"]["history"]] == ["2026-05-08", "2026-05-07"]
     assert all(item["status"] == "success" for item in result["summary"]["history"])
+
+
+@pytest.mark.service
+def test_ensure_window_recalculates_consecutive_metrics_once(test_db, mocker) -> None:
+    test_db.add(Stock(code="600000", name="浦发银行", market="SH"))
+    for trade_date in [date(2026, 5, 7), date(2026, 5, 8)]:
+        test_db.add(
+            StockDaily(
+                code="600000",
+                trade_date=trade_date,
+                open=10.0,
+                close=10.2,
+                high=10.3,
+                low=9.9,
+                volume=100000,
+            )
+        )
+    test_db.commit()
+
+    service = CurrentHotService(test_db)
+    generate_mock = mocker.patch.object(service, "generate_for_trade_date", return_value={"status": "ok", "generated_count": 1, "skipped_count": 0})
+    recalc_mock = mocker.patch.object(CurrentHotService, "recalculate_consecutive_metrics", return_value={"candidate_rows": 2, "run_rows": 2, "days_with_consecutive_candidates": 1})
+
+    result = service.ensure_window(window_size=2)
+
+    assert result["failed_dates"] == []
+    assert generate_mock.call_count == 2
+    assert recalc_mock.call_count == 1

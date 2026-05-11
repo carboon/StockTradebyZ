@@ -15,6 +15,7 @@ backtest_quant.py
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import sys
@@ -34,6 +35,7 @@ from pipeline_core import TopTurnoverPoolBuilder  # noqa: E402
 from select_stock import load_config as load_preselect_config, load_raw_data  # noqa: E402
 from quant_reviewer import (  # noqa: E402
     load_config as load_review_config,
+    min_bars_required,
     prepare_review_frame,
     review_prepared_row,
 )
@@ -47,7 +49,29 @@ logging.basicConfig(
 logger = logging.getLogger("backtest_quant")
 
 
-def _prepare_base_frames(raw_data: dict[str, pd.DataFrame], n_turnover_days: int) -> dict[str, pd.DataFrame]:
+def _calc_backtest_warmup(cfg: dict[str, Any]) -> int:
+    warmup = 120
+    global_cfg = cfg.get("global", {})
+    min_bars_buffer = int(global_cfg.get("min_bars_buffer", 10))
+
+    b1_cfg = cfg.get("b1", {})
+    if b1_cfg.get("enabled", True):
+        warmup = max(warmup, int(b1_cfg.get("zx_m4", 371)) + min_bars_buffer)
+
+    brick_cfg = cfg.get("brick", {})
+    if brick_cfg.get("enabled", True):
+        warmup = max(
+            warmup,
+            int(brick_cfg.get("wma_long", 120)) * 5 + min_bars_buffer,
+            int(brick_cfg.get("zxdkx_m4", 114)) + min_bars_buffer,
+        )
+    return warmup
+
+
+def _prepare_base_frames(
+    raw_data: dict[str, pd.DataFrame],
+    n_turnover_days: int,
+) -> dict[str, pd.DataFrame]:
     prepared: dict[str, pd.DataFrame] = {}
     for code, df in raw_data.items():
         frame = df.copy()
@@ -261,7 +285,13 @@ def run_backtest(
     review_cfg = load_review_config(Path(review_config_path) if review_config_path else None)
     global_cfg = preselect_cfg.get("global", {})
     raw_dir = ROOT / global_cfg.get("data_dir", "./data/raw")
-    raw_data = load_raw_data(str(raw_dir))
+    warmup_bars = max(_calc_backtest_warmup(preselect_cfg), min_bars_required(review_cfg))
+    raw_data = load_raw_data(
+        str(raw_dir),
+        end_date=end_date,
+        start_date=start_date,
+        warmup_bars=warmup_bars,
+    )
 
     n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
     top_m = int(global_cfg.get("top_m", 2000))
@@ -305,6 +335,9 @@ def run_backtest(
 
     logger.info("读取股票数量: %d", len(raw_data))
     base_frames = _prepare_base_frames(raw_data, n_turnover_days=n_turnover_days)
+    raw_data.clear()
+    del raw_data
+    gc.collect()
     logger.info("基础预处理完成: %d", len(base_frames))
 
     pool_by_date = TopTurnoverPoolBuilder(top_m=top_m).build(base_frames)

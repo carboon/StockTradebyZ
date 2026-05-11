@@ -67,11 +67,12 @@ CREATE TABLE IF NOT EXISTS tomorrow_star_runs (
     trend_start_count INTEGER NOT NULL DEFAULT 0,
     reviewer VARCHAR(20),
     strategy_version VARCHAR(32),
-    window_size INTEGER NOT NULL DEFAULT 180,
+    window_size INTEGER NOT NULL DEFAULT 120,
     source VARCHAR(32),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     error_message TEXT,
+    meta_json JSON,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_tomorrow_star_runs_pick_date UNIQUE (pick_date)

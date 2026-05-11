@@ -69,6 +69,43 @@ def test_compute_active_pool_ranks_from_stock_daily(test_db) -> None:
 
 
 @pytest.mark.service
+def test_compute_active_pool_ranks_streams_across_multiple_dates(test_db) -> None:
+    start = date(2026, 5, 4)
+    target_dates = [date(2026, 5, 5), date(2026, 5, 6)]
+    _seed_daily_rows(test_db, "000001", start, [100, 100, 100])
+    _seed_daily_rows(test_db, "000002", start, [200, 200, 400])
+    _seed_daily_rows(test_db, "000003", start, [300, 50, 50])
+    test_db.commit()
+
+    with patch("app.services.active_pool_rank_service.SessionLocal", return_value=nullcontext(test_db)):
+        active_pool_rank_service.invalidate()
+        result = active_pool_rank_service.compute_for_dates(
+            target_dates,
+            top_m=2,
+            n_turnover_days=2,
+            force=True,
+        )
+        rankings = active_pool_rank_service.get_rankings(
+            start_date=target_dates[0],
+            end_date=target_dates[-1],
+            target_codes={"000001", "000002", "000003"},
+            top_m=2,
+            n_turnover_days=2,
+        )
+
+    assert result["success"] is True
+    assert result["computed_dates_count"] == 2
+    assert result["inserted_count"] == 6
+    assert rankings is not None
+    assert rankings["000002"][pd.Timestamp(target_dates[0])] == 1
+    assert rankings["000003"][pd.Timestamp(target_dates[0])] == 2
+    assert rankings["000001"][pd.Timestamp(target_dates[0])] == 3
+    assert rankings["000002"][pd.Timestamp(target_dates[1])] == 1
+    assert rankings["000001"][pd.Timestamp(target_dates[1])] == 2
+    assert rankings["000003"][pd.Timestamp(target_dates[1])] == 3
+
+
+@pytest.mark.service
 def test_analysis_service_active_pool_rank_uses_persisted_factors(test_db) -> None:
     trade_date = date(2026, 5, 6)
     test_db.add(Stock(code="600000", name="浦发银行", market="SH"))

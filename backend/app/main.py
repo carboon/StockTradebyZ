@@ -22,7 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 # 项目根目录
 ROOT = Path(__file__).parent.parent.parent
 BACKEND = Path(__file__).parent.parent
-DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE = ROOT / "data" / ".disable_tomorrow_star_bootstrap"
+DISABLE_STARTUP_PREWARM_FILE = ROOT / "data" / ".disable_startup_prewarm"
 LOG_DIR = ROOT / "data" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 BACKEND_LOG_FILE = LOG_DIR / "backend.log"
@@ -53,7 +53,6 @@ from sqlalchemy import text
 from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
 from app.schema_migrations import apply_startup_sql_migrations
-from app.services.tomorrow_star_window_service import ensure_tomorrow_star_window
 from app.services.tushare_service import TushareService
 
 # 测试环境检测：pytest 收集阶段尚未设置 PYTEST_CURRENT_TEST，
@@ -143,15 +142,6 @@ async def lifespan(app: FastAPI):
     logger.info("StockTrader API v%s 启动成功", app.version)
     logger.info("API 文档: http://%s:%s/docs", settings.host, settings.port)
 
-    async def bootstrap_tomorrow_star_window() -> None:
-        try:
-            await asyncio.to_thread(
-                ensure_tomorrow_star_window,
-                120,
-            )
-        except Exception as exc:
-            logger.exception("明日之星 120 日窗口补齐启动失败: %s", exc)
-
     async def warm_stock_metadata_cache() -> None:
         try:
             warmed = await asyncio.to_thread(TushareService().warm_stock_list_cache)
@@ -166,7 +156,10 @@ async def lifespan(app: FastAPI):
         try:
             from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 
-            result = await asyncio.to_thread(diagnosis_history_cache_service.prewarm)
+            result = await asyncio.to_thread(
+                diagnosis_history_cache_service.prewarm,
+                generate_if_missing=False,
+            )
             logger.info(
                 "单股诊断历史缓存预热完成: success=%s count=%s failed=%s",
                 result.get("success"),
@@ -176,8 +169,7 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.exception("单股诊断历史缓存预热失败: %s", exc)
 
-    if not _TEST_MODE and not DISABLE_TOMORROW_STAR_BOOTSTRAP_FILE.exists():
-        asyncio.create_task(bootstrap_tomorrow_star_window())
+    if not _TEST_MODE and not DISABLE_STARTUP_PREWARM_FILE.exists():
         asyncio.create_task(warm_stock_metadata_cache())
         asyncio.create_task(warm_diagnosis_history_cache())
 
