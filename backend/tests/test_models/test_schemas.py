@@ -790,6 +790,7 @@ def test_kline_request_default_values():
     assert request.code == "600000"
     assert request.days == 120
     assert request.include_weekly is True
+    assert request.compact is False
 
 
 @pytest.mark.unit
@@ -810,6 +811,24 @@ def test_kline_request_custom_values():
     assert request.code == "600000"
     assert request.days == 60
     assert request.include_weekly is False
+    assert request.compact is False
+
+
+@pytest.mark.unit
+def test_kline_request_compact_mode():
+    data = {
+        "code": "600000",
+        "days": 60,
+        "include_weekly": False,
+        "compact": True,
+    }
+
+    request = KLineDataRequest(**data)
+
+    assert request.code == "600000"
+    assert request.days == 60
+    assert request.include_weekly is False
+    assert request.compact is True
 
 
 @pytest.mark.unit

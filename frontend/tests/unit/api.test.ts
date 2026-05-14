@@ -99,7 +99,7 @@ describe('api/index.ts', () => {
 
     await apiStock.getInfo('600000', { signal })
     await apiStock.search('浦发银行', 5, { signal })
-    await apiStock.getKline('600000', 60, false, { signal })
+    await apiStock.getKline('600000', 60, false, { signal, compact: true })
 
     expect(mockGet).toHaveBeenCalledWith('/v1/stock/600000', { signal, timeout: 10000 })
     expect(mockGet).toHaveBeenCalledWith('/v1/stock/search', {
@@ -109,7 +109,7 @@ describe('api/index.ts', () => {
     })
     expect(mockPost).toHaveBeenCalledWith(
       '/v1/stock/kline',
-      { code: '600000', days: 60, include_weekly: false },
+      { code: '600000', days: 60, include_weekly: false, compact: true },
       { signal, timeout: 45000 },
     )
   })
@@ -188,7 +188,11 @@ describe('api/index.ts', () => {
     await apiWatchlist.analyze(7, { signal })
 
     expect(mockGet).toHaveBeenNthCalledWith(1, '/v1/watchlist/', { signal, timeout: 20000 })
-    expect(mockGet).toHaveBeenNthCalledWith(2, '/v1/watchlist/7/analysis', { signal, timeout: 20000 })
+    expect(mockGet).toHaveBeenNthCalledWith(2, '/v1/watchlist/7/analysis', {
+      signal,
+      timeout: 20000,
+      params: { days: 5 },
+    })
     expect(mockPost).toHaveBeenCalledWith('/v1/watchlist/7/analyze', null, { signal, timeout: 45000 })
   })
 

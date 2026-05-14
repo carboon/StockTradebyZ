@@ -441,6 +441,37 @@ def test_get_kline_with_ma(test_client: TestClient, sample_kline_data: pd.DataFr
 
 
 @pytest.mark.api
+def test_get_kline_compact_mode_omits_extended_fields(test_client: TestClient, sample_kline_data: pd.DataFrame) -> None:
+    with patch("app.api.stock.analysis_service") as mock_analysis:
+        mock_analysis.load_stock_data.return_value = sample_kline_data
+
+        request_data = {
+            "code": "600000",
+            "days": 30,
+            "include_weekly": False,
+            "compact": True,
+        }
+
+        response = test_client.post("/api/v1/stock/kline", json=request_data)
+
+        assert response.status_code == 200
+        data = response.json()
+        first_day = data["daily"][0]
+
+        assert first_day["date"]
+        assert "open" in first_day
+        assert "high" in first_day
+        assert "low" in first_day
+        assert "close" in first_day
+        assert "volume" in first_day
+        assert "ma20" in first_day
+        assert "ma60" in first_day
+        assert "turnover_rate" not in first_day
+        assert "volume_ratio" not in first_day
+        assert "net_mf_amount" not in first_day
+
+
+@pytest.mark.api
 def test_get_kline_date_range(test_client: TestClient, sample_kline_data: pd.DataFrame) -> None:
     """
     测试指定天数获取K线数据

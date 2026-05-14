@@ -723,6 +723,7 @@ class KLineDataRequest(BaseModel):
     code: str
     days: int = 120
     include_weekly: bool = True
+    compact: bool = False
 
 
 class KLineDataPoint(BaseModel):

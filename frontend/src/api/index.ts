@@ -198,12 +198,14 @@ export const apiStock = {
     }),
 
   // 获取 K线数据
-  getKline: (code: string, days: number = 120, includeWeekly: boolean = true, options?: RequestOptions) =>
-    api.post<{ code: string; days: number; include_weekly: boolean }, KLineData>(
+  getKline: (code: string, days: number = 120, includeWeekly: boolean = true, options?: RequestOptions & { compact?: boolean }) => {
+    const { compact, ...requestOptions } = options || {}
+    return api.post<{ code: string; days: number; include_weekly: boolean; compact?: boolean }, KLineData>(
       '/v1/stock/kline',
-      { code, days, include_weekly: includeWeekly },
-      withRequestOptions(options, TIMEOUTS.long),
-    ),
+      { code, days, include_weekly: includeWeekly, compact },
+      withRequestOptions(requestOptions, TIMEOUTS.long),
+    )
+  },
 }
 
 export const apiAnalysis = {

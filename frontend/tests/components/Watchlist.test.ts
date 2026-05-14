@@ -260,8 +260,9 @@ describe('Watchlist.vue', () => {
     await flushPromises()
 
     expect(wrapper.vm.selectedStock?.id).toBe(1)
-    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.any(Object))
+    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.objectContaining({ compact: true }))
     expect(apiWatchlist.getAnalysis).toHaveBeenCalledWith(1, expect.any(Object))
+    expect(apiWatchlist.analyze).not.toHaveBeenCalled()
 
     const saved = JSON.parse(window.localStorage.getItem('stocktrade:watchlist:state:guest') || '{}')
     expect(saved.selectedStockId).toBe(1)
@@ -471,8 +472,8 @@ describe('Watchlist.vue', () => {
     await flushPromises()
 
     expect(mockChart.setOption).toHaveBeenCalled()
-    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.any(Object))
-    expect(apiStock.getKline).toHaveBeenCalledWith('600000', 120, false, expect.objectContaining({ timeoutMs: 20000 }))
+    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.objectContaining({ compact: true }))
+    expect(apiStock.getKline).toHaveBeenCalledWith('600000', 120, false, expect.objectContaining({ timeoutMs: 20000, compact: true }))
   })
 
   it('replaces chart options instead of merging stale series state', async () => {
@@ -515,21 +516,59 @@ describe('Watchlist.vue', () => {
     expect(option?.series?.[0]?.data).toHaveLength(30)
   })
 
+  it('keeps the 120-day range visible while background 60-day refresh completes', async () => {
+    window.localStorage.setItem('stocktrade:watchlist:chart-cache:v2:guest', JSON.stringify({
+      '600000': {
+        code: '600000',
+        days: 60,
+        cachedAt: Date.now(),
+        data: klineData,
+      },
+    }))
+
+    vi.mocked(apiStock.getKline).mockReset()
+    let resolveInitialRefresh: ((value: any) => void) | null = null
+    vi.mocked(apiStock.getKline)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveInitialRefresh = resolve
+      }) as any)
+      .mockResolvedValueOnce(fullKlineData as any)
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.vm.selectStock(watchlistItems[0])
+    await flushPromises()
+    await flushPromises()
+
+    let option = mockChart.setOption.mock.calls.at(-1)?.[0]
+    expect(option?.series?.[0]?.data).toHaveLength(120)
+
+    resolveInitialRefresh?.(klineData as any)
+    await flushPromises()
+    await flushPromises()
+
+    option = mockChart.setOption.mock.calls.at(-1)?.[0]
+    expect(option?.series?.[0]?.data).toHaveLength(120)
+  })
+
   it('formats chart tooltip from the underlying kline row data', async () => {
     const wrapper = mountComponent()
     await flushPromises()
 
     await wrapper.vm.selectStock(watchlistItems[0])
     await flushPromises()
+    await flushPromises()
 
     const option = mockChart.setOption.mock.calls.at(-1)?.[0]
     const formatter = option?.tooltip?.formatter
     expect(typeof formatter).toBe('function')
+    const dataIndex = (option?.series?.[0]?.data?.length || 1) - 1
 
     const html = formatter([
-      { seriesName: 'K线', axisValue: '2025-04-25', data: [10.2, 10.5, 10.1, 10.7], dataIndex: 119 },
-      { seriesName: 'MA20', axisValue: '2025-04-25', data: 10.156, dataIndex: 119 },
-      { seriesName: 'MA60', axisValue: '2025-04-25', data: 9.995, dataIndex: 119 },
+      { seriesName: 'K线', axisValue: '2025-04-25', data: [10.2, 10.5, 10.1, 10.7], dataIndex },
+      { seriesName: 'MA20', axisValue: '2025-04-25', data: 10.156, dataIndex },
+      { seriesName: 'MA60', axisValue: '2025-04-25', data: 9.995, dataIndex },
     ])
 
     expect(html).toContain('MA20: 10.15')

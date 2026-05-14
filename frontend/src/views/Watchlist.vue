@@ -922,9 +922,6 @@ async function selectStock(row: WatchlistItem) {
     loadAnalysis(row.id)
   ])
   if (requestId !== selectionSequence) return
-
-  // 自动触发分析，但不阻塞当前视图渲染
-  void analyzeNow()
 }
 
 function selectChartDays(days: number) {
@@ -943,6 +940,28 @@ function getWatchlistDisplayChartData(data: KLineData, requestedDays: number): K
   return {
     ...data,
     daily: data.daily.slice(-requestedDays),
+  }
+}
+
+function updateTrendDataFromChart(data: KLineData) {
+  const closes = data.daily.map((d) => d.close).filter((value) => Number.isFinite(value))
+  if (closes.length === 0) {
+    trendData.value = {
+      outlook: 'neutral',
+      support: null,
+      resistance: null,
+    }
+    return
+  }
+
+  const max = Math.max(...closes)
+  const min = Math.min(...closes)
+  const current = closes[closes.length - 1]
+
+  trendData.value = {
+    outlook: current > (max + min) / 2 ? 'bullish' : 'bearish',
+    support: min,
+    resistance: max,
   }
 }
 
@@ -968,25 +987,15 @@ async function loadChart(code: string) {
     }
 
     if (!data) {
-      data = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal })
+      data = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal, compact: true })
       cachedDays = INITIAL_CHART_DAYS
       setChartCache(code, data, INITIAL_CHART_DAYS)
     }
 
+    const displayData = getWatchlistDisplayChartData(data, requestedDays)
     await nextTick()
-    await renderChart(getWatchlistDisplayChartData(data, requestedDays))
-
-    // 简单计算支撑位和压力位
-    const closes = data.daily.map((d) => d.close)
-    const max = Math.max(...closes)
-    const min = Math.min(...closes)
-    const current = closes[closes.length - 1]
-
-    trendData.value = {
-      outlook: current > (max + min) / 2 ? 'bullish' : 'bearish',
-      support: min,
-      resistance: max,
-    }
+    await renderChart(displayData)
+    updateTrendDataFromChart(displayData)
     persistWatchlistState()
     if (usedCachedData) {
       queueInitialChartRefresh(code)
@@ -1010,21 +1019,18 @@ async function refreshInitialChartInBackground(code: string) {
   const signal = beginRequest('chartInitialRefresh')
   try {
     const requestedDays = watchlistChartDays.value
-    const latestData = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal, timeoutMs: 20000 })
+    const latestData = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal, timeoutMs: 20000, compact: true })
     if (selectedStock.value?.code !== code) return
 
     setChartCache(code, latestData, INITIAL_CHART_DAYS)
-    await renderChart(getWatchlistDisplayChartData(latestData, requestedDays))
 
-    const closes = latestData.daily.map((d) => d.close)
-    const max = Math.max(...closes)
-    const min = Math.min(...closes)
-    const current = closes[closes.length - 1]
-    trendData.value = {
-      outlook: current > (max + min) / 2 ? 'bullish' : 'bearish',
-      support: min,
-      resistance: max,
+    if (watchlistChartDays.value > INITIAL_CHART_DAYS) {
+      return
     }
+
+    const displayData = getWatchlistDisplayChartData(latestData, requestedDays)
+    await renderChart(displayData)
+    updateTrendDataFromChart(displayData)
     persistWatchlistState()
   } catch (error) {
     if (isRequestCanceled(error)) return
@@ -1043,21 +1049,13 @@ function queueFullChartRefresh(code: string, requestedDays: number, currentDays:
 async function refreshFullChartInBackground(code: string, requestedDays: number) {
   const signal = beginRequest('chartExtended')
   try {
-    const fullData = await apiStock.getKline(code, FULL_CHART_DAYS, false, { signal, timeoutMs: 20000 })
+    const fullData = await apiStock.getKline(code, FULL_CHART_DAYS, false, { signal, timeoutMs: 20000, compact: true })
     if (selectedStock.value?.code !== code || watchlistChartDays.value !== requestedDays) return
 
     setChartCache(code, fullData, FULL_CHART_DAYS)
-    await renderChart(getWatchlistDisplayChartData(fullData, requestedDays))
-
-    const closes = fullData.daily.map((d) => d.close)
-    const max = Math.max(...closes)
-    const min = Math.min(...closes)
-    const current = closes[closes.length - 1]
-    trendData.value = {
-      outlook: current > (max + min) / 2 ? 'bullish' : 'bearish',
-      support: min,
-      resistance: max,
-    }
+    const displayData = getWatchlistDisplayChartData(fullData, requestedDays)
+    await renderChart(displayData)
+    updateTrendDataFromChart(displayData)
     persistWatchlistState()
   } catch (error) {
     if (isRequestCanceled(error)) return

@@ -10,6 +10,7 @@ from typing import Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -184,13 +185,18 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
     from app.api.cache_decorators import build_kline_cache_key
     from app.cache import cache
 
-    cache_key = build_kline_cache_key(request.code, request.days, request.include_weekly)
+    cache_key = build_kline_cache_key(request.code, request.days, request.include_weekly, request.compact)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
+        if request.compact:
+            return JSONResponse(content=cached_result)
         return KLineResponse(**cached_result)
 
     result = await _get_kline_data_impl(request, db)
-    cache.set(cache_key, result.model_dump(mode="json"), ttl=300)
+    payload = result if request.compact else result.model_dump(mode="json")
+    cache.set(cache_key, payload, ttl=300)
+    if request.compact:
+        return JSONResponse(content=payload)
     return result
 
 
@@ -236,13 +242,24 @@ async def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineR
 
         daily_data = []
         for record in df.to_dict("records"):
+            base_point = {
+                "date": pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
+                "open": float(record["open"]),
+                "high": float(record["high"]),
+                "low": float(record["low"]),
+                "close": float(record["close"]),
+                "volume": float(record.get(vol_col, 0) or 0) if vol_col and not pd.isna(record.get(vol_col)) else 0.0,
+                "ma5": _normalize_numeric(record.get("ma5")),
+                "ma10": _normalize_numeric(record.get("ma10")),
+                "ma20": _normalize_numeric(record.get("ma20")),
+                "ma60": _normalize_numeric(record.get("ma60")),
+            }
+            if request.compact:
+                daily_data.append(base_point)
+                continue
+
             daily_data.append(KLineDataPoint(
-                date=pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
-                open=float(record["open"]),
-                high=float(record["high"]),
-                low=float(record["low"]),
-                close=float(record["close"]),
-                volume=float(record.get(vol_col, 0) or 0) if vol_col and not pd.isna(record.get(vol_col)) else 0.0,
+                **base_point,
                 turnover_rate=_normalize_numeric(record.get("turnover_rate")),
                 turnover_rate_f=_normalize_numeric(record.get("turnover_rate_f")),
                 volume_ratio=_normalize_numeric(record.get("volume_ratio")),
@@ -257,10 +274,6 @@ async def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineR
                 buy_elg_amount=_normalize_numeric(record.get("buy_elg_amount")),
                 sell_elg_amount=_normalize_numeric(record.get("sell_elg_amount")),
                 net_mf_amount=_normalize_numeric(record.get("net_mf_amount")),
-                ma5=_normalize_numeric(record.get("ma5")),
-                ma10=_normalize_numeric(record.get("ma10")),
-                ma20=_normalize_numeric(record.get("ma20")),
-                ma60=_normalize_numeric(record.get("ma60")),
             ))
 
         weekly_data = None
@@ -290,35 +303,55 @@ async def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineR
 
                 weekly_data = []
                 for record in weekly.to_dict("records"):
-                    weekly_data.append(KLineDataPoint(
-                        date=pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
-                        open=float(record["open"]),
-                        high=float(record["high"]),
-                        low=float(record["low"]),
-                        close=float(record["close"]),
-                        volume=float(record.get(vol_col, 0) or 0) if not pd.isna(record.get(vol_col)) else 0.0,
-                        turnover_rate=None,
-                        turnover_rate_f=None,
-                        volume_ratio=None,
-                        free_share=None,
-                        circ_mv=None,
-                        buy_sm_amount=None,
-                        sell_sm_amount=None,
-                        buy_md_amount=None,
-                        sell_md_amount=None,
-                        buy_lg_amount=None,
-                        sell_lg_amount=None,
-                        buy_elg_amount=None,
-                        sell_elg_amount=None,
-                        net_mf_amount=None,
-                        ma5=_normalize_numeric(record.get("ma5")),
-                        ma10=_normalize_numeric(record.get("ma10")),
-                        ma20=None,
-                        ma60=None,
-                    ))
+                    if request.compact:
+                        weekly_data.append({
+                            "date": pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
+                            "open": float(record["open"]),
+                            "high": float(record["high"]),
+                            "low": float(record["low"]),
+                            "close": float(record["close"]),
+                            "volume": float(record.get(vol_col, 0) or 0) if not pd.isna(record.get(vol_col)) else 0.0,
+                            "ma5": _normalize_numeric(record.get("ma5")),
+                            "ma10": _normalize_numeric(record.get("ma10")),
+                        })
+                    else:
+                        weekly_data.append(KLineDataPoint(
+                            date=pd.to_datetime(record["date"]).strftime("%Y-%m-%d"),
+                            open=float(record["open"]),
+                            high=float(record["high"]),
+                            low=float(record["low"]),
+                            close=float(record["close"]),
+                            volume=float(record.get(vol_col, 0) or 0) if not pd.isna(record.get(vol_col)) else 0.0,
+                            turnover_rate=None,
+                            turnover_rate_f=None,
+                            volume_ratio=None,
+                            free_share=None,
+                            circ_mv=None,
+                            buy_sm_amount=None,
+                            sell_sm_amount=None,
+                            buy_md_amount=None,
+                            sell_md_amount=None,
+                            buy_lg_amount=None,
+                            sell_lg_amount=None,
+                            buy_elg_amount=None,
+                            sell_elg_amount=None,
+                            net_mf_amount=None,
+                            ma5=_normalize_numeric(record.get("ma5")),
+                            ma10=_normalize_numeric(record.get("ma10")),
+                            ma20=None,
+                            ma60=None,
+                        ))
             except Exception:
                 # 如果周线计算失败，忽略周线数据
                 weekly_data = None
+
+        if request.compact:
+            return {
+                "code": code,
+                "name": None,
+                "daily": daily_data,
+                "weekly": weekly_data,
+            }
 
         return KLineResponse(
             code=code,

@@ -12,9 +12,9 @@ from app.cache import cache
 T = TypeVar('T')
 
 
-def build_kline_cache_key(code: str, days: int, include_weekly: bool) -> str:
+def build_kline_cache_key(code: str, days: int, include_weekly: bool, compact: bool = False) -> str:
     """构建 K线数据缓存键"""
-    return f"kline:{code}:{days}:{include_weekly}"
+    return f"kline:{code}:{days}:{include_weekly}:{compact}"
 
 
 def build_candidates_cache_key(date: str | None, limit: int) -> str:
@@ -56,7 +56,8 @@ def cached_kline(ttl: int = 300):
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         async def wrapper(code: str, days: int, include_weekly: bool = False, *args, **kwargs) -> T:
-            cache_key = build_kline_cache_key(code, days, include_weekly)
+            compact = bool(kwargs.get("compact", False))
+            cache_key = build_kline_cache_key(code, days, include_weekly, compact)
             result = cache.get(cache_key)
             if result is not None:
                 return result
@@ -151,10 +152,8 @@ def cached_stock_search(ttl: int = 600):
 
 def invalidate_stock_cache(code: str) -> None:
     """清除某只股票的相关缓存"""
-    # 清除 K线缓存
-    for days in [60, 90, 120, 180]:
-        for weekly in [True, False]:
-            cache.delete(build_kline_cache_key(code, days, weekly))
+    # 清除该股票所有 K线缓存，避免新增区间或返回模式后漏删
+    cache.delete_prefix(f"kline:{code}:")
 
     # 清除搜索缓存（需要扫描，实际生产中可以用 set 存储）
     # 这里简化处理，依赖 TTL 自动过期
