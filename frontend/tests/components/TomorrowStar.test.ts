@@ -236,18 +236,43 @@ describe('TomorrowStar.vue', () => {
       trade_date: '2024-01-15',
       snapshot_time: '2024-01-15T12:30:00',
       source_pick_date: '2024-01-15',
+      market_overview: {
+        summary: '中证500 上涨，放量上涨，站上5日线',
+        benchmark_name: '中证500',
+        benchmark_change_pct: 1.2,
+        items: [{ name: '中证500', summary: '中证500 上涨，放量上涨，站上5日线' }],
+      },
       items: [{
         code: '600000',
         name: '浦发银行',
+        open_price: 10.1,
+        midday_price: 10.4,
+        latest_price: 10.6,
+        change_pct: 2.1,
+        latest_change_pct: 3.0,
+        active_pool_rank: 16,
+        turnover_rate: 5.6,
+        volume_ratio: 1.8,
         b1_passed: true,
         verdict: 'PASS',
         signal_type: 'trend_start',
         score: 4.6,
+        benchmark_name: '中证500',
+        benchmark_change_pct: 1.2,
+        relative_market_status: '强于大盘',
+        relative_market_strength_pct: 1.8,
+        previous_analysis: {
+          verdict: 'PASS',
+          score: 4.2,
+          signal_type: 'trend_start',
+          comment: '昨日强度较好',
+        },
+        manager_note: '昨日趋势通过，今日继续强于大盘，适合持有并观察承接。',
         exit_plan: {
           action: 'take_profit_partial',
-          morning_state: '冲高回落',
-          afternoon_action: '靠近P75先兑现',
-          key_levels: { support: 10.2, resistance: 11.1 },
+          morning_state: 'strong_push',
+          afternoon_action: 'hold',
+          key_levels: { support: 10.2, resistance: 11.1, morning_low: 10.05 },
           reason: '放量后回落，下午观察承接',
         },
       }],
@@ -727,20 +752,19 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.middayRows[0].code).toBe('688001')
   })
 
-  it('hides midday analysis and skips intraday requests for normal users', async () => {
+  it('shows midday analysis for normal users but keeps admin actions hidden', async () => {
     const wrapper = mountComponent({ isAdmin: false })
     await flushPromises()
 
-    expect(wrapper.text()).not.toContain('中盘分析')
-    expect(apiAnalysis.getMiddayStatus).not.toHaveBeenCalled()
-    expect(apiAnalysis.getMiddayCurrent).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('中盘分析')
+    expect(apiAnalysis.getMiddayStatus).toHaveBeenCalled()
+    expect(apiAnalysis.getMiddayCurrent).toHaveBeenCalled()
 
     wrapper.vm.activeTab = 'midday-analysis'
     await flushPromises()
 
-    expect(wrapper.vm.activeTab).toBe('tomorrow-star')
-    expect(apiAnalysis.getCurrentHotMiddayStatus).not.toHaveBeenCalled()
-    expect(apiAnalysis.getCurrentHotMiddayCurrent).not.toHaveBeenCalled()
+    expect(wrapper.vm.activeTab).toBe('midday-analysis')
+    expect(wrapper.text()).not.toContain('手动生成')
   })
 
   it('formats midday exit plan fields for table and mobile list', async () => {
@@ -751,10 +775,16 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     const row = wrapper.vm.middayRows[0]
-    expect(wrapper.vm.getExitPlanActionLabel(row.exit_plan)).toBe('部分止盈')
+    expect(wrapper.vm.getExitPlanActionLabel(row.exit_plan)).toBe('分批止盈')
     expect(wrapper.vm.getExitPlanActionType(row.exit_plan.action)).toBe('primary')
-    expect(wrapper.vm.getMiddayPlanDetail(row)).toBe('支撑 10.20 / 压力 11.10 · 放量后回落，下午观察承接')
-    expect(wrapper.vm.getMiddayPlanBrief(row)).toContain('冲高回落 · 靠近P75先兑现')
-    expect(wrapper.vm.getMiddayRowComment(row)).toBe('放量后回落，下午观察承接')
+    expect(wrapper.vm.getMiddayPlanDetail(row)).toContain('关键价位：支撑 10.20 / 压力 11.10 / 上午低点 10.05')
+    expect(wrapper.vm.getMiddayPlanBrief(row)).toContain('上午推进顺畅')
+    expect(wrapper.vm.getMiddayRelativeMarketBrief(row)).toContain('强于大盘')
+    expect(wrapper.vm.getMiddayPreviousAnalysisBrief(row)).toContain('昨日 通过')
+    expect(wrapper.vm.getMiddayRowComment(row)).toContain('持仓建议：')
+    expect(wrapper.vm.getMiddayRowComment(row)).toContain('下午可继续持有')
+    expect(wrapper.vm.formatActivePoolRank(row.active_pool_rank)).toBe('16')
+    expect(wrapper.vm.formatTurnoverRate(row.turnover_rate)).toBe('5.60%')
+    expect(wrapper.vm.formatVolumeRatio(row.volume_ratio)).toBe('1.80')
   })
 })

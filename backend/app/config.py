@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     data_dir: Path = PROJECT_ROOT / "data"
     db_dir: Path = PROJECT_ROOT / "data" / "db"
     raw_data_dir: Path = PROJECT_ROOT / "data" / "raw"
+    intraday_raw_data_dir: Path = PROJECT_ROOT / "data" / "raw_intraday"
     candidates_dir: Path = PROJECT_ROOT / "data" / "candidates"
     review_dir: Path = PROJECT_ROOT / "data" / "review"
     kline_dir: Path = PROJECT_ROOT / "data" / "kline"

@@ -107,15 +107,63 @@
 
       <el-card v-if="selectedStock" class="detail-card">
         <template #header>
-              <div class="card-header">
-                <span class="stock-title">{{ selectedStock.code }} {{ selectedStock.name || '' }}</span>
-                <div class="header-actions">
-                  <el-button size="small" @click="goToDiagnosis(selectedStock.code)">
-                    单股诊断
-                  </el-button>
-                  <el-tag type="primary" effect="plain" size="small" class="analyzing-tag" :class="{ visible: analyzing }">
-                    分析中...
-                  </el-tag>
+              <div class="card-header card-header--chart">
+                <div class="chart-header-main">
+                  <div class="stock-identity">
+                    <div class="stock-line">
+                      <span class="stock-code">{{ selectedStock.code }}</span>
+                      <span v-if="selectedStock.name" class="stock-name">{{ selectedStock.name }}</span>
+                    </div>
+                    <div class="chart-meta">
+                      <span class="chart-title">重点观察 K线图</span>
+                      <span class="chart-subtitle">按最近交易日展示趋势区间</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="chart-toolbar">
+                  <div class="header-actions">
+                    <el-button size="small" @click="goToDiagnosis(selectedStock.code)">
+                      单股诊断
+                    </el-button>
+                    <el-tag type="primary" effect="plain" size="small" class="analyzing-tag" :class="{ visible: analyzing }">
+                      分析中...
+                    </el-tag>
+                  </div>
+                  <span class="chart-toolbar-label">观察区间</span>
+                  <div
+                    v-if="!isMobile"
+                    class="chart-range-switcher"
+                    role="tablist"
+                    aria-label="K线区间选择"
+                  >
+                    <button
+                      v-for="days in chartDayOptions"
+                      :key="days"
+                      type="button"
+                      class="chart-range-button"
+                      :class="{ 'is-active': watchlistChartDays === days }"
+                      :aria-pressed="watchlistChartDays === days"
+                      @click="selectChartDays(days)"
+                    >
+                      {{ days }}天
+                    </button>
+                  </div>
+                  <div v-else class="chart-range-mobile">
+                    <el-select
+                      :model-value="watchlistChartDays"
+                      size="small"
+                      class="chart-range-select"
+                      aria-label="K线区间选择"
+                      @change="selectChartDays"
+                    >
+                      <el-option
+                        v-for="days in chartDayOptions"
+                        :key="days"
+                        :label="`${days}天`"
+                        :value="days"
+                      />
+                    </el-select>
+                  </div>
                 </div>
               </div>
             </template>
@@ -552,6 +600,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { useAuthStore } from '@/store/auth'
 import type { ExitPlan, KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
 import type { ECharts } from 'echarts/core'
+import { buildKLineChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
 
 type ExitMetricItem = {
   key: string
@@ -566,10 +615,11 @@ const { isMobile } = useResponsive()
 const authStore = useAuthStore()
 const WATCHLIST_STATE_KEY_PREFIX = 'stocktrade:watchlist:state'
 const WATCHLIST_CACHE_TTL_MS = 5 * 60 * 1000
-const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache'
+const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache:v2'
 const WATCHLIST_CHART_CACHE_TTL_MS = 30 * 60 * 1000
 const INITIAL_CHART_DAYS = 60
 const FULL_CHART_DAYS = 120
+const chartDayOptions = [30, 60, 120] as const
 
 type WatchlistTrendState = {
   outlook: 'bullish' | 'bearish' | 'neutral'
@@ -611,6 +661,7 @@ const showEditDialog = ref(false)
 const addForm = ref({ code: '', reason: '', entryPrice: '', entryDate: '', positionRatio: '' })
 const editForm = ref({ id: 0, code: '', reason: '', entryPrice: '', entryDate: '', positionRatio: '' })
 const analyzing = ref(false)
+const watchlistChartDays = ref(120)
 
 // 缓存优化
 const chartDataCache = new Map<string, KLineData>()
@@ -621,7 +672,6 @@ const loadingAnalysis = ref(false)
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: ECharts | null = null
-let chartRuntimePromise: Promise<{ init: (dom: HTMLElement) => ECharts }> | null = null
 const requestControllers = new Map<string, AbortController>()
 let selectionSequence = 0
 
@@ -877,19 +927,41 @@ async function selectStock(row: WatchlistItem) {
   void analyzeNow()
 }
 
+function selectChartDays(days: number) {
+  if (watchlistChartDays.value === days) return
+  watchlistChartDays.value = days
+  if (selectedStock.value?.code) {
+    void loadChart(selectedStock.value.code)
+  }
+}
+
+function getWatchlistDisplayChartData(data: KLineData, requestedDays: number): KLineData {
+  if (requestedDays <= 0 || data.daily.length <= requestedDays) {
+    return data
+  }
+
+  return {
+    ...data,
+    daily: data.daily.slice(-requestedDays),
+  }
+}
+
 async function loadChart(code: string) {
   const signal = beginRequest('chart')
   loadingChart.value = true
 
   try {
+    const requestedDays = watchlistChartDays.value
     let data = chartDataCache.get(code)
     let cachedDays = chartDataDaysCache.get(code) || 0
+    let usedCachedData = Boolean(data)
 
     if (!data) {
       const persistent = loadChartCache(code)
       if (persistent) {
         data = persistent.data
         cachedDays = persistent.days
+        usedCachedData = true
         chartDataCache.set(code, persistent.data)
         chartDataDaysCache.set(code, persistent.days)
       }
@@ -902,7 +974,7 @@ async function loadChart(code: string) {
     }
 
     await nextTick()
-    await renderChart(data)
+    await renderChart(getWatchlistDisplayChartData(data, requestedDays))
 
     // 简单计算支撑位和压力位
     const closes = data.daily.map((d) => d.close)
@@ -916,7 +988,10 @@ async function loadChart(code: string) {
       resistance: max,
     }
     persistWatchlistState()
-    queueFullChartRefresh(code, cachedDays)
+    if (usedCachedData) {
+      queueInitialChartRefresh(code)
+    }
+    queueFullChartRefresh(code, requestedDays, cachedDays)
   } catch (error: any) {
     if (isRequestCanceled(error)) return
     console.error('加载K线图失败:', error)
@@ -926,20 +1001,53 @@ async function loadChart(code: string) {
   }
 }
 
-function queueFullChartRefresh(code: string, currentDays: number) {
-  if (currentDays >= FULL_CHART_DAYS) return
+function queueInitialChartRefresh(code: string) {
   if (selectedStock.value?.code !== code) return
-  void refreshFullChartInBackground(code)
+  void refreshInitialChartInBackground(code)
 }
 
-async function refreshFullChartInBackground(code: string) {
+async function refreshInitialChartInBackground(code: string) {
+  const signal = beginRequest('chartInitialRefresh')
+  try {
+    const requestedDays = watchlistChartDays.value
+    const latestData = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal, timeoutMs: 20000 })
+    if (selectedStock.value?.code !== code) return
+
+    setChartCache(code, latestData, INITIAL_CHART_DAYS)
+    await renderChart(getWatchlistDisplayChartData(latestData, requestedDays))
+
+    const closes = latestData.daily.map((d) => d.close)
+    const max = Math.max(...closes)
+    const min = Math.min(...closes)
+    const current = closes[closes.length - 1]
+    trendData.value = {
+      outlook: current > (max + min) / 2 ? 'bullish' : 'bearish',
+      support: min,
+      resistance: max,
+    }
+    persistWatchlistState()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('后台刷新K线失败:', error)
+  } finally {
+    finishRequest('chartInitialRefresh', signal)
+  }
+}
+
+function queueFullChartRefresh(code: string, requestedDays: number, currentDays: number) {
+  if (requestedDays < FULL_CHART_DAYS || currentDays >= FULL_CHART_DAYS) return
+  if (selectedStock.value?.code !== code) return
+  void refreshFullChartInBackground(code, requestedDays)
+}
+
+async function refreshFullChartInBackground(code: string, requestedDays: number) {
   const signal = beginRequest('chartExtended')
   try {
     const fullData = await apiStock.getKline(code, FULL_CHART_DAYS, false, { signal, timeoutMs: 20000 })
-    if (selectedStock.value?.code !== code) return
+    if (selectedStock.value?.code !== code || watchlistChartDays.value !== requestedDays) return
 
     setChartCache(code, fullData, FULL_CHART_DAYS)
-    await renderChart(fullData)
+    await renderChart(getWatchlistDisplayChartData(fullData, requestedDays))
 
     const closes = fullData.daily.map((d) => d.close)
     const max = Math.max(...closes)
@@ -987,119 +1095,18 @@ async function loadAnalysis(id: number) {
 async function renderChart(data: KLineData) {
   if (!chartRef.value) return
 
-  const { init } = await loadChartRuntime()
+  const { initChart } = await loadKLineChartRuntime()
 
   if (!chartInstance) {
-    chartInstance = init(chartRef.value)
+    chartInstance = initChart(chartRef.value)
   }
 
-  const dates = data.daily.map((d) => d.date)
-  const values = data.daily.map((d) => [d.open, d.close, d.low, d.high])
-  const ma20 = data.daily.map((d) => d.ma20)
-  const ma60 = data.daily.map((d) => d.ma60)
-  const option = {
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      formatter: (params: Array<{ seriesName: string; axisValue: string; data: number[] | number | null }>) => {
-        const lines = [params[0]?.axisValue || '-']
+  const option = buildKLineChartOption({
+    data,
+    movingAverages: ['ma20', 'ma60'],
+  })
 
-        for (const item of params) {
-          if (item.seriesName === 'K线' && Array.isArray(item.data)) {
-            const [open, close, low, high] = item.data
-            lines.push(`开盘: ${formatChartNumber(open)}`)
-            lines.push(`收盘: ${formatChartNumber(close)}`)
-            lines.push(`最低: ${formatChartNumber(low)}`)
-            lines.push(`最高: ${formatChartNumber(high)}`)
-            continue
-          }
-
-          lines.push(`${item.seriesName}: ${formatChartNumber(item.data)}`)
-        }
-
-        return lines.join('<br/>')
-      },
-    },
-    grid: [
-      { left: '8%', right: '8%', top: '10%', height: '65%' },
-      { left: '8%', right: '8%', top: '80%', height: '15%' },
-    ],
-    xAxis: [
-      { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false } },
-      { type: 'category', data: dates, gridIndex: 1, axisLabel: { fontSize: 10 } },
-    ],
-    yAxis: [
-      { scale: true, gridIndex: 0 },
-      { scale: true, gridIndex: 1, splitLine: { show: false } },
-    ],
-    dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
-    ],
-    series: [
-      {
-        name: 'K线',
-        type: 'candlestick',
-        data: values,
-        itemStyle: {
-          color: '#ef5350',
-          color0: '#26a69a',
-          borderColor: '#ef5350',
-          borderColor0: '#26a69a',
-        },
-      },
-      {
-        name: 'MA20',
-        type: 'line',
-        data: ma20,
-        smooth: true,
-        lineStyle: { width: 1, color: '#2980b9' },
-        symbol: 'none',
-      },
-      {
-        name: 'MA60',
-        type: 'line',
-        data: ma60,
-        smooth: true,
-        lineStyle: { width: 1, color: '#8e44ad' },
-        symbol: 'none',
-      },
-    ],
-  }
-
-  chartInstance.setOption(option)
-}
-
-function formatChartNumber(value: number[] | number | null | undefined) {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
-    return '-'
-  }
-  return value.toFixed(2)
-}
-
-async function loadChartRuntime() {
-  if (!chartRuntimePromise) {
-    chartRuntimePromise = (async () => {
-      const [{ use, init }, charts, components, renderers] = await Promise.all([
-        import('echarts/core'),
-        import('echarts/charts'),
-        import('echarts/components'),
-        import('echarts/renderers'),
-      ])
-
-      use([
-        charts.CandlestickChart,
-        charts.LineChart,
-        components.TooltipComponent,
-        components.GridComponent,
-        components.DataZoomComponent,
-        renderers.CanvasRenderer,
-      ])
-
-      return { init }
-    })()
-  }
-
-  return chartRuntimePromise
+  chartInstance.setOption(option, true)
 }
 
 async function addToWatchlist() {
@@ -1946,6 +1953,137 @@ async function refreshAnalysisInBackground(id: number) {
     }
   }
 
+  .card-header--chart {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 20px;
+    row-gap: 12px;
+  }
+
+  .chart-header-main {
+    min-width: 0;
+  }
+
+  .stock-identity {
+    display: grid;
+    gap: 8px;
+  }
+
+  .stock-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .stock-code {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1f2937;
+  }
+
+  .stock-name {
+    font-size: 14px;
+    color: #526275;
+  }
+
+  .chart-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .chart-title {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #edf5ff 0%, #f5f9ff 100%);
+    color: #35516f;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    box-shadow: inset 0 0 0 1px rgba(138, 164, 194, 0.2);
+  }
+
+  .chart-subtitle {
+    font-size: 12px;
+    line-height: 1.4;
+    color: #7b8794;
+    white-space: nowrap;
+  }
+
+  .chart-toolbar {
+    display: grid;
+    justify-items: end;
+    row-gap: 8px;
+  }
+
+  .chart-toolbar-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #8090a3;
+    white-space: nowrap;
+  }
+
+  .chart-range-switcher {
+    display: inline-flex;
+    align-items: center;
+    justify-self: end;
+    min-height: 34px;
+    padding: 3px;
+    border: 1px solid #d8e2ec;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  }
+
+  .chart-range-button {
+    min-width: 60px;
+    height: 28px;
+    padding: 0 14px;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    color: #5b6f86;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 28px;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+
+    &:hover {
+      color: #24364a;
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    &:focus-visible {
+      outline: 2px solid rgba(29, 78, 216, 0.28);
+      outline-offset: 1px;
+    }
+
+    &.is-active {
+      color: #1d4ed8;
+      background: #ffffff;
+      box-shadow: 0 8px 18px rgba(148, 163, 184, 0.22);
+      transform: translateY(-1px);
+    }
+  }
+
+  .chart-range-mobile {
+    display: grid;
+    justify-items: start;
+    gap: 8px;
+  }
+
+  .chart-range-select {
+    width: 120px;
+  }
+
   .detail-card {
     .el-divider {
       margin: 20px 0;
@@ -2393,6 +2531,22 @@ async function refreshAnalysisInBackground(id: number) {
         justify-content: space-between;
         flex-wrap: wrap;
       }
+    }
+
+    .card-header--chart {
+      grid-template-columns: 1fr;
+    }
+
+    .chart-meta {
+      gap: 8px;
+    }
+
+    .chart-subtitle {
+      white-space: normal;
+    }
+
+    .chart-toolbar {
+      justify-items: start;
     }
 
     .chart-container {

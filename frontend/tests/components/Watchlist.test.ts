@@ -22,6 +22,7 @@ vi.mock('echarts/core', () => ({
 }))
 
 vi.mock('echarts/charts', () => ({
+  BarChart: {},
   CandlestickChart: {},
   LineChart: {},
 }))
@@ -29,6 +30,7 @@ vi.mock('echarts/charts', () => ({
 vi.mock('echarts/components', () => ({
   DataZoomComponent: {},
   GridComponent: {},
+  LegendComponent: {},
   TooltipComponent: {},
 }))
 
@@ -452,8 +454,8 @@ describe('Watchlist.vue', () => {
     expect(wrapper.vm.trendData.outlook).toBe('neutral')
   })
 
-  it('uses persistent chart cache before requesting fresh data', async () => {
-    window.localStorage.setItem('stocktrade:watchlist:chart-cache', JSON.stringify({
+  it('uses persistent chart cache before requesting fresh data and still refreshes from api', async () => {
+    window.localStorage.setItem('stocktrade:watchlist:chart-cache:v2:guest', JSON.stringify({
       '600000': {
         code: '600000',
         days: 60,
@@ -468,10 +470,52 @@ describe('Watchlist.vue', () => {
     await wrapper.vm.selectStock(watchlistItems[0])
     await flushPromises()
 
+    expect(mockChart.setOption).toHaveBeenCalled()
+    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.any(Object))
     expect(apiStock.getKline).toHaveBeenCalledWith('600000', 120, false, expect.objectContaining({ timeoutMs: 20000 }))
   })
 
-  it('formats MA values in chart tooltip with two decimals', async () => {
+  it('replaces chart options instead of merging stale series state', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.vm.selectStock(watchlistItems[0])
+    await flushPromises()
+
+    const lastCall = mockChart.setOption.mock.calls.at(-1)
+    expect(lastCall?.[1]).toBe(true)
+  })
+
+  it('does not enable zoom controls in watchlist chart', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.vm.selectStock(watchlistItems[0])
+    await flushPromises()
+
+    const option = mockChart.setOption.mock.calls.at(-1)?.[0]
+    expect(option?.dataZoom).toBeUndefined()
+  })
+
+  it('supports 30/60/120 day chart ranges like diagnosis and slices chart data by range', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await wrapper.vm.selectStock(watchlistItems[0])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('30天')
+    expect(wrapper.text()).toContain('60天')
+    expect(wrapper.text()).toContain('120天')
+
+    wrapper.vm.selectChartDays(30)
+    await flushPromises()
+
+    const option = mockChart.setOption.mock.calls.at(-1)?.[0]
+    expect(option?.series?.[0]?.data).toHaveLength(30)
+  })
+
+  it('formats chart tooltip from the underlying kline row data', async () => {
     const wrapper = mountComponent()
     await flushPromises()
 
@@ -483,13 +527,13 @@ describe('Watchlist.vue', () => {
     expect(typeof formatter).toBe('function')
 
     const html = formatter([
-      { seriesName: 'K线', axisValue: '2025-04-25', data: [10.2, 10.5, 10.1, 10.7] },
-      { seriesName: 'MA20', axisValue: '2025-04-25', data: 10.156 },
-      { seriesName: 'MA60', axisValue: '2025-04-25', data: 9.995 },
+      { seriesName: 'K线', axisValue: '2025-04-25', data: [10.2, 10.5, 10.1, 10.7], dataIndex: 119 },
+      { seriesName: 'MA20', axisValue: '2025-04-25', data: 10.156, dataIndex: 119 },
+      { seriesName: 'MA60', axisValue: '2025-04-25', data: 9.995, dataIndex: 119 },
     ])
 
-    expect(html).toContain('MA20: 10.16')
-    expect(html).toContain('MA60: 9.99')
+    expect(html).toContain('MA20: 10.15')
+    expect(html).toContain('MA60: 10.00')
     expect(html).toContain('开盘: 10.20')
     expect(html).toContain('收盘: 10.50')
   })

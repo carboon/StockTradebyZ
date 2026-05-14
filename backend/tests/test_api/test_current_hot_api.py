@@ -1,9 +1,11 @@
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
+from app.config import settings
 from app.models import (
     CurrentHotAnalysisResult,
     CurrentHotCandidate,
@@ -325,6 +327,33 @@ def test_generate_current_hot_creates_daily_rows(test_client_with_db: Any) -> No
 def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any) -> None:
     trade_date = date(2026, 5, 8)
     _seed_stock_history(test_client_with_db, "600000", trade_date, days=90, base=10.0)
+    test_client_with_db.db.add(
+        CurrentHotAnalysisResult(
+            pick_date=trade_date,
+            code="600000",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.2,
+            signal_type="trend_start",
+            comment="ok",
+            turnover_rate=8.2,
+            volume_ratio=2.4,
+            details_json={},
+        )
+    )
+    test_client_with_db.db.add(
+        StockActivePoolRank(
+            trade_date=trade_date,
+            code="600000",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=120000.0,
+            active_pool_rank=12,
+            in_active_pool=True,
+        )
+    )
+    test_client_with_db.db.commit()
 
     fake_now = datetime(2026, 5, 8, 12, 30, tzinfo=ASIA_SHANGHAI)
     fake_quote = pd.DataFrame(
@@ -338,16 +367,42 @@ def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any
                 "vol": 250000,
                 "amount": 3100000,
                 "trade_time": "2026-05-08 12:29:30",
-            }
+            },
+            {"ts_code": "000905.SH", "trade_date": "20260507", "close": 5000, "vol": 1000000},
         ]
     )
+    fake_index_daily = pd.DataFrame(
+        [
+            {"ts_code": "000905.SH", "trade_date": "20260508", "close": 5020, "vol": 1050000},
+        ]
+    )
+    fake_quote = pd.concat(
+        [
+            fake_quote,
+            pd.DataFrame(
+                [
+                    {"ts_code": "000905.SH", "open": 5010, "close": 5030, "vol": 1400000},
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
 
-    with patch("app.api.analysis.ensure_tushare_ready", return_value=None), patch(
+    with patch("app.api.analysis.ensure_tushare_ready_if_configured", return_value=None), patch(
         "app.services.current_hot_service.CurrentHotService._load_pool_config",
         return_value={"测试主题": {"浦发银行": "600000"}},
     ), patch(
         "app.services.current_hot_intraday_service.CurrentHotIntradayAnalysisService.now_shanghai",
         return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_eastmoney_trends",
+        return_value=pd.DataFrame([
+            {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 11:30:00", "time": "2026-05-08 11:30:00", "open": 12.0, "close": 12.4, "high": 12.5, "low": 11.9, "vol": 125000.0, "amount": 1550000.0, "pre_close": 10.92},
+            {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 12:29:00", "time": "2026-05-08 12:29:00", "open": 12.4, "close": 12.5, "high": 12.8, "low": 12.3, "vol": 125000.0, "amount": 1550000.0, "pre_close": 10.92},
+        ]),
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_tencent_minute_trends",
+        return_value=pd.DataFrame(),
     ), patch("app.services.current_hot_intraday_service.TushareService") as mock_tushare_cls, patch(
         "app.services.current_hot_intraday_service.analysis_service._build_b1_selector",
         return_value=_FakeSelector(),
@@ -367,6 +422,7 @@ def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any
         },
     ):
         mock_service = MagicMock()
+        mock_service.pro.index_daily.return_value = fake_index_daily
         mock_service.pro.rt_k.return_value = fake_quote
         mock_tushare_cls.return_value = mock_service
         response = test_client_with_db.post("/api/v1/analysis/current-hot/intraday/generate")
@@ -381,3 +437,248 @@ def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any
     )
     assert row.code == "600000"
     assert row.close_price == 12.5
+    assert row.details_json["midday_price"] == 12.4
+    assert row.details_json["turnover_rate"] == 8.2
+    assert row.details_json["volume_ratio"] == 2.4
+    assert row.details_json["active_pool_rank"] == 12
+
+
+def test_generate_current_hot_intraday_rebuilds_from_local_raw_cache(
+    test_client_with_db: Any,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    trade_date = date(2026, 5, 8)
+    monkeypatch.setattr(settings, "intraday_raw_data_dir", tmp_path / "raw_intraday")
+    _seed_stock_history(test_client_with_db, "600000", trade_date, days=90, base=10.0)
+    test_client_with_db.db.add(
+        CurrentHotAnalysisResult(
+            pick_date=trade_date,
+            code="600000",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.2,
+            signal_type="trend_start",
+            comment="ok",
+            turnover_rate=8.2,
+            volume_ratio=2.4,
+            details_json={},
+        )
+    )
+    test_client_with_db.db.add(
+        StockActivePoolRank(
+            trade_date=trade_date,
+            code="600000",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=120000.0,
+            active_pool_rank=12,
+            in_active_pool=True,
+        )
+    )
+    test_client_with_db.db.commit()
+
+    fake_now = datetime(2026, 5, 8, 12, 30, tzinfo=ASIA_SHANGHAI)
+    fake_index_daily = pd.DataFrame(
+        [
+            {"ts_code": "000905.SH", "trade_date": "20260508", "close": 5020, "vol": 1050000},
+        ]
+    )
+    minute_rows = pd.DataFrame([
+        {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 11:30:00", "time": "2026-05-08 11:30:00", "open": 12.0, "close": 12.4, "high": 12.5, "low": 11.9, "vol": 125000.0, "amount": 1550000.0, "pre_close": 10.92},
+        {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 12:29:00", "time": "2026-05-08 12:29:00", "open": 12.4, "close": 12.5, "high": 12.8, "low": 12.3, "vol": 125000.0, "amount": 1550000.0, "pre_close": 10.92},
+    ])
+
+    with patch("app.api.analysis.ensure_tushare_ready_if_configured", return_value=None), patch(
+        "app.services.current_hot_service.CurrentHotService._load_pool_config",
+        return_value={"测试主题": {"浦发银行": "600000"}},
+    ), patch(
+        "app.services.current_hot_intraday_service.CurrentHotIntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_eastmoney_trends",
+        return_value=minute_rows,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_tencent_minute_trends",
+        return_value=pd.DataFrame(),
+    ), patch("app.services.current_hot_intraday_service.TushareService") as mock_tushare_cls, patch(
+        "app.services.current_hot_intraday_service.analysis_service._build_b1_selector",
+        return_value=_FakeSelector(),
+    ), patch(
+        "app.services.current_hot_intraday_service.analysis_service._quant_review_for_date",
+        return_value={
+            "score": 5.8,
+            "verdict": "PASS",
+            "signal_type": "trend_start",
+            "comment": "ok",
+            "signal_reasoning": None,
+            "scores": {},
+            "trend_reasoning": None,
+            "position_reasoning": None,
+            "volume_reasoning": None,
+            "abnormal_move_reasoning": None,
+        },
+    ):
+        mock_service = MagicMock()
+        mock_service.token = ""
+        mock_service.pro.index_daily.return_value = fake_index_daily
+        mock_service.pro.rt_k.return_value = pd.DataFrame()
+        mock_tushare_cls.return_value = mock_service
+        first = test_client_with_db.post("/api/v1/analysis/current-hot/intraday/generate?date=2026-05-08")
+        assert first.status_code == 200
+
+    with patch("app.api.analysis.ensure_tushare_ready_if_configured", return_value=None), patch(
+        "app.services.current_hot_service.CurrentHotService._load_pool_config",
+        return_value={"测试主题": {"浦发银行": "600000"}},
+    ), patch(
+        "app.services.current_hot_intraday_service.CurrentHotIntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_eastmoney_trends",
+        return_value=pd.DataFrame(),
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_tencent_minute_trends",
+        return_value=pd.DataFrame(),
+    ), patch("app.services.current_hot_intraday_service.TushareService") as mock_tushare_cls, patch(
+        "app.services.current_hot_intraday_service.analysis_service._build_b1_selector",
+        return_value=_FakeSelector(),
+    ), patch(
+        "app.services.current_hot_intraday_service.analysis_service._quant_review_for_date",
+        return_value={
+            "score": 5.8,
+            "verdict": "PASS",
+            "signal_type": "trend_start",
+            "comment": "ok",
+            "signal_reasoning": None,
+            "scores": {},
+            "trend_reasoning": None,
+            "position_reasoning": None,
+            "volume_reasoning": None,
+            "abnormal_move_reasoning": None,
+        },
+    ):
+        mock_service = MagicMock()
+        mock_service.token = ""
+        mock_service.pro.index_daily.return_value = fake_index_daily
+        mock_service.pro.rt_k.return_value = pd.DataFrame()
+        mock_tushare_cls.return_value = mock_service
+        second = test_client_with_db.post("/api/v1/analysis/current-hot/intraday/generate?date=2026-05-08")
+
+    assert second.status_code == 200
+    payload = second.json()
+    assert payload["status"] == "ok"
+    row = (
+        test_client_with_db.db.query(CurrentHotIntradaySnapshot)
+        .filter(CurrentHotIntradaySnapshot.trade_date == trade_date)
+        .one()
+    )
+    assert row.close_price == 12.5
+    assert row.details_json["midday_price"] == 12.4
+
+
+def test_generate_current_hot_intraday_falls_back_to_tencent_minute_data(
+    test_client_with_db: Any,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    trade_date = date(2026, 5, 8)
+    monkeypatch.setattr(settings, "intraday_raw_data_dir", tmp_path / "raw_intraday")
+    _seed_stock_history(test_client_with_db, "600000", trade_date, days=90, base=10.0)
+    test_client_with_db.db.add(
+        CurrentHotAnalysisResult(
+            pick_date=trade_date,
+            code="600000",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.2,
+            signal_type="trend_start",
+            comment="ok",
+            turnover_rate=8.2,
+            volume_ratio=2.4,
+            details_json={},
+        )
+    )
+    test_client_with_db.db.add(
+        StockActivePoolRank(
+            trade_date=trade_date,
+            code="600000",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=120000.0,
+            active_pool_rank=12,
+            in_active_pool=True,
+        )
+    )
+    test_client_with_db.db.commit()
+
+    fake_now = datetime(2026, 5, 8, 12, 30, tzinfo=ASIA_SHANGHAI)
+    fake_index_daily = pd.DataFrame(
+        [
+            {"ts_code": "000905.SH", "trade_date": "20260508", "close": 5020, "vol": 1050000},
+        ]
+    )
+    tencent_rows = pd.DataFrame([
+        {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 09:30:00", "time": "2026-05-08 09:30:00", "open": 12.0, "close": 12.0, "high": 12.8, "low": 11.9, "vol": 5000.0, "amount": 62000.0, "pre_close": 10.92},
+        {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 11:30:00", "time": "2026-05-08 11:30:00", "open": 12.0, "close": 12.4, "high": 12.8, "low": 11.9, "vol": 120000.0, "amount": 1488000.0, "pre_close": 10.92},
+        {"ts_code": "600000.SH", "normalized_ts_code": "600000.SH", "code": "600000", "trade_time": "2026-05-08 12:29:00", "time": "2026-05-08 12:29:00", "open": 12.0, "close": 12.5, "high": 12.8, "low": 11.9, "vol": 125000.0, "amount": 1550000.0, "pre_close": 10.92},
+    ])
+
+    with patch("app.api.analysis.ensure_tushare_ready_if_configured", return_value=None), patch(
+        "app.services.current_hot_service.CurrentHotService._load_pool_config",
+        return_value={"测试主题": {"浦发银行": "600000"}},
+    ), patch(
+        "app.services.current_hot_intraday_service.CurrentHotIntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_eastmoney_trends",
+        return_value=pd.DataFrame(),
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_tencent_minute_trends",
+        return_value=tencent_rows,
+    ), patch("app.services.current_hot_intraday_service.TushareService") as mock_tushare_cls, patch(
+        "app.services.current_hot_intraday_service.analysis_service._build_b1_selector",
+        return_value=_FakeSelector(),
+    ), patch(
+        "app.services.current_hot_intraday_service.analysis_service._quant_review_for_date",
+        return_value={
+            "score": 5.8,
+            "verdict": "PASS",
+            "signal_type": "trend_start",
+            "comment": "ok",
+            "signal_reasoning": None,
+            "scores": {},
+            "trend_reasoning": None,
+            "position_reasoning": None,
+            "volume_reasoning": None,
+            "abnormal_move_reasoning": None,
+        },
+    ):
+        mock_service = MagicMock()
+        mock_service.token = ""
+        mock_service.pro.index_daily.return_value = fake_index_daily
+        mock_service.pro.rt_k.return_value = pd.DataFrame()
+        mock_tushare_cls.return_value = mock_service
+        response = test_client_with_db.post("/api/v1/analysis/current-hot/intraday/generate?date=2026-05-08")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    row = (
+        test_client_with_db.db.query(CurrentHotIntradaySnapshot)
+        .filter(CurrentHotIntradaySnapshot.trade_date == trade_date)
+        .one()
+    )
+    assert row.close_price == 12.5
+    assert row.details_json["midday_price"] == 12.4
+    assert (tmp_path / "raw_intraday" / "2026-05-08" / "tencent" / "600000.SH.json").exists()

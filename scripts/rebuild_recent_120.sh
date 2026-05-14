@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Shared bootstrap for local functional scripts.
-source "$SCRIPT_DIR/lib.sh"
-
-run_backend_script "rebuild_recent_120_data.py" "$@"

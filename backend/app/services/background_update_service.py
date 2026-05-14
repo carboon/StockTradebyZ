@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -146,6 +146,7 @@ class BackgroundLatestTradeDayUpdateService:
 
     DEFAULT_REVIEWER = "quant"
     DEFAULT_WINDOW_SIZE = 120
+    MIN_DAILY_METRIC_FILL_RATIO = 0.95
     BEIJING_TZ = ZoneInfo("Asia/Shanghai")
     RETRY_START_HOUR = 16
     RETRY_START_MINUTE = 30
@@ -227,6 +228,42 @@ class BackgroundLatestTradeDayUpdateService:
             latest = db.execute(select(func.max(StockDaily.trade_date))).scalar()
             return latest.isoformat() if latest else None
 
+    @classmethod
+    def _is_trade_date_metric_complete(
+        cls,
+        trade_date: Optional[str],
+        *,
+        min_fill_ratio: Optional[float] = None,
+    ) -> bool:
+        if not trade_date:
+            return False
+
+        ratio_threshold = float(
+            cls.MIN_DAILY_METRIC_FILL_RATIO if min_fill_ratio is None else min_fill_ratio
+        )
+        target_date = date.fromisoformat(trade_date)
+
+        with SessionLocal() as db:
+            row = db.execute(
+                select(
+                    func.count(StockDaily.id),
+                    func.count(StockDaily.turnover_rate),
+                    func.count(StockDaily.volume_ratio),
+                ).where(StockDaily.trade_date == target_date)
+            ).first()
+
+        if not row:
+            return False
+
+        row_count = int(row[0] or 0)
+        turnover_count = int(row[1] or 0)
+        volume_ratio_count = int(row[2] or 0)
+        if row_count <= 0:
+            return False
+
+        metric_count = min(turnover_count, volume_ratio_count)
+        return (metric_count / row_count) >= max(0.0, min(ratio_threshold, 1.0))
+
     def assess_freshness(self, target_trade_date: Optional[str] = None) -> TradeDayFreshnessStatus:
         normalized_target = target_trade_date.strip() if target_trade_date else None
         market_service = MarketService(token=self.token)
@@ -235,8 +272,20 @@ class BackgroundLatestTradeDayUpdateService:
         latest_csv_date = self.get_latest_csv_date()
         latest_candidate_date = analysis_service.get_latest_candidate_date()
         latest_result_date = analysis_service.get_latest_result_date()
+        db_metric_incomplete = bool(
+            latest_trade_date
+            and latest_db_date == latest_trade_date
+            and not self._is_trade_date_metric_complete(latest_trade_date)
+        )
 
-        db_needs_update = bool(latest_trade_date and (not latest_db_date or latest_db_date < latest_trade_date))
+        db_needs_update = bool(
+            latest_trade_date
+            and (
+                not latest_db_date
+                or latest_db_date < latest_trade_date
+                or db_metric_incomplete
+            )
+        )
         csv_needs_update = bool(latest_trade_date and (not latest_csv_date or latest_csv_date < latest_trade_date))
         candidate_needs_update = bool(
             latest_trade_date and (not latest_candidate_date or latest_candidate_date < latest_trade_date)
@@ -255,7 +304,12 @@ class BackgroundLatestTradeDayUpdateService:
         elif needs_update:
             reasons: list[str] = []
             if db_needs_update:
-                reasons.append(f"数据库最新日期 {latest_db_date or '-'} 落后于 {latest_trade_date}")
+                if db_metric_incomplete and latest_db_date == latest_trade_date:
+                    reasons.append(
+                        f"数据库最新日期 {latest_db_date or '-'} 的换手率/量比不完整，需重跑当日更新"
+                    )
+                else:
+                    reasons.append(f"数据库最新日期 {latest_db_date or '-'} 落后于 {latest_trade_date}")
             if csv_needs_update:
                 reasons.append(f"CSV 最新日期 {latest_csv_date or '-'} 落后于 {latest_trade_date}")
             if candidate_needs_update:

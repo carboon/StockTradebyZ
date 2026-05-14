@@ -9,7 +9,7 @@ import type { UserInfo, LoginResponse } from '@/types'
 
 const TOKEN_KEY = 'stocktrade_token'
 const WATCHLIST_STATE_KEY_PREFIX = 'stocktrade:watchlist:state'
-const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache'
+const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache:v2'
 
 export const useAuthStore = defineStore('auth', () => {
   // --- State ---

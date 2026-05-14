@@ -251,6 +251,48 @@
                   </div>
                 </div>
               </div>
+
+              <div class="panel-section">
+                <h3>中盘分析术语</h3>
+                <div class="definition-list">
+                  <div class="definition-item">
+                    <el-tag effect="plain">大盘中盘总览</el-tag>
+                    <p>顶部会展示代表性指数在中盘时段的方向、量能与 5 日线状态，例如“放量下跌”“缩量上涨”“站上 5 日线”。它不是结论本身，而是下午是否适合继续冒进的背景。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">11:30价</el-tag>
+                    <p>指上午收盘附近的定点价格，用来衡量“上午这半天”的真实强弱。它和当前价一起看，可以区分下午是继续强化，还是上午强、下午转弱。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">相对大盘强弱</el-tag>
+                    <p>比较个股当前涨跌与参考指数涨跌的差值。若个股在弱市中仍明显跑赢指数，说明有相对强度；若大盘不差但个股明显跑输，说明承接偏弱。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">上午走势状态</el-tag>
+                    <p>用中文概括上午盘面的结构特征，例如“盘中下探后收回”“冲高回落偏重”“向上推进顺畅”。重点是帮助你快速判断下午更像继续做趋势，还是优先做风控。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">持仓建议</el-tag>
+                    <p>把原先的内部策略码翻译成中文执行语言，例如“先减仓”“退出观望”“继续持有，暂不急于加仓”。它强调的是资金管理动作，而不是系统内部标签。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">执行参考</el-tag>
+                    <p>把关键价位、下午动作和原因拼成一句可执行说明，用来看“下午重点盯哪里、为什么这样做”。它相当于中盘时段的简版交易备忘录。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">关键价位</el-tag>
+                    <p>中盘会把“上午低点、上午高点、收复线、支撑位、压力位”等翻译后展示。上午低点常用来做防守参考，收复线常用来判断下午是否重新转强。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">热度 / 换手率 / 量比</el-tag>
+                    <p>热度用于看该股在活跃资金里的相对排名；换手率看筹码交换是否充分；量比看今天量能相对常态是否放大。三者合起来，用于判断下午是继续聚焦，还是容易冲高回落。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">基金经理视角补充</el-tag>
+                    <p>站在私募资金管理的角度，综合昨日结论、今日中盘强弱和大盘环境，强调的是仓位节奏、回撤控制和兑现优先级，而不是只看单一技术信号。</p>
+                  </div>
+                </div>
+              </div>
             </el-tab-pane>
 
             <el-tab-pane label="选股流程" name="flow">

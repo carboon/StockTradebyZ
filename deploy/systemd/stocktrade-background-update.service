@@ -16,7 +16,7 @@ RestartPreventExitStatus=1
 Environment=PYTHONUNBUFFERED=1
 
 # 通过 Docker backend 容器执行，避免宿主机单独处理 DATABASE_URL / Python 依赖
-ExecStart=/root/StockTradebyZ/deploy/scripts/run_background_update.sh
+ExecStart=/root/StockTradebyZ/update-data.sh daily
 
 # 当前服务器为 2 vCPU / 3.6GiB RAM，后台任务最多使用 1 个逻辑核、1.5GiB 内存
 Nice=10

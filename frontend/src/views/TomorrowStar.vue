@@ -545,9 +545,6 @@
                     <el-radio-button value="tomorrow-star">明日之星候选</el-radio-button>
                     <el-radio-button value="current-hot">当前热盘</el-radio-button>
                   </el-radio-group>
-                  <el-tag v-if="middayShowCachedHint" type="info" size="small" effect="plain">
-                    已展示缓存结果
-                  </el-tag>
                   <el-tag
                     v-if="middayTaskRunning"
                     size="small"
@@ -587,6 +584,19 @@
               <el-tag size="small" effect="plain">交易日 {{ middayTradeDateDisplay || '-' }}</el-tag>
               <el-tag size="small" effect="plain">快照 {{ middaySnapshotTimeDisplay || '-' }}</el-tag>
               <el-tag size="small" effect="plain">候选日期 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
+            </div>
+
+            <div v-if="middayMarketOverviewSummary" class="midday-market-overview midday-market-overview--mobile">
+              <div class="midday-market-overview__summary">{{ middayMarketOverviewSummary }}</div>
+              <div class="midday-market-overview__items">
+                <span
+                  v-for="item in middayMarketOverviewItems"
+                  :key="item.name"
+                  class="midday-market-chip"
+                >
+                  {{ item.summary || item.name }}
+                </span>
+              </div>
             </div>
 
             <div v-if="middayRows.length > 0 && middayCanViewData" class="mobile-analysis-list">
@@ -631,6 +641,22 @@
                   <div v-if="getMiddayPlanBrief(row) !== '-'" class="midday-mobile-plan">
                     {{ getMiddayPlanBrief(row) }}
                   </div>
+                  <div class="midday-mobile-prices">
+                    <span>开 {{ formatPlanPrice(row.open_price) }}</span>
+                    <span>11:30 {{ formatPlanPrice(row.midday_price) }}</span>
+                    <span>现 {{ formatPlanPrice(getMiddayLatestPrice(row)) }}</span>
+                  </div>
+                  <div class="midday-mobile-prices">
+                    <span>热度 {{ formatActivePoolRank(row.active_pool_rank) }}</span>
+                    <span>换手 {{ formatTurnoverRate(row.turnover_rate) }}</span>
+                    <span>量比 {{ formatVolumeRatio(row.volume_ratio) }}</span>
+                  </div>
+                  <div v-if="getMiddayRelativeMarketBrief(row) !== '-'" class="midday-mobile-relative">
+                    {{ getMiddayRelativeMarketBrief(row) }}
+                  </div>
+                  <div v-if="getMiddayPreviousAnalysisBrief(row) !== '-'" class="midday-mobile-prev">
+                    {{ getMiddayPreviousAnalysisBrief(row) }}
+                  </div>
                   <span class="mobile-analysis-item__comment">{{ getMiddayRowComment(row) }}</span>
                 </div>
               </button>
@@ -662,9 +688,6 @@
                     <el-radio-button value="tomorrow-star">明日之星候选</el-radio-button>
                     <el-radio-button value="current-hot">当前热盘</el-radio-button>
                   </el-radio-group>
-                  <el-tag v-if="middayShowCachedHint" type="info" size="small" effect="plain">
-                    已展示缓存结果
-                  </el-tag>
                   <el-tag
                     v-if="middayTaskRunning"
                     size="small"
@@ -716,6 +739,19 @@
               <el-tag size="small" effect="plain">候选日期 {{ middaySourcePickDateDisplay || '-' }}</el-tag>
             </div>
 
+            <div v-if="middayMarketOverviewSummary" class="midday-market-overview">
+              <div class="midday-market-overview__summary">{{ middayMarketOverviewSummary }}</div>
+              <div class="midday-market-overview__items">
+                <span
+                  v-for="item in middayMarketOverviewItems"
+                  :key="item.name"
+                  class="midday-market-chip"
+                >
+                  {{ item.summary || item.name }}
+                </span>
+              </div>
+            </div>
+
             <el-empty v-if="middayShowEmpty" description="暂无数据" :image-size="100">
               <div v-if="middayEmptyMessage" class="midday-empty-note">
                 {{ middayEmptyMessage }}
@@ -728,31 +764,32 @@
                 class="candidates-table midday-table"
                 height="520"
                 table-layout="auto"
+                @sort-change="handleMiddaySortChange"
               >
-                <el-table-column prop="code" label="代码" min-width="100" />
-                <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
-                <el-table-column label="B1" min-width="100" align="center">
+                <el-table-column prop="code" label="代码" min-width="100" sortable="custom" />
+                <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip sortable="custom" />
+                <el-table-column label="B1" min-width="100" align="center" prop="b1_passed" sortable="custom">
                   <template #default="{ row }">
                     <el-tag :type="getBooleanTagType(row.b1_passed)" size="small">
                       {{ getBooleanTagLabel(row.b1_passed) }}
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="score" label="总分" min-width="90" align="right">
+                <el-table-column prop="score" label="总分" min-width="90" align="right" sortable="custom">
                   <template #default="{ row }">
                     <el-tag :type="getScoreType(row.score)" size="small">
                       {{ typeof row.score === 'number' ? row.score.toFixed(1) : '-' }}
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="signal_type" label="信号类型" min-width="120" align="center">
+                <el-table-column prop="signal_type" label="信号类型" min-width="120" align="center" sortable="custom">
                   <template #default="{ row }">
                     <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                       {{ getSignalTypeLabel(row.signal_type) }}
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="verdict" label="结论" min-width="100" align="center">
+                <el-table-column prop="verdict" label="结论" min-width="100" align="center" sortable="custom">
                   <template #default="{ row }">
                     <el-tag :type="getVerdictTagType(row.verdict)" size="small">
                       {{ getVerdictLabel(row.verdict) }}
@@ -766,19 +803,66 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="change_pct" label="涨跌幅" min-width="100" align="right">
+                <el-table-column prop="open_price" label="开盘价" min-width="100" align="right" sortable="custom">
+                  <template #default="{ row }">
+                    {{ formatPlanPrice(row.open_price) }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="midday_price" label="11:30价" min-width="100" align="right" sortable="custom">
+                  <template #default="{ row }">
+                    {{ formatPlanPrice(row.midday_price) }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="latest_price" label="当前价" min-width="100" align="right" sortable="custom">
+                  <template #default="{ row }">
+                    {{ formatPlanPrice(getMiddayLatestPrice(row)) }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="change_pct" label="11:30涨跌" min-width="110" align="right" sortable="custom">
                   <template #default="{ row }">
                     <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
                       {{ typeof row.change_pct === 'number' ? `${row.change_pct.toFixed(2)}%` : '-' }}
                     </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="上午状态" min-width="130" show-overflow-tooltip>
+                <el-table-column prop="latest_change_pct" label="当前涨跌" min-width="110" align="right" sortable="custom">
                   <template #default="{ row }">
-                    {{ row.exit_plan?.morning_state || '-' }}
+                    <span :class="typeof row.latest_change_pct === 'number' ? (row.latest_change_pct > 0 ? 'text-up' : row.latest_change_pct < 0 ? 'text-down' : '') : ''">
+                      {{ typeof row.latest_change_pct === 'number' ? `${row.latest_change_pct.toFixed(2)}%` : '-' }}
+                    </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="下午策略" min-width="130" show-overflow-tooltip>
+                <el-table-column prop="active_pool_rank" label="热度" min-width="80" align="center" sortable="custom">
+                  <template #default="{ row }">
+                    {{ formatActivePoolRank(row.active_pool_rank) }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="turnover_rate" label="换手率" min-width="100" align="right" sortable="custom">
+                  <template #default="{ row }">
+                    {{ formatTurnoverRate(row.turnover_rate) }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="volume_ratio" label="量比" min-width="90" align="right" sortable="custom">
+                  <template #default="{ row }">
+                    {{ formatVolumeRatio(row.volume_ratio) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="大盘对照" min-width="170" show-overflow-tooltip prop="relative_market_strength_pct" sortable="custom">
+                  <template #default="{ row }">
+                    {{ getMiddayRelativeMarketBrief(row) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="昨日结论" min-width="180" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ getMiddayPreviousAnalysisBrief(row) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="上午走势状态" min-width="150" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ getMiddayMorningStateLabel(row) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="持仓建议" min-width="190" show-overflow-tooltip>
                   <template #default="{ row }">
                     <div class="midday-plan-action">
                       <el-tag
@@ -788,13 +872,18 @@
                       >
                         {{ getExitPlanActionLabel(row.exit_plan) }}
                       </el-tag>
-                      <span>{{ row.exit_plan?.afternoon_action || '-' }}</span>
+                      <span>{{ getMiddayAfternoonActionLabel(row) }}</span>
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="关键价位/计划说明" min-width="240" show-overflow-tooltip>
+                <el-table-column label="执行参考" min-width="280" show-overflow-tooltip>
                   <template #default="{ row }">
                     {{ getMiddayPlanDetail(row) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="基金经理视角补充" min-width="260" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    {{ getMiddayManagerNote(row) }}
                   </template>
                 </el-table-column>
                 <el-table-column label="说明" min-width="220" show-overflow-tooltip>
@@ -832,6 +921,7 @@ import type {
   IncrementalUpdateStatus,
   ExitPlan,
   IntradayAnalysisItem,
+  IntradayMarketOverviewItem,
   IntradayAnalysisResponse,
   IntradayAnalysisStatusResponse,
   TomorrowStarHistoryItem,
@@ -864,6 +954,27 @@ type CandidateSortState = {
   prop: CandidateSortProp | ''
   order: SortOrder
 }
+type MiddaySortProp =
+  | 'code'
+  | 'name'
+  | 'open_price'
+  | 'midday_price'
+  | 'latest_price'
+  | 'change_pct'
+  | 'latest_change_pct'
+  | 'turnover_rate'
+  | 'volume_ratio'
+  | 'active_pool_rank'
+  | 'benchmark_change_pct'
+  | 'relative_market_strength_pct'
+  | 'score'
+  | 'verdict'
+  | 'signal_type'
+  | 'b1_passed'
+type MiddaySortState = {
+  prop: MiddaySortProp | ''
+  order: SortOrder
+}
 type AnalysisDisplayRow = AnalysisResult | CurrentHotAnalysisResult | CurrentHotCandidate
 
 const analysisTabs: Array<{ name: DataTabKey; label: string }> = [
@@ -884,7 +995,6 @@ let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
 const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v10'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
-const MIDDAY_CACHE_TTL_MS = 60_000
 let incrementalPollTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
 
@@ -915,12 +1025,7 @@ const middayData = ref<IntradayAnalysisResponse>({
   total: 0,
 })
 const middayLoaded = ref(false)
-const middayShowCachedHint = ref(false)
-const middayCache = ref<Partial<Record<MiddaySourceKey, {
-  status: IntradayAnalysisStatusResponse
-  data: IntradayAnalysisResponse
-  timestamp: number
-}>>>({})
+const middaySort = ref<MiddaySortState>({ prop: '', order: null })
 
 type HistoryRow = {
   date: string
@@ -1053,8 +1158,14 @@ const showCachedHint = computed(() => hydratedFromCache.value && !incrementalUpd
 const showInitializationAlert = computed(() => authStore.isAdmin && configStore.tushareReady && !configStore.dataInitialized)
 const showInitializationEmpty = computed(() => showInitializationAlert.value && historyData.value.length === 0 && latestCandidates.value.length === 0)
 const currentHotShowInitializationEmpty = computed(() => showInitializationAlert.value && currentHotHistoryData.value.length === 0 && currentHotLatestCandidates.value.length === 0)
-const canUseMiddayAnalysis = computed(() => authStore.isAdmin)
-const middayRows = computed<IntradayAnalysisItem[]>(() => middayData.value.items || [])
+const canUseMiddayAnalysis = computed(() => authStore.isAuthenticated)
+const middayMarketOverviewSummary = computed(() => middayData.value.market_overview?.summary || '暂无大盘中盘总览')
+const middayMarketOverviewItems = computed<IntradayMarketOverviewItem[]>(() => middayData.value.market_overview?.items || [])
+const middayRows = computed<IntradayAnalysisItem[]>(() => {
+  const rows = [...(middayData.value.items || [])]
+  if (!middaySort.value.prop || !middaySort.value.order) return rows
+  return rows.sort((a, b) => compareMiddayRows(a, b, middaySort.value))
+})
 const middayCanViewData = computed(() => Boolean(middayData.value.has_data && middayRows.value.length > 0))
 const middayShowEmpty = computed(() => !loadingMidday.value && !middayCanViewData.value)
 const middayTaskRunning = computed(() => loadingMiddayAction.value)
@@ -2396,20 +2507,10 @@ async function loadMiddayData(forceRefresh: boolean = false) {
   if (!canUseMiddayAnalysis.value) return
   if (loadingMidday.value && !forceRefresh) return
 
-  const source = middaySource.value
-  const cached = middayCache.value[source]
-  if (!forceRefresh && cached && (Date.now() - cached.timestamp) < MIDDAY_CACHE_TTL_MS) {
-    middayStatus.value = cached.status
-    middayData.value = cached.data
-    middayLoaded.value = true
-    middayShowCachedHint.value = true
-    return
-  }
-
   const signal = beginRequest('middayData')
   loadingMidday.value = true
   try {
-    const [status, data] = source === 'current-hot'
+    const [status, data] = middaySource.value === 'current-hot'
       ? await Promise.all([
         apiAnalysis.getCurrentHotMiddayStatus({ signal }),
         apiAnalysis.getCurrentHotMiddayCurrent({ signal }),
@@ -2420,13 +2521,7 @@ async function loadMiddayData(forceRefresh: boolean = false) {
       ])
     middayStatus.value = status
     middayData.value = data
-    middayCache.value[source] = {
-      status,
-      data,
-      timestamp: Date.now(),
-    }
     middayLoaded.value = true
-    middayShowCachedHint.value = false
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load intraday analysis:', error)
@@ -2458,7 +2553,6 @@ async function runMiddayAdminAction(action: 'generate' | 'refresh') {
           ? await apiAnalysis.generateCurrentHotMidday()
           : await apiAnalysis.generateMidday()
       )
-    middayCache.value[middaySource.value] = undefined
     ElMessage.success(response.message || (action === 'refresh' ? '中盘分析已刷新' : '中盘分析已生成'))
     await loadMiddayData(true)
   } catch (error) {
@@ -2695,14 +2789,25 @@ function getTrendReversalLabel(row: IntradayAnalysisItem): string {
 
 function getExitPlanActionLabel(plan?: ExitPlan | null): string {
   if (!plan) return '-'
-  if (plan.action_label) return plan.action_label
+  if (plan.action_label) {
+    const raw = plan.action_label.trim()
+    const normalized: Record<string, string> = {
+      hold: '继续持有',
+      wash_observe: '谨慎持有',
+      hold_cautious: '谨慎持有',
+      take_profit_partial: '分批止盈',
+      trim: '先减仓',
+      exit: '退出观望',
+    }
+    return normalized[raw] || raw
+  }
   const labels: Record<string, string> = {
-    hold: '持有',
-    wash_observe: '洗盘观察',
+    hold: '继续持有',
+    wash_observe: '谨慎持有',
     hold_cautious: '谨慎持有',
-    take_profit_partial: '部分止盈',
-    trim: '减仓',
-    exit: '退出',
+    take_profit_partial: '分批止盈',
+    trim: '先减仓',
+    exit: '退出观望',
   }
   return labels[plan.action || ''] || plan.action || '-'
 }
@@ -2719,6 +2824,34 @@ function getExitPlanActionType(action?: string | null): string {
   return types[action || ''] || 'info'
 }
 
+function getMiddayLatestPrice(row: IntradayAnalysisItem): number | null {
+  return toFiniteNumber(row.latest_price ?? row.close_price)
+}
+
+function getMiddayMorningStateLabel(row: IntradayAnalysisItem): string {
+  const state = row.exit_plan?.morning_state
+  const map: Record<string, string> = {
+    wash_observe: '上午有回落但承接尚在，偏向震荡观察',
+    breakdown_risk: '上午跌破关键结构，走势偏弱',
+    distribution_risk: '上午冲高回落偏重，疑似资金兑现',
+    strong_push: '上午推进顺畅，强势特征明确',
+    normal_pullback: '上午正常回踩，等待下午确认方向',
+  }
+  return map[state || ''] || state || '-'
+}
+
+function getMiddayAfternoonActionLabel(row: IntradayAnalysisItem): string {
+  const action = row.exit_plan?.afternoon_action
+  const map: Record<string, string> = {
+    hold_if_reclaim: '下午若重新站稳关键线，可继续持有，暂不急于加仓',
+    exit: '下午若继续走弱，建议退出观望，先保护净值',
+    trim: '下午优先减仓，降低回撤暴露',
+    trim_if_break_low: '若跌破上午低点，建议先减仓，再观察是否回收',
+    hold: '下午可继续持有，重点观察量能和承接是否延续',
+  }
+  return map[action || ''] || getExitPlanActionLabel(row.exit_plan)
+}
+
 function formatPlanPrice(value?: number | string | null): string {
   const numeric = toFiniteNumber(value)
   return numeric === null ? '-' : numeric.toFixed(2)
@@ -2733,6 +2866,9 @@ function formatKeyLevels(levels?: Record<string, number | null> | null): string 
     structure_line: '结构线',
     trailing_stop: '移动止盈',
     stop_loss: '止损',
+    morning_low: '上午低点',
+    morning_high: '上午高点',
+    reclaim_line: '收复线',
   }
   const entries = Object.entries(levels)
     .filter(([, value]) => toFiniteNumber(value) !== null)
@@ -2744,30 +2880,123 @@ function getMiddayPlanDetail(row: IntradayAnalysisItem): string {
   const plan = row.exit_plan
   if (!plan) return '-'
   const parts = [
-    formatKeyLevels(plan.key_levels),
-    plan.reason?.trim() || '',
+    formatKeyLevels(plan.key_levels) !== '-' ? `关键价位：${formatKeyLevels(plan.key_levels)}` : '',
+    getMiddayAfternoonActionLabel(row),
+    plan.reason?.trim() ? `原因：${plan.reason.trim()}` : '',
   ].filter((item) => item && item !== '-')
-  return parts.length > 0 ? parts.join(' · ') : '-'
+  return parts.length > 0 ? parts.join('；') : '-'
 }
 
 function getMiddayPlanBrief(row: IntradayAnalysisItem): string {
   const plan = row.exit_plan
   if (!plan) return '-'
   const parts = [
-    plan.morning_state || '',
-    plan.afternoon_action || getExitPlanActionLabel(plan),
+    getMiddayMorningStateLabel(row),
+    getMiddayAfternoonActionLabel(row),
     formatKeyLevels(plan.key_levels) !== '-' ? formatKeyLevels(plan.key_levels) : '',
   ].filter((item) => item && item !== '-')
   return parts.length > 0 ? parts.join(' · ') : '-'
 }
 
+function getMiddayRelativeMarketBrief(row: IntradayAnalysisItem): string {
+  const status = row.relative_market_status?.trim()
+  const strength = toFiniteNumber(row.relative_market_strength_pct)
+  const benchmarkName = row.benchmark_name?.trim()
+  const benchmarkChange = toFiniteNumber(row.benchmark_change_pct)
+  if (!status) return '-'
+  const parts = [status]
+  if (strength !== null) parts.push(`超额 ${strength >= 0 ? '+' : ''}${strength.toFixed(2)}%`)
+  if (benchmarkName && benchmarkChange !== null) parts.push(`${benchmarkName} ${benchmarkChange >= 0 ? '+' : ''}${benchmarkChange.toFixed(2)}%`)
+  return parts.join(' · ')
+}
+
+function getMiddayPreviousAnalysisBrief(row: IntradayAnalysisItem): string {
+  const prev = row.previous_analysis
+  if (!prev) return '-'
+  const parts = [
+    prev.verdict ? `昨日 ${getVerdictLabel(prev.verdict)}` : '',
+    typeof prev.score === 'number' ? `评分 ${prev.score.toFixed(1)}` : '',
+    prev.signal_type ? getSignalTypeLabel(prev.signal_type) : '',
+  ].filter(Boolean)
+  const comment = prev.comment?.trim()
+  if (parts.length === 0 && !comment) return '-'
+  return comment ? `${parts.join(' / ')} · ${comment}` : parts.join(' / ')
+}
+
+function getMiddayManagerNote(row: IntradayAnalysisItem): string {
+  return row.manager_note?.trim() || '-'
+}
+
+function getMiddayPositionSuggestion(row: IntradayAnalysisItem): string {
+  const action = row.exit_plan?.afternoon_action || row.exit_plan?.action || ''
+  const relativeStrength = toFiniteNumber(row.relative_market_strength_pct)
+  const latestChange = toFiniteNumber(row.latest_change_pct)
+  const signal = row.signal_type || ''
+  const verdict = row.verdict || ''
+
+  if (action === 'exit') return '持仓建议：下午继续走弱时以退出观望为主，不建议加仓。'
+  if (action === 'trim' || action === 'trim_if_break_low') return '持仓建议：以控制回撤为主，先减仓，不建议逆势加仓。'
+  if (action === 'hold_if_reclaim') return '持仓建议：先观察是否收复关键线，收复后可继续持有，未收复前不急于加仓。'
+  if (action === 'hold' && relativeStrength !== null && relativeStrength >= 1 && latestChange !== null && latestChange > 0) {
+    return '持仓建议：可继续持有，若下午继续强于大盘且放量稳定，可考虑小幅顺势加仓。'
+  }
+  if (verdict === 'PASS' && signal === 'trend_start') {
+    return '持仓建议：以持有观察为主，只有下午继续转强并确认承接时，才考虑小幅加仓。'
+  }
+  return '持仓建议：先持有观察，以下午量价和关键位表现决定是否加仓或减仓。'
+}
+
 function getMiddayRowComment(row: IntradayAnalysisItem): string {
-  if (row.exit_plan?.reason?.trim()) return row.exit_plan.reason.trim()
-  if (isMiddayTrendReversal(row)) return 'B1 通过且信号转为趋势启动，存在趋势反转迹象'
-  if (row.signal_type === 'trend_start') return '趋势启动信号，建议结合单股诊断复核'
-  if (row.signal_type === 'distribution_risk') return '盘中风险信号，建议关注量价变化'
-  if (row.signal_type === 'rebound') return '盘中反弹延续，建议结合仓位管理判断'
-  return '点击查看单股诊断'
+  const reason = row.exit_plan?.reason?.trim()
+  const suggestion = getMiddayPositionSuggestion(row)
+  if (reason) return `${suggestion} 原因：${reason}`
+  if (row.manager_note?.trim()) return `${suggestion} ${row.manager_note.trim()}`
+  if (isMiddayTrendReversal(row)) return `${suggestion} 当前B1通过且趋势启动，重点观察下午能否继续强于大盘。`
+  if (row.signal_type === 'distribution_risk') return `${suggestion} 盘中有兑现迹象，重点盯紧量价是否继续转弱。`
+  if (row.signal_type === 'rebound') return `${suggestion} 当前更像反弹延续，暂不宜把反弹直接当成主升。`
+  return suggestion
+}
+
+function getMiddaySortableValue(row: IntradayAnalysisItem, prop: MiddaySortProp): number | string | boolean | null {
+  if (prop === 'code') return row.code
+  if (prop === 'name') return row.name || ''
+  if (prop === 'verdict') return getVerdictLabel(row.verdict)
+  if (prop === 'signal_type') return getSignalTypeLabel(row.signal_type)
+  if (prop === 'b1_passed') return row.b1_passed ?? null
+  if (prop === 'latest_price') return getMiddayLatestPrice(row)
+  return toFiniteNumber(row[prop as keyof IntradayAnalysisItem] as number | string | null | undefined)
+}
+
+function compareMiddayRows(a: IntradayAnalysisItem, b: IntradayAnalysisItem, state: MiddaySortState): number {
+  if (!state.prop || !state.order) return 0
+  const diff = compareNullableValues(
+    getMiddaySortableValue(a, state.prop),
+    getMiddaySortableValue(b, state.prop),
+    state.order,
+  )
+  return diff !== 0 ? diff : a.code.localeCompare(b.code)
+}
+
+function handleMiddaySortChange({ prop, order }: { prop: string, order: SortOrder }) {
+  const validProps: MiddaySortProp[] = [
+    'code',
+    'name',
+    'open_price',
+    'midday_price',
+    'latest_price',
+    'change_pct',
+    'latest_change_pct',
+    'benchmark_change_pct',
+    'relative_market_strength_pct',
+    'score',
+    'verdict',
+    'signal_type',
+    'b1_passed',
+  ]
+  middaySort.value = {
+    prop: validProps.includes(prop as MiddaySortProp) ? prop as MiddaySortProp : '',
+    order,
+  }
 }
 
 function buildHistorySignature(dates: string[], history: Array<HistoryLikeItem | HistoryRow>): string {
@@ -3631,6 +3860,53 @@ $space-lg: 32px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+}
+
+.midday-market-overview {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #f4fbf7, #eef8ff);
+  border: 1px solid #d8ecdf;
+}
+
+.midday-market-overview__summary {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.midday-market-overview__items {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.midday-market-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #475569;
+  font-size: 12px;
+}
+
+.midday-mobile-prices,
+.midday-mobile-relative,
+.midday-mobile-prev {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.midday-mobile-prices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 // 涨跌颜色

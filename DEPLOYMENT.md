@@ -133,15 +133,24 @@ docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up
 - 后端 API：`http://127.0.0.1:8000`
 - API 文档：`http://127.0.0.1:8000/docs`
 
-## 停服维护更新
+## 数据脚本入口
 
-仓库已提供统一停服维护脚本：
+仓库主入口已统一为：
 
 ```bash
-./maintenance.sh
+./update-data.sh daily
+./update-data.sh generate
+./update-data.sh intraday
+./update-data.sh repair daily
+./update-data.sh repair scores
 ```
 
-该脚本会停止对外服务、构建镜像、仅启动最小依赖、执行最近 120 交易日补数和校验，校验通过后再拉起完整服务。只读预热由服务启动后自行完成。
+说明：
+
+- `daily`：更新最新交易日或指定交易日的日线，并重建当日结果
+- `generate`：不拉新日线，只基于现有数据重建近 120 交易日窗口结果
+- `intraday`：11:30 后生成中盘快照，默认只取 `09:30~11:30`
+- `repair`：专项修复历史日线或历史评分结果
 
 ## 旧的在线更新入口
 

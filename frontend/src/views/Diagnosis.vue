@@ -654,6 +654,7 @@ import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import { useResponsive } from '@/composables/useResponsive'
+import { buildKLineChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
 
 const route = useRoute()
 const router = useRouter()
@@ -769,7 +770,6 @@ const isTomorrowStarMobileSource = computed(() => {
 })
 
 let chartInstance: ECharts | null = null
-let chartRuntimePromise: Promise<{ init: (dom: HTMLElement, theme?: string | object, opts?: object) => ECharts }> | null = null
 const diagnosisChartCache = new Map<string, KLineData>()
 const diagnosisChartCacheDays = new Map<string, number>()
 const requestControllers = new Map<string, AbortController>()
@@ -1243,148 +1243,18 @@ async function loadKlineData() {
 async function renderChart(data: KLineData) {
   if (!chartRef.value) return
 
-  const { init } = await loadDiagnosisChartRuntime()
+  const { initChart } = await loadKLineChartRuntime()
 
   if (!chartInstance) {
-    chartInstance = init(chartRef.value, undefined, { renderer: 'canvas' })
+    chartInstance = initChart(chartRef.value)
   }
 
-  const dates = data.daily.map((d) => d.date)
-  const values = data.daily.map((d) => [d.open, d.close, d.low, d.high])
-  const trendStartDateSet = new Set(trendStartDates.value)
-  const volumeBars = data.daily.map((d) => {
-    const isTrendStart = trendStartDateSet.has(d.date)
-    return {
-      value: d.volume,
-      itemStyle: { color: isTrendStart ? '#ef5350' : '#778899' },
-    }
+  const option: EChartsCoreOption = buildKLineChartOption({
+    data,
+    highlightedDates: trendStartDates.value,
+    movingAverages: ['ma5', 'ma10', 'ma20'],
+    extraLegendLabels: ['趋势启动'],
   })
-  const ma5 = data.daily.map((d) => d.ma5)
-  const ma10 = data.daily.map((d) => d.ma10)
-  const ma20 = data.daily.map((d) => d.ma20)
-
-  // 中国习惯：红涨绿跌
-  const option: EChartsCoreOption = {
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      formatter: (params: any) => {
-        if (!params || params.length === 0) return ''
-        const dataIndex = params[0].dataIndex
-        const date = dates[dataIndex]
-        const rowData = data.daily[dataIndex]
-
-        let result = `<b>${date}</b><br/>`
-
-        if (rowData) {
-          const change = ((rowData.close - rowData.open) / rowData.open * 100)
-          const changeText = change >= 0 ? '+' : ''
-          const changeColor = change >= 0 ? '#ef5350' : '#26a69a'
-
-          result += `开盘: ${rowData.open?.toFixed(2) || '-'}<br/>`
-          result += `收盘: ${rowData.close?.toFixed(2) || '-'}<br/>`
-          result += `最低: ${rowData.low?.toFixed(2) || '-'}<br/>`
-          result += `最高: ${rowData.high?.toFixed(2) || '-'}<br/>`
-          result += `涨跌: <span style="color:${changeColor}">${changeText}${change.toFixed(2)}%</span><br/>`
-
-          if (rowData.ma5 != null && !isNaN(rowData.ma5)) {
-            result += `MA5: ${rowData.ma5.toFixed(2)}<br/>`
-          }
-          if (rowData.ma10 != null && !isNaN(rowData.ma10)) {
-            result += `MA10: ${rowData.ma10.toFixed(2)}<br/>`
-          }
-          if (rowData.ma20 != null && !isNaN(rowData.ma20)) {
-            result += `MA20: ${rowData.ma20.toFixed(2)}<br/>`
-          }
-
-          if (rowData.volume != null && !isNaN(rowData.volume)) {
-            result += `成交量: ${(rowData.volume / 10000).toFixed(2)}万`
-          }
-        }
-
-        return result
-      }
-    },
-    legend: {
-      data: ['K线', 'MA5', 'MA10', 'MA20', '趋势启动'],
-      top: 10,
-    },
-    grid: [
-      { left: '10%', right: '8%', top: '15%', height: '55%' },
-      { left: '10%', right: '8%', top: '75%', height: '15%' },
-    ],
-    xAxis: [
-      {
-        type: 'category',
-        data: dates,
-        gridIndex: 0,
-        axisLabel: { show: false },
-      },
-      {
-        type: 'category',
-        data: dates,
-        gridIndex: 1,
-        axisLabel: { fontSize: 10 },
-      },
-    ],
-    yAxis: [
-      {
-        scale: true,
-        gridIndex: 0,
-        splitLine: { show: true, lineStyle: { color: '#f0f0f0' } },
-      },
-      {
-        scale: true,
-        gridIndex: 1,
-        splitLine: { show: false },
-      },
-    ],
-    series: [
-      {
-        name: 'K线',
-        type: 'candlestick',
-        data: values,
-        // 中国习惯：红涨绿跌
-        itemStyle: {
-          color: '#ef5350',        // 阳线（涨）- 红色
-          color0: '#26a69a',       // 阴线（跌）- 绿色
-          borderColor: '#ef5350',  // 阳线边框 - 红色
-          borderColor0: '#26a69a', // 阴线边框 - 绿色
-        },
-      },
-      {
-        name: 'MA5',
-        type: 'line',
-        data: ma5,
-        smooth: true,
-        lineStyle: { width: 1 },
-        symbol: 'none',
-      },
-      {
-        name: 'MA10',
-        type: 'line',
-        data: ma10,
-        smooth: true,
-        lineStyle: { width: 1 },
-        symbol: 'none',
-      },
-      {
-        name: 'MA20',
-        type: 'line',
-        data: ma20,
-        smooth: true,
-        lineStyle: { width: 1 },
-        symbol: 'none',
-      },
-      {
-        name: '成交量',
-        type: 'bar',
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        data: volumeBars,
-      },
-    ],
-  }
 
   await nextTick()
   chartInstance.setOption(option, true)
@@ -1412,33 +1282,6 @@ async function refreshDiagnosisFullChartInBackground(code: string, requestedDays
   } finally {
     finishRequest('klineExtended', signal)
   }
-}
-
-async function loadDiagnosisChartRuntime() {
-  if (!chartRuntimePromise) {
-    chartRuntimePromise = (async () => {
-      const [{ use, init }, charts, components, renderers] = await Promise.all([
-        import('echarts/core'),
-        import('echarts/charts'),
-        import('echarts/components'),
-        import('echarts/renderers'),
-      ])
-
-      use([
-        charts.BarChart,
-        charts.CandlestickChart,
-        charts.LineChart,
-        components.TooltipComponent,
-        components.LegendComponent,
-        components.GridComponent,
-        renderers.CanvasRenderer,
-      ])
-
-      return { init }
-    })()
-  }
-
-  return chartRuntimePromise
 }
 
 async function loadHistoryData(refresh: boolean = false) {

@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
 import logging
+import multiprocessing
 import shutil
 import sys
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 import tushare as ts
@@ -61,6 +63,7 @@ from app.services.daily_batch_update_service import DailyBatchUpdateService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
 from app.schema_migrations import apply_startup_sql_migrations
+from app.utils.system_resources import detect_system_resources, recommend_process_workers
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
 logging.basicConfig(
@@ -105,6 +108,10 @@ RAW_CSV_SYNC_COLUMNS = [
     "net_mf_amount",
     "code",
 ]
+
+DEFAULT_AUTO_MAX_WORKERS = 4
+DEFAULT_RESERVE_CPUS = 1
+DEFAULT_MEMORY_PER_WORKER_MB = 900
 
 
 def parse_args() -> argparse.Namespace:
@@ -157,6 +164,29 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--diagnosis-limit", type=int, default=0, help="限制诊断重建股票数量，0 表示不限")
+    parser.add_argument(
+        "--workers",
+        default="auto",
+        help="补数并发进程数；默认 auto，根据 CPU/内存保守估算，也可填写 1/2/4 等整数",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=DEFAULT_AUTO_MAX_WORKERS,
+        help=f"auto 模式的最大并发进程数，默认 {DEFAULT_AUTO_MAX_WORKERS}",
+    )
+    parser.add_argument(
+        "--reserve-cpus",
+        type=int,
+        default=DEFAULT_RESERVE_CPUS,
+        help=f"auto 模式预留给系统/数据库的 CPU 核数，默认 {DEFAULT_RESERVE_CPUS}",
+    )
+    parser.add_argument(
+        "--memory-per-worker-mb",
+        type=int,
+        default=DEFAULT_MEMORY_PER_WORKER_MB,
+        help=f"auto 模式估算每个补数进程占用内存（MB），默认 {DEFAULT_MEMORY_PER_WORKER_MB}",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只输出计划，不执行清理、抓取和重建")
     parser.add_argument("--yes", action="store_true", help="确认执行清理和重建")
     return parser.parse_args()
@@ -642,33 +672,220 @@ def _update_db_metrics_from_frame(frame: pd.DataFrame) -> int:
     return len(mappings)
 
 
-def fetch_missing_metric_dates(pro: Any, trade_dates: list[str]) -> dict[str, Any]:
+def _dispose_inherited_engine() -> None:
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+
+
+def _metric_fetch_job(trade_date: str) -> dict[str, Any]:
+    _dispose_inherited_engine()
+    pro = ts.pro_api(settings.tushare_token)
+    frame = _fetch_trade_date_metric_frame(pro, trade_date)
+    updated_count = _update_db_metrics_from_frame(frame)
+    return {
+        "ok": not frame.empty,
+        "trade_date": trade_date,
+        "record_count": int(len(frame.index)),
+        "updated_count": updated_count,
+    }
+
+
+def _trade_date_fetch_job(trade_date: str) -> dict[str, Any]:
+    _dispose_inherited_engine()
+    with DailyBatchUpdateService() as service:
+        return service.update_trade_date(
+            trade_date,
+            source="recent_120_full_rebuild",
+            sync_raw_csv=False,
+        )
+
+
+def resolve_parallel_workers(
+    requested_workers: str | int,
+    *,
+    task_count: int,
+    max_workers: int,
+    reserve_cpus: int,
+    memory_per_worker_mb: int,
+) -> dict[str, Any]:
+    resources = detect_system_resources()
+    requested_text = str(requested_workers or "auto").strip().lower()
+    resolved_max_workers = max(1, int(max_workers or 1))
+
+    if task_count <= 1:
+        return {
+            "mode": "sequential",
+            "requested": requested_text,
+            "resolved_workers": 1,
+            "task_count": max(0, int(task_count)),
+            "parallel_enabled": False,
+            "reason": "task_count<=1",
+            "cpu_count": resources.cpu_count,
+            "total_memory_mb": resources.total_memory_mb,
+            "available_memory_mb": resources.available_memory_mb,
+            "max_workers": resolved_max_workers,
+        }
+
+    if requested_text in {"", "auto"}:
+        resolved_workers = recommend_process_workers(
+            resources,
+            max_workers=resolved_max_workers,
+            reserve_cpus=max(0, int(reserve_cpus)),
+            memory_per_worker_bytes=max(1, int(memory_per_worker_mb)) * 1024 * 1024,
+        )
+        mode = "auto"
+    else:
+        try:
+            manual_workers = max(1, int(requested_text))
+        except ValueError as exc:
+            raise SystemExit(f"--workers 参数非法: {requested_workers}") from exc
+        resolved_workers = min(manual_workers, resolved_max_workers)
+        mode = "manual"
+
+    resolved_workers = max(1, min(int(task_count), int(resolved_workers)))
+    return {
+        "mode": mode,
+        "requested": requested_text,
+        "resolved_workers": resolved_workers,
+        "task_count": int(task_count),
+        "parallel_enabled": resolved_workers > 1,
+        "reason": "resource_based" if mode == "auto" else "manual_override",
+        "cpu_count": resources.cpu_count,
+        "total_memory_mb": resources.total_memory_mb,
+        "available_memory_mb": resources.available_memory_mb,
+        "max_workers": resolved_max_workers,
+        "reserve_cpus": max(0, int(reserve_cpus)),
+        "memory_per_worker_mb": max(1, int(memory_per_worker_mb)),
+    }
+
+
+def summarize_update_mode(database_summary: dict[str, Any], fetch_plan: dict[str, Any], target_dates: list[str]) -> dict[str, Any]:
+    stock_daily_count = int(database_summary.get("stock_daily_count") or 0)
+    latest_stock_daily = database_summary.get("latest_stock_daily")
+    fetch_dates = fetch_plan.get("fetch_dates", []) or []
+
+    if stock_daily_count <= 0 or not latest_stock_daily:
+        mode = "full_bootstrap"
+        summary = "数据库无有效日线数据，执行近120日窗口全量补齐并重建派生结果"
+    elif fetch_dates:
+        mode = "incremental_backfill"
+        summary = f"检测到 {len(fetch_dates)} 个交易日缺口，补齐到最新日线后重建派生结果"
+    else:
+        mode = "rebuild_only"
+        summary = "近120日窗口数据完整，仅重建明日之星和当前热盘"
+
+    return {
+        "mode": mode,
+        "summary": summary,
+        "target_dates_count": len(target_dates),
+        "fetch_dates_count": len(fetch_dates),
+        "latest_stock_daily": latest_stock_daily,
+    }
+
+
+def _parallel_map_trade_dates(
+    trade_dates: list[str],
+    *,
+    workers: int,
+    label: str,
+    job: Callable[[str], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not trade_dates:
+        return [], []
+
+    if workers <= 1 or len(trade_dates) <= 1:
+        results: list[dict[str, Any]] = []
+        failures: list[str] = []
+        for index, trade_date in enumerate(trade_dates, start=1):
+            print(f"[{label} {index}/{len(trade_dates)}] fetch {trade_date}")
+            try:
+                result = job(trade_date)
+            except Exception as exc:
+                result = {"ok": False, "trade_date": trade_date, "error": str(exc)}
+                failures.append(trade_date)
+                print(f"[{label} {index}/{len(trade_dates)}] failed {trade_date}: {exc}")
+            else:
+                if not result.get("ok"):
+                    failures.append(trade_date)
+                    print(
+                        f"[{label} {index}/{len(trade_dates)}] failed {trade_date}: "
+                        f"{result.get('error') or result.get('message') or 'empty result'}"
+                    )
+            results.append(result)
+        return results, failures
+
+    print(f"[{label}] parallel fetch enabled: workers={workers}, tasks={len(trade_dates)}")
+    result_by_date: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    mp_context = multiprocessing.get_context("spawn")
+
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as executor:
+        futures = {
+            executor.submit(job, trade_date): trade_date
+            for trade_date in trade_dates
+        }
+        for index, future in enumerate(as_completed(futures), start=1):
+            trade_date = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {"ok": False, "trade_date": trade_date, "error": str(exc)}
+            result_by_date[trade_date] = result
+            if not result.get("ok"):
+                failures.append(trade_date)
+                print(
+                    f"[{label} {index}/{len(trade_dates)}] failed {trade_date}: "
+                    f"{result.get('error') or result.get('message') or 'empty result'}"
+                )
+            else:
+                print(f"[{label} {index}/{len(trade_dates)}] ok {trade_date}")
+
+    ordered_results = [result_by_date[item] for item in trade_dates if item in result_by_date]
+    return ordered_results, failures
+
+
+def fetch_missing_metric_dates(pro: Any, trade_dates: list[str], *, workers: int = 1) -> dict[str, Any]:
     if not trade_dates:
         return {"success": True, "fetched_dates": [], "failed_dates": [], "results": []}
 
-    fetched_dates: list[str] = []
-    failed_dates: list[str] = []
-    results: list[dict[str, Any]] = []
-    for index, trade_date in enumerate(trade_dates, start=1):
-        print(f"[metrics {index}/{len(trade_dates)}] fetch {trade_date}")
-        try:
-            frame = _fetch_trade_date_metric_frame(pro, trade_date)
-            updated_count = _update_db_metrics_from_frame(frame)
-            result = {
-                "ok": not frame.empty,
-                "trade_date": trade_date,
-                "record_count": int(len(frame.index)),
-                "updated_count": updated_count,
-            }
-            results.append(result)
-            if result["ok"]:
-                fetched_dates.append(trade_date)
-            else:
+    if workers <= 1 or len(trade_dates) <= 1:
+        fetched_dates: list[str] = []
+        failed_dates: list[str] = []
+        results: list[dict[str, Any]] = []
+        for index, trade_date in enumerate(trade_dates, start=1):
+            print(f"[metrics {index}/{len(trade_dates)}] fetch {trade_date}")
+            try:
+                frame = _fetch_trade_date_metric_frame(pro, trade_date)
+                updated_count = _update_db_metrics_from_frame(frame)
+                result = {
+                    "ok": not frame.empty,
+                    "trade_date": trade_date,
+                    "record_count": int(len(frame.index)),
+                    "updated_count": updated_count,
+                }
+                results.append(result)
+                if result["ok"]:
+                    fetched_dates.append(trade_date)
+                else:
+                    failed_dates.append(trade_date)
+            except Exception as exc:
                 failed_dates.append(trade_date)
-        except Exception as exc:
-            failed_dates.append(trade_date)
-            results.append({"ok": False, "trade_date": trade_date, "error": str(exc)})
-            print(f"[metrics {index}/{len(trade_dates)}] failed {trade_date}: {exc}")
+                results.append({"ok": False, "trade_date": trade_date, "error": str(exc)})
+                print(f"[metrics {index}/{len(trade_dates)}] failed {trade_date}: {exc}")
+    else:
+        results, failed_dates = _parallel_map_trade_dates(
+            trade_dates,
+            workers=workers,
+            label="metrics",
+            job=_metric_fetch_job,
+        )
+        fetched_dates = [
+            item["trade_date"]
+            for item in results
+            if item.get("ok") is True and item.get("trade_date")
+        ]
 
     return {
         "success": not failed_dates,
@@ -678,31 +895,26 @@ def fetch_missing_metric_dates(pro: Any, trade_dates: list[str]) -> dict[str, An
     }
 
 
-def fetch_missing_trade_dates(trade_dates: list[str], *, sync_csv: bool = True) -> dict[str, Any]:
+def fetch_missing_trade_dates(
+    trade_dates: list[str],
+    *,
+    sync_csv: bool = True,
+    workers: int = 1,
+) -> dict[str, Any]:
     if not trade_dates:
         return {"success": True, "fetched_dates": [], "failed_dates": [], "raw_csv_sync": {}}
 
-    fetched_dates: list[str] = []
-    failed_dates: list[str] = []
-    results: list[dict[str, Any]] = []
-    with DailyBatchUpdateService() as service:
-        for index, trade_date in enumerate(trade_dates, start=1):
-            print(f"[data {index}/{len(trade_dates)}] fetch {trade_date}")
-            try:
-                result = service.update_trade_date(
-                    trade_date,
-                    source="recent_120_full_rebuild",
-                    sync_raw_csv=False,
-                )
-                results.append(result)
-                if result.get("ok") is True:
-                    fetched_dates.append(trade_date)
-                else:
-                    failed_dates.append(trade_date)
-            except Exception as exc:
-                failed_dates.append(trade_date)
-                results.append({"ok": False, "trade_date": trade_date, "error": str(exc)})
-                print(f"[data {index}/{len(trade_dates)}] failed {trade_date}: {exc}")
+    results, failed_dates = _parallel_map_trade_dates(
+        trade_dates,
+        workers=workers,
+        label="data",
+        job=_trade_date_fetch_job,
+    )
+    fetched_dates = [
+        item["trade_date"]
+        for item in results
+        if item.get("ok") is True and item.get("trade_date")
+    ]
 
     raw_csv_sync: dict[str, Any] = {}
     if sync_csv and fetched_dates:
@@ -1054,11 +1266,31 @@ def main() -> int:
     target_dates = data_dates[-target_window:]
     stock_codes = get_stock_codes()
     preclean_existing_diagnosis_codes = collect_existing_diagnosis_codes()
+    database_summary = summarize_current_database()
 
     fetch_plan = {"fetch_dates": []}
     if not args.skip_data_fetch:
         print("[plan] checking csv/db completeness")
         fetch_plan = detect_data_fetch_plan(args, data_dates, stock_codes)
+
+    full_fetch_dates = fetch_plan.get("full_fetch_dates", fetch_plan.get("fetch_dates", []))
+    metric_fetch_dates = fetch_plan.get("metric_fetch_dates", [])
+    csv_sync_dates = fetch_plan.get("csv_sync_dates", fetch_plan.get("fetch_dates", []))
+    data_fetch_workers = resolve_parallel_workers(
+        args.workers,
+        task_count=len(full_fetch_dates),
+        max_workers=max(1, int(args.max_workers)),
+        reserve_cpus=max(0, int(args.reserve_cpus)),
+        memory_per_worker_mb=max(1, int(args.memory_per_worker_mb)),
+    )
+    metric_fetch_workers = resolve_parallel_workers(
+        args.workers,
+        task_count=len(metric_fetch_dates),
+        max_workers=max(1, int(args.max_workers)),
+        reserve_cpus=max(0, int(args.reserve_cpus)),
+        memory_per_worker_mb=max(1, int(args.memory_per_worker_mb)),
+    )
+    update_mode = summarize_update_mode(database_summary, fetch_plan, target_dates)
 
     diagnosis_codes_initial = resolve_diagnosis_codes(
         args.diagnosis_scope,
@@ -1067,9 +1299,10 @@ def main() -> int:
     )
 
     plan = {
-        "database": summarize_current_database(),
+        "database": database_summary,
         "schema_migrations": schema_result,
         "synced_stock_count": synced_stocks,
+        "update_mode": update_mode,
         "window_size": target_window,
         "warmup_trade_days": warmup_days,
         "data_date_range": [data_dates[0], data_dates[-1]] if data_dates else [],
@@ -1077,10 +1310,18 @@ def main() -> int:
         "target_dates_count": len(target_dates),
         "stock_codes_count": len(stock_codes),
         "data_fetch_dates_count": len(fetch_plan.get("fetch_dates", [])),
-        "full_fetch_dates_count": len(fetch_plan.get("full_fetch_dates", fetch_plan.get("fetch_dates", []))),
-        "metric_fetch_dates_count": len(fetch_plan.get("metric_fetch_dates", [])),
-        "csv_sync_dates_count": len(fetch_plan.get("csv_sync_dates", [])),
+        "full_fetch_dates_count": len(full_fetch_dates),
+        "metric_fetch_dates_count": len(metric_fetch_dates),
+        "csv_sync_dates_count": len(csv_sync_dates),
         "data_fetch_dates_sample": fetch_plan.get("fetch_dates", [])[:20],
+        "parallel_fetch": {
+            "requested_workers": str(args.workers),
+            "max_workers": max(1, int(args.max_workers)),
+            "reserve_cpus": max(0, int(args.reserve_cpus)),
+            "memory_per_worker_mb": max(1, int(args.memory_per_worker_mb)),
+            "data_fetch": data_fetch_workers,
+            "metric_fetch": metric_fetch_workers,
+        },
         "diagnosis_scope": args.diagnosis_scope,
         "diagnosis_codes_count": len(diagnosis_codes_initial),
         "diagnosis_codes_sample": diagnosis_codes_initial[:20],
@@ -1097,11 +1338,16 @@ def main() -> int:
     results: dict[str, Any] = {"plan": plan}
 
     if not args.skip_data_fetch:
-        full_fetch_dates = fetch_plan.get("full_fetch_dates", fetch_plan.get("fetch_dates", []))
-        metric_fetch_dates = fetch_plan.get("metric_fetch_dates", [])
-        csv_sync_dates = fetch_plan.get("csv_sync_dates", fetch_plan.get("fetch_dates", []))
-        results["data_fetch"] = fetch_missing_trade_dates(full_fetch_dates, sync_csv=False)
-        results["metric_fetch"] = fetch_missing_metric_dates(pro, metric_fetch_dates)
+        results["data_fetch"] = fetch_missing_trade_dates(
+            full_fetch_dates,
+            sync_csv=False,
+            workers=int(data_fetch_workers.get("resolved_workers") or 1),
+        )
+        results["metric_fetch"] = fetch_missing_metric_dates(
+            pro,
+            metric_fetch_dates,
+            workers=int(metric_fetch_workers.get("resolved_workers") or 1),
+        )
         if not results["data_fetch"].get("success") or not results["metric_fetch"].get("success"):
             print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
             return 1

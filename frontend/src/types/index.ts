@@ -131,6 +131,37 @@ export interface ExitPlan {
   rules?: string[]
 }
 
+export interface PreviousIntradayAnalysisSummary {
+  pick_date?: string | null
+  verdict?: 'PASS' | 'WATCH' | 'FAIL' | string | null
+  score?: number | null
+  signal_type?: string | null
+  comment?: string | null
+  b1_passed?: boolean | null
+}
+
+export interface IntradayMarketOverviewItem {
+  name: string
+  ts_code?: string | null
+  latest_price?: number | null
+  open_price?: number | null
+  change_pct?: number | null
+  volume_ratio_5d?: number | null
+  ma5?: number | null
+  above_ma5?: boolean | null
+  trend?: string | null
+  volume_state?: string | null
+  summary?: string | null
+}
+
+export interface IntradayMarketOverview {
+  summary?: string | null
+  market_bias?: string | null
+  benchmark_name?: string | null
+  benchmark_change_pct?: number | null
+  items?: IntradayMarketOverviewItem[]
+}
+
 export interface WatchlistAnalysisResult {
   trade_date?: string | null
   close_price?: number | null
@@ -164,13 +195,19 @@ export interface IntradayAnalysisItem {
   source_pick_date: string
   snapshot_time: string
   open_price?: number | null
+  midday_price?: number | null
   close_price?: number | null
+  latest_price?: number | null
   high_price?: number | null
   low_price?: number | null
   volume?: number | null
   amount?: number | null
   change_pct?: number | null
+  latest_change_pct?: number | null
   turnover?: number | null
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  active_pool_rank?: number | null
   b1_passed?: boolean | null
   score?: number | null
   verdict?: 'PASS' | 'WATCH' | 'FAIL'
@@ -179,6 +216,14 @@ export interface IntradayAnalysisItem {
   zx_long_pos?: boolean | null
   weekly_ma_aligned?: boolean | null
   volume_healthy?: boolean | null
+  midday_time?: string | null
+  analysis_basis?: string | null
+  previous_analysis?: PreviousIntradayAnalysisSummary | null
+  benchmark_name?: string | null
+  benchmark_change_pct?: number | null
+  relative_market_status?: string | null
+  relative_market_strength_pct?: number | null
+  manager_note?: string | null
   exit_plan?: ExitPlan | null
 }
 
@@ -581,6 +626,7 @@ export interface IntradayAnalysisResponse {
   window_open?: boolean | null
   has_data: boolean
   status?: string | null
+  market_overview?: IntradayMarketOverview | null
   items: IntradayAnalysisItem[]
   total: number
   message?: string | null

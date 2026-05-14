@@ -20,16 +20,16 @@ describe('auth store', () => {
   it('clears only the previous user watchlist cache on logout', async () => {
     const auth = useAuthStore()
     window.localStorage.setItem('stocktrade:watchlist:state:1', '{}')
-    window.localStorage.setItem('stocktrade:watchlist:chart-cache:1', '{}')
+    window.localStorage.setItem('stocktrade:watchlist:chart-cache:v2:1', '{}')
     window.localStorage.setItem('stocktrade:watchlist:state:2', '{}')
-    window.localStorage.setItem('stocktrade:watchlist:chart-cache:2', '{}')
+    window.localStorage.setItem('stocktrade:watchlist:chart-cache:v2:2', '{}')
 
     auth.user = { id: 1 } as any
     auth.logout()
 
     expect(window.localStorage.getItem('stocktrade:watchlist:state:1')).toBeNull()
-    expect(window.localStorage.getItem('stocktrade:watchlist:chart-cache:1')).toBeNull()
+    expect(window.localStorage.getItem('stocktrade:watchlist:chart-cache:v2:1')).toBeNull()
     expect(window.localStorage.getItem('stocktrade:watchlist:state:2')).toBe('{}')
-    expect(window.localStorage.getItem('stocktrade:watchlist:chart-cache:2')).toBe('{}')
+    expect(window.localStorage.getItem('stocktrade:watchlist:chart-cache:v2:2')).toBe('{}')
   })
 })

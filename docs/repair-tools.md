@@ -23,7 +23,7 @@
 
 这类问题用：
 
-- `bash deploy/scripts/repair_historical_scores.sh`
+- `./update-data.sh repair scores`
 
 ### 2. `stock_daily` 基础行情数据不完整
 
@@ -35,7 +35,7 @@
 
 这类问题用：
 
-- `bash deploy/scripts/repair_incomplete_stock_daily.sh`
+- `./update-data.sh repair daily`
 
 ### 3. 单股诊断临时样本不足
 
@@ -61,7 +61,7 @@
 
 文件：
 
-- [deploy/scripts/repair_historical_scores.sh](../deploy/scripts/repair_historical_scores.sh)
+- [update-data.sh](../update-data.sh)
 - [backend/scripts/repair_historical_scores.py](../backend/scripts/repair_historical_scores.py)
 
 ### 解决的问题
@@ -77,37 +77,37 @@
 先看扫描结果：
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --window-size 5
+./update-data.sh repair scores --window-size 5
 ```
 
 只修明日之星：
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --scope tomorrow-star
+./update-data.sh repair scores --scope tomorrow-star
 ```
 
 只修当前热盘：
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --scope current-hot
+./update-data.sh repair scores --scope current-hot
 ```
 
 同时修两个范围：
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --scope both
+./update-data.sh repair scores --scope both
 ```
 
 指定日期：
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --scope tomorrow-star --dates 2026-02-04 2026-02-05
+./update-data.sh repair scores --scope tomorrow-star --dates 2026-02-04 2026-02-05
 ```
 
 指定区间：
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --scope both --start-date 2026-02-01 --end-date 2026-02-10
+./update-data.sh repair scores --scope both --start-date 2026-02-01 --end-date 2026-02-10
 ```
 
 ### 速度说明
@@ -131,7 +131,7 @@ bash deploy/scripts/repair_historical_scores.sh --scope both --start-date 2026-0
 
 文件：
 
-- [deploy/scripts/repair_incomplete_stock_daily.sh](../deploy/scripts/repair_incomplete_stock_daily.sh)
+- [update-data.sh](../update-data.sh)
 - [backend/scripts/repair_incomplete_stock_daily.py](../backend/scripts/repair_incomplete_stock_daily.py)
 
 ### 解决的问题
@@ -146,25 +146,25 @@ bash deploy/scripts/repair_historical_scores.sh --scope both --start-date 2026-0
 先看命中范围：
 
 ```bash
-bash deploy/scripts/repair_incomplete_stock_daily.sh --min-days 250 --limit 20 --dry-run
+./update-data.sh repair daily --min-days 250 --limit 20 --dry-run
 ```
 
 小批量实际修复：
 
 ```bash
-bash deploy/scripts/repair_incomplete_stock_daily.sh --min-days 250 --limit 200
+./update-data.sh repair daily --min-days 250 --limit 200
 ```
 
 只修指定股票：
 
 ```bash
-bash deploy/scripts/repair_incomplete_stock_daily.sh --codes 601992 000638 --min-days 250
+./update-data.sh repair daily --codes 601992 000638 --min-days 250
 ```
 
 如果还要同时回写 `data/raw/*.csv`：
 
 ```bash
-bash deploy/scripts/repair_incomplete_stock_daily.sh --min-days 250 --limit 200 --write-csv
+./update-data.sh repair daily --min-days 250 --limit 200 --write-csv
 ```
 
 ### 关键参数
@@ -213,7 +213,7 @@ bash deploy/scripts/repair_incomplete_stock_daily.sh --min-days 250 --limit 200 
 
 当前建议：
 
-- 除非明确只想补完全缺失的股票，否则优先使用 `repair_incomplete_stock_daily.sh`
+- 除非明确只想补完全缺失的股票，否则优先使用 `./update-data.sh repair daily`
 
 ## 推荐执行顺序
 
@@ -222,13 +222,13 @@ bash deploy/scripts/repair_incomplete_stock_daily.sh --min-days 250 --limit 200 
 1. 先修基础日线
 
 ```bash
-bash deploy/scripts/repair_incomplete_stock_daily.sh --min-days 250 --limit 200
+./update-data.sh repair daily --min-days 250 --limit 200
 ```
 
 2. 再修历史评分
 
 ```bash
-bash deploy/scripts/repair_historical_scores.sh --scope both
+./update-data.sh repair scores --scope both
 ```
 
 3. 最后抽查页面

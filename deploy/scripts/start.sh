@@ -50,7 +50,7 @@ StockTrader 统一运行脚本
   ps            查看服务状态
   restart       重启服务
   exec-backend  进入后端容器
-  update-latest 调用旧的在线更新入口（默认禁用，不推荐）
+  update-latest 兼容命令，等价于仓库根目录 ./update-data.sh daily（默认禁用，不推荐）
 
 选项:
   --build       启动前构建镜像 (dev 默认启用，prod 需显式指定)
@@ -69,7 +69,7 @@ StockTrader 统一运行脚本
   $0 ps                     # 查看服务状态
   $0 restart                # 重启服务
   $0 exec-backend           # 进入后端容器
-  $0 update-latest          # 调用旧入口；默认会拒绝并提示改用 maintenance.sh
+  $0 update-latest          # 兼容命令；当前直接调用仓库根目录 update-data.sh daily
 
 访问地址:
   开发环境:
@@ -363,8 +363,8 @@ cmd_exec_backend() {
 }
 
 cmd_update_latest() {
-    log_warning "update-latest 为旧入口，默认已禁用。推荐改用 maintenance.sh 停服维护。"
-    exec "$PROJECT_ROOT/deploy/scripts/run_background_update.sh" "${TARGETS[@]}"
+    log_warning "update-latest 为兼容入口，推荐直接使用仓库根目录 ./update-data.sh daily"
+    exec "$PROJECT_ROOT/update-data.sh" daily "${TARGETS[@]}"
 }
 
 # 默认值

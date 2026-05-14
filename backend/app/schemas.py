@@ -212,13 +212,19 @@ class IntradayAnalysisItem(BaseModel):
     source_pick_date: date_class
     snapshot_time: datetime
     open_price: Optional[float] = None
+    midday_price: Optional[float] = None
     close_price: Optional[float] = None
+    latest_price: Optional[float] = None
     high_price: Optional[float] = None
     low_price: Optional[float] = None
     volume: Optional[float] = None
     amount: Optional[float] = None
     change_pct: Optional[float] = None
+    latest_change_pct: Optional[float] = None
     turnover: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
     b1_passed: Optional[bool] = None
     score: Optional[float] = None
     verdict: Optional[str] = None
@@ -227,6 +233,14 @@ class IntradayAnalysisItem(BaseModel):
     zx_long_pos: Optional[bool] = None
     weekly_ma_aligned: Optional[bool] = None
     volume_healthy: Optional[bool] = None
+    midday_time: Optional[str] = None
+    analysis_basis: Optional[str] = None
+    previous_analysis: Optional[Dict[str, Any]] = None
+    benchmark_name: Optional[str] = None
+    benchmark_change_pct: Optional[float] = None
+    relative_market_status: Optional[str] = None
+    relative_market_strength_pct: Optional[float] = None
+    manager_note: Optional[str] = None
     exit_plan: Optional[Dict[str, Any]] = None
 
 
@@ -239,6 +253,7 @@ class IntradayAnalysisResponse(BaseModel):
     has_data: bool
     status: str
     message: Optional[str] = None
+    market_overview: Optional[Dict[str, Any]] = None
     items: List[IntradayAnalysisItem]
     total: int = 0
 
@@ -267,13 +282,19 @@ class CurrentHotIntradayAnalysisItem(BaseModel):
     sector_names: List[str] = Field(default_factory=list)
     board_group: Optional[str] = None
     open_price: Optional[float] = None
+    midday_price: Optional[float] = None
     close_price: Optional[float] = None
+    latest_price: Optional[float] = None
     high_price: Optional[float] = None
     low_price: Optional[float] = None
     volume: Optional[float] = None
     amount: Optional[float] = None
     change_pct: Optional[float] = None
+    latest_change_pct: Optional[float] = None
     turnover: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
     b1_passed: Optional[bool] = None
     score: Optional[float] = None
     verdict: Optional[str] = None
@@ -282,6 +303,14 @@ class CurrentHotIntradayAnalysisItem(BaseModel):
     zx_long_pos: Optional[bool] = None
     weekly_ma_aligned: Optional[bool] = None
     volume_healthy: Optional[bool] = None
+    midday_time: Optional[str] = None
+    analysis_basis: Optional[str] = None
+    previous_analysis: Optional[Dict[str, Any]] = None
+    benchmark_name: Optional[str] = None
+    benchmark_change_pct: Optional[float] = None
+    relative_market_status: Optional[str] = None
+    relative_market_strength_pct: Optional[float] = None
+    manager_note: Optional[str] = None
     exit_plan: Optional[Dict[str, Any]] = None
 
 
@@ -294,6 +323,7 @@ class CurrentHotIntradayAnalysisResponse(BaseModel):
     has_data: bool
     status: str
     message: Optional[str] = None
+    market_overview: Optional[Dict[str, Any]] = None
     items: List[CurrentHotIntradayAnalysisItem]
     total: int = 0
 

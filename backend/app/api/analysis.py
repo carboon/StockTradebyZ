@@ -193,6 +193,15 @@ def ensure_tushare_ready() -> None:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
 
 
+def ensure_tushare_ready_if_configured() -> None:
+    service = TushareService()
+    if not service.token:
+        return
+    valid, message = service.verify_token()
+    if not valid:
+        logger.warning("Tushare 已配置但当前不可用，盘中分析将走降级链路: %s", message)
+
+
 @router.get("/tomorrow-star/dates", response_model=TomorrowStarDatesResponse)
 async def get_tomorrow_star_dates(
     db: Session = Depends(get_db),
@@ -803,10 +812,10 @@ async def generate_current_hot(
 @router.get("/current-hot/intraday/status")
 async def get_current_hot_intraday_status(
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> dict:
     service = CurrentHotIntradayAnalysisService(db)
-    status = service.get_status(is_admin=True)
+    status = service.get_status(is_admin=False)
     return {
         "trade_date": status.trade_date,
         "source_pick_date": status.source_pick_date,
@@ -821,31 +830,35 @@ async def get_current_hot_intraday_status(
 @router.get("/current-hot/intraday/data", response_model=CurrentHotIntradayAnalysisResponse)
 async def get_current_hot_intraday_data(
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> CurrentHotIntradayAnalysisResponse:
     service = CurrentHotIntradayAnalysisService(db)
-    payload = service.get_snapshot_payload(is_admin=True)
+    payload = service.get_snapshot_payload(is_admin=False)
     return CurrentHotIntradayAnalysisResponse(**payload)
 
 
 @router.post("/current-hot/intraday/generate", response_model=CurrentHotIntradayAnalysisGenerateResponse)
 async def generate_current_hot_intraday(
+    date: Optional[str] = Query(default=None, description="交易日，格式 YYYY-MM-DD"),
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> CurrentHotIntradayAnalysisGenerateResponse:
-    ensure_tushare_ready()
+    ensure_tushare_ready_if_configured()
     service = CurrentHotIntradayAnalysisService(db)
-    payload = service.generate_snapshot()
+    parsed_date = _parse_date_or_none(date)
+    if date and parsed_date is None:
+        raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
+    payload = service.generate_snapshot(trade_date=parsed_date)
     return CurrentHotIntradayAnalysisGenerateResponse(**payload)
 
 
 @router.get("/intraday/status")
 async def get_intraday_analysis_status(
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> dict:
     service = IntradayAnalysisService(db)
-    status = service.get_status(is_admin=True)
+    status = service.get_status(is_admin=False)
     return {
         "trade_date": status.trade_date,
         "source_pick_date": status.source_pick_date,
@@ -860,21 +873,25 @@ async def get_intraday_analysis_status(
 @router.get("/intraday/data", response_model=IntradayAnalysisResponse)
 async def get_intraday_analysis_data(
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> IntradayAnalysisResponse:
     service = IntradayAnalysisService(db)
-    payload = service.get_snapshot_payload(is_admin=True)
+    payload = service.get_snapshot_payload(is_admin=False)
     return IntradayAnalysisResponse(**payload)
 
 
 @router.post("/intraday/generate", response_model=IntradayAnalysisGenerateResponse)
 async def generate_intraday_analysis(
+    date: Optional[str] = Query(default=None, description="交易日，格式 YYYY-MM-DD"),
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> IntradayAnalysisGenerateResponse:
-    ensure_tushare_ready()
+    ensure_tushare_ready_if_configured()
     service = IntradayAnalysisService(db)
-    payload = service.generate_snapshot()
+    parsed_date = _parse_date_or_none(date)
+    if date and parsed_date is None:
+        raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
+    payload = service.generate_snapshot(trade_date=parsed_date)
     return IntradayAnalysisGenerateResponse(**payload)
 
 
