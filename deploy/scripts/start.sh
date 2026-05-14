@@ -86,7 +86,7 @@ EOF
 # 检查 Docker
 check_docker() {
     mkdir -p "$DOCKER_CONFIG_DIR"
-    export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+    # export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"  # 使用系统默认 Docker 配置
 
     if ! command -v docker >/dev/null 2>&1; then
         log_error "未找到 Docker，请先安装 Docker"

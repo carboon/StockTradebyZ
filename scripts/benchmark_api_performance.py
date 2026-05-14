@@ -2,16 +2,40 @@ from __future__ import annotations
 
 import os
 import statistics
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Callable
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+
+ROOT = Path(__file__).resolve().parents[1]
+BACKEND = ROOT / "backend"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+
+if (
+    os.environ.get("STOCKTRADE_BENCHMARK_BOOTSTRAPPED") != "1"
+    and VENV_PYTHON.exists()
+    and Path(sys.executable).resolve() != VENV_PYTHON.resolve()
+):
+    env = dict(os.environ)
+    env["STOCKTRADE_BENCHMARK_BOOTSTRAPPED"] = "1"
+    os.execve(str(VENV_PYTHON), [str(VENV_PYTHON), __file__, *sys.argv[1:]], env)
+
+pythonpath_entries = [entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry]
+for required_path in (str(ROOT), str(BACKEND)):
+    if required_path not in pythonpath_entries:
+        pythonpath_entries.append(required_path)
+    if required_path not in sys.path:
+        sys.path.insert(0, required_path)
+if pythonpath_entries:
+    os.environ["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
 os.environ["PYTEST_RUNNING"] = "1"
 
@@ -20,7 +44,6 @@ from app.cache import cache
 from app.database import Base, get_db
 from app.main import app
 from app.models import Candidate, Stock, StockAnalysis, StockDaily, User, Watchlist
-
 
 def build_test_database_url() -> str:
     return f"sqlite:///file:perf_db_{uuid.uuid4().hex}?mode=memory&cache=shared"

@@ -13,7 +13,7 @@ import json
 import hashlib
 from datetime import date
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Literal
 from threading import Lock
 
 from app.config import settings
@@ -89,10 +89,11 @@ class AnalysisCacheService:
             return self._memory_cache[cache_key]
 
         # 2. 检查文件缓存
-        review_dir = ROOT / settings.review_dir
-        stock_file = review_dir / trade_date / f"{code}.json"
-
-        if stock_file.exists():
+        # 优先读取单股分析专用缓存，再回退到明日之星共享 review 目录，
+        # 这样既能避免新的单股分析污染历史 review，又能继续复用已有批量分析结果。
+        for stock_file in self._get_cache_lookup_files(code, trade_date):
+            if not stock_file.exists():
+                continue
             try:
                 with open(stock_file, "r", encoding="utf-8") as f:
                     result = json.load(f)
@@ -101,9 +102,26 @@ class AnalysisCacheService:
                 self._memory_cache[cache_key] = result
                 return result
             except (json.JSONDecodeError, IOError):
-                return None
+                continue
 
         return None
+
+    @staticmethod
+    def _get_review_cache_file(code: str, trade_date: str) -> Path:
+        review_dir = ROOT / settings.review_dir / trade_date
+        return review_dir / f"{code}.json"
+
+    @staticmethod
+    def _get_single_analysis_cache_file(code: str, trade_date: str) -> Path:
+        single_dir = ROOT / settings.review_dir / "single" / trade_date
+        return single_dir / f"{code}.json"
+
+    @classmethod
+    def _get_cache_lookup_files(cls, code: str, trade_date: str) -> list[Path]:
+        return [
+            cls._get_single_analysis_cache_file(code, trade_date),
+            cls._get_review_cache_file(code, trade_date),
+        ]
 
     def get_watchlist_analysis(
         self,
@@ -199,6 +217,8 @@ class AnalysisCacheService:
         code: str,
         trade_date: str,
         result: Dict[str, Any],
+        *,
+        storage_scope: Literal["review", "single"] = "review",
     ) -> None:
         """
         保存分析结果到文件
@@ -207,11 +227,13 @@ class AnalysisCacheService:
             code: 股票代码
             trade_date: 交易日期
             result: 分析结果
+            storage_scope: review 写入明日之星 review 目录；single 写入单股分析专用目录
         """
-        review_dir = ROOT / settings.review_dir / trade_date
-        review_dir.mkdir(parents=True, exist_ok=True)
-
-        stock_file = review_dir / f"{code}.json"
+        if storage_scope == "single":
+            stock_file = self._get_single_analysis_cache_file(code, trade_date)
+        else:
+            stock_file = self._get_review_cache_file(code, trade_date)
+        stock_file.parent.mkdir(parents=True, exist_ok=True)
 
         # 补充必要字段
         save_data = {

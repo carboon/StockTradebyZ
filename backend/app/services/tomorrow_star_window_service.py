@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -322,12 +322,18 @@ class TomorrowStarWindowService:
             row.code: row
             for row in self.db.query(Candidate).filter(Candidate.pick_date == pick_dt).all()
         }
-        analysis_rows = (
-            self.db.query(AnalysisResult)
-            .filter(AnalysisResult.pick_date == pick_dt)
-            .order_by(AnalysisResult.id.asc())
-            .all()
-        )
+        if candidate_map:
+            analysis_rows = (
+                self.db.query(AnalysisResult)
+                .filter(
+                    AnalysisResult.pick_date == pick_dt,
+                    AnalysisResult.code.in_(sorted(candidate_map.keys())),
+                )
+                .order_by(AnalysisResult.id.asc())
+                .all()
+            )
+        else:
+            analysis_rows = []
 
         review_dir = Path(settings.review_dir) / trade_date
         review_dir.mkdir(parents=True, exist_ok=True)
@@ -349,7 +355,7 @@ class TomorrowStarWindowService:
             if payload.get("total_score") is None and row.total_score is not None:
                 payload["total_score"] = float(row.total_score)
 
-            analysis_cache.save_analysis_result(code, trade_date, payload)
+            analysis_cache.save_analysis_result(code, trade_date, payload, storage_scope="review")
             valid_names.add(f"{code}.json")
             exported_results.append(payload)
 
@@ -434,18 +440,44 @@ class TomorrowStarWindowService:
             .scalar()
             or 0
         )
-        run.analysis_count = int(
-            self.db.query(func.count(AnalysisResult.id)).filter(AnalysisResult.pick_date == pick_dt).scalar() or 0
-        )
-        run.trend_start_count = int(
-            self.db.query(func.count(AnalysisResult.id))
-            .filter(
-                AnalysisResult.pick_date == pick_dt,
-                AnalysisResult.signal_type == "trend_start",
+        analysis_counts, trend_counts, _tomorrow_star_counts = self._get_candidate_scoped_analysis_counts([pick_dt])
+        pick_date_text = pick_dt.isoformat()
+        run.analysis_count = analysis_counts.get(pick_date_text, 0)
+        run.trend_start_count = trend_counts.get(pick_date_text, 0)
+
+    def _get_candidate_scoped_analysis_counts(
+        self,
+        pick_dates: list[date],
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+        if not pick_dates:
+            return {}, {}, {}
+
+        analysis_counts: dict[str, int] = {}
+        trend_counts: dict[str, int] = {}
+        tomorrow_star_counts: dict[str, int] = {}
+
+        rows = (
+            self.db.query(AnalysisResult)
+            .join(
+                Candidate,
+                and_(
+                    Candidate.pick_date == AnalysisResult.pick_date,
+                    Candidate.code == AnalysisResult.code,
+                ),
             )
-            .scalar()
-            or 0
+            .filter(AnalysisResult.pick_date.in_(pick_dates))
+            .all()
         )
+
+        for row in rows:
+            key = row.pick_date.isoformat()
+            analysis_counts[key] = analysis_counts.get(key, 0) + 1
+            if row.signal_type == "trend_start":
+                trend_counts[key] = trend_counts.get(key, 0) + 1
+            if self._is_tomorrow_star_analysis(row):
+                tomorrow_star_counts[key] = tomorrow_star_counts.get(key, 0) + 1
+
+        return analysis_counts, trend_counts, tomorrow_star_counts
 
     def _refresh_run_counts_for_dates(self, trade_dates: list[str]) -> None:
         normalized_dates = sorted(
@@ -466,23 +498,7 @@ class TomorrowStarWindowService:
             .group_by(Candidate.pick_date)
             .all()
         }
-        analysis_counts = {
-            pick_date.isoformat(): int(count or 0)
-            for pick_date, count in self.db.query(AnalysisResult.pick_date, func.count(AnalysisResult.id))
-            .filter(AnalysisResult.pick_date.in_(pick_dates))
-            .group_by(AnalysisResult.pick_date)
-            .all()
-        }
-        trend_counts = {
-            pick_date.isoformat(): int(count or 0)
-            for pick_date, count in self.db.query(AnalysisResult.pick_date, func.count(AnalysisResult.id))
-            .filter(
-                AnalysisResult.pick_date.in_(pick_dates),
-                AnalysisResult.signal_type == "trend_start",
-            )
-            .group_by(AnalysisResult.pick_date)
-            .all()
-        }
+        analysis_counts, trend_counts, _tomorrow_star_counts = self._get_candidate_scoped_analysis_counts(pick_dates)
         consecutive_counts = {
             pick_date.isoformat(): int(count or 0)
             for pick_date, count in self.db.query(Candidate.pick_date, func.count(Candidate.id))
@@ -520,6 +536,20 @@ class TomorrowStarWindowService:
             if path.name != "suggestion.json"
         )
         if not stock_files:
+            return 0
+
+        candidate_codes = {
+            row.code
+            for row in self.db.query(Candidate.code).filter(Candidate.pick_date == pick_dt).all()
+        }
+        if candidate_codes:
+            stock_files = [
+                path for path in stock_files
+                if path.stem.zfill(6) in candidate_codes
+            ]
+        if not stock_files:
+            self.db.query(AnalysisResult).filter(AnalysisResult.pick_date == pick_dt).delete(synchronize_session=False)
+            self.db.flush()
             return 0
 
         codes = [path.stem.zfill(6) for path in stock_files if path.stem.isdigit()]
@@ -892,29 +922,7 @@ class TomorrowStarWindowService:
             .group_by(Candidate.pick_date)
             .all()
         }
-        analysis_counts = {
-            row.pick_date.isoformat(): int(row.count or 0)
-            for row in self.db.query(
-                AnalysisResult.pick_date,
-                func.count(AnalysisResult.id).label("count"),
-            )
-            .filter(AnalysisResult.pick_date.in_(pick_dates))
-            .group_by(AnalysisResult.pick_date)
-            .all()
-        }
-        trend_counts = {
-            row.pick_date.isoformat(): int(row.count or 0)
-            for row in self.db.query(
-                AnalysisResult.pick_date,
-                func.count(AnalysisResult.id).label("count"),
-            )
-            .filter(
-                AnalysisResult.pick_date.in_(pick_dates),
-                AnalysisResult.signal_type == "trend_start",
-            )
-            .group_by(AnalysisResult.pick_date)
-            .all()
-        }
+        analysis_counts, trend_counts, tomorrow_star_counts = self._get_candidate_scoped_analysis_counts(pick_dates)
         consecutive_counts = {
             row.pick_date.isoformat(): int(row.count or 0)
             for row in self.db.query(
@@ -928,8 +936,6 @@ class TomorrowStarWindowService:
             .group_by(Candidate.pick_date)
             .all()
         }
-        tomorrow_star_counts = self._get_tomorrow_star_counts(pick_dates)
-
         has_active_task = self._has_active_generation_task()
         items: list[dict[str, Any]] = []
         ready_count = missing_count = running_count = failed_count = pending_count = 0
@@ -1101,19 +1107,8 @@ class TomorrowStarWindowService:
         )
 
     def _get_tomorrow_star_counts(self, pick_dates: list[date]) -> dict[str, int]:
-        if not pick_dates:
-            return {}
-        counts: dict[str, int] = {}
-        rows = (
-            self.db.query(AnalysisResult)
-            .filter(AnalysisResult.pick_date.in_(pick_dates))
-            .all()
-        )
-        for row in rows:
-            if self._is_tomorrow_star_analysis(row):
-                key = row.pick_date.isoformat()
-                counts[key] = counts.get(key, 0) + 1
-        return counts
+        _analysis_counts, _trend_counts, tomorrow_star_counts = self._get_candidate_scoped_analysis_counts(pick_dates)
+        return tomorrow_star_counts
 
     def reconcile_run_rows(
         self,

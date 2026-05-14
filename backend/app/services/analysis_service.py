@@ -1281,7 +1281,12 @@ class AnalysisService:
                     }
 
                     # 使用缓存服务保存
-                    analysis_cache.save_analysis_result(code, analysis_date, save_data)
+                    analysis_cache.save_analysis_result(
+                        code,
+                        analysis_date,
+                        save_data,
+                        storage_scope="single",
+                    )
 
                     # 更新结果
                     result["close_price"] = close_price

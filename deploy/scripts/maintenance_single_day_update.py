@@ -83,7 +83,7 @@ def run_single_trade_date_update(
 
 def main() -> int:
     args = parse_args()
-    os.environ.setdefault("DOCKER_CONFIG", str(DOCKER_CONFIG_DIR))
+    # os.environ.setdefault("DOCKER_CONFIG", str(DOCKER_CONFIG_DIR))  # 使用系统默认 Docker 配置
     os.environ["MAINTENANCE_BACKEND_CPUS"] = args.cpu_quota
     os.environ["MAINTENANCE_BACKEND_MEMORY"] = args.memory
     os.environ["MAINTENANCE_BACKEND_MEMORY_SWAP"] = args.memory_swap

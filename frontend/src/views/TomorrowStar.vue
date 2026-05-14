@@ -882,7 +882,7 @@ let candidatesRequestId = 0
 let currentHotLoadDataRequestId = 0
 let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v9'
+const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v10'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 const MIDDAY_CACHE_TTL_MS = 60_000
 let incrementalPollTimer: number | null = null
@@ -2972,6 +2972,10 @@ async function refreshAfterStatusReady(forceReload: boolean = false) {
   try {
     await configStore.checkTushareStatus()
   } catch {
+    return
+  }
+  if (hydratedFromCache.value && !forceReload) {
+    await checkForRefresh(true)
     return
   }
   await ensureFreshDataAndLoad(forceReload)

@@ -18,15 +18,9 @@ COMPOSE_FILE = DEPLOY_DIR / "docker-compose.yml"
 BACKEND_DISABLE_PREWARM_FILE = ROOT / "data" / ".disable_startup_prewarm"
 DOCKER_CONFIG_DIR = ROOT / ".docker"
 MAINTENANCE_SERVICE = "backend-maintenance"
+# 已移除低资源限制，提升性能
 LOW_RESOURCE_ENV_DEFAULTS = {
     "PYTHONUNBUFFERED": "1",
-    "OMP_NUM_THREADS": "1",
-    "OPENBLAS_NUM_THREADS": "1",
-    "MKL_NUM_THREADS": "1",
-    "NUMEXPR_NUM_THREADS": "1",
-    "VECLIB_MAXIMUM_THREADS": "1",
-    "BLIS_NUM_THREADS": "1",
-    "STOCKTRADE_LOW_RESOURCE_MODE": "1",
 }
 
 
@@ -45,12 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-cache", action="store_true", help="构建时不使用缓存")
     parser.add_argument("--keep-services-on-failure", action="store_true", help="失败时保留最小服务现场，不自动停止")
     parser.add_argument("--allow-prewarm-on-start", action="store_true", help="允许完整服务启动后立刻执行只读预热")
-    parser.add_argument("--nice-level", type=int, default=10, help="容器内长任务 nice 值，默认 10")
-    parser.add_argument("--cpu-quota", default="0.75", help="补数容器 CPU 配额，默认 0.75")
-    parser.add_argument("--memory", default="1400m", help="补数容器内存上限，默认 1400m")
-    parser.add_argument("--memory-swap", default="1600m", help="补数容器内存+swap 上限，默认 1600m")
+    parser.add_argument("--nice-level", type=int, default=0, help="容器内长任务 nice 值，默认 0（无限制）")
+    parser.add_argument("--cpu-quota", default="4.0", help="补数容器 CPU 配额，默认 4.0")
+    parser.add_argument("--memory", default="8g", help="补数容器内存上限，默认 8g")
+    parser.add_argument("--memory-swap", default="10g", help="补数容器内存+swap 上限，默认 10g")
     parser.add_argument("--rebuild-args", default="", help="附加传递给 rebuild_recent_120_data.py 的参数")
     parser.add_argument("--health-timeout", type=int, default=180, help="等待 backend health 的秒数，默认 180")
+    parser.add_argument("--skip-validation", action="store_true", help="跳过完整性校验步骤（步骤5/6），提升速度")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不实际执行")
     return parser.parse_args()
 
@@ -209,11 +204,8 @@ def run_recent_120_rebuild(
     if extra_args.strip():
         rebuild_parts.extend(shlex.split(extra_args))
     rebuild_cmd = shell_join(rebuild_parts)
-    shell_cmd = (
-        f"if command -v ionice >/dev/null 2>&1; "
-        f"then exec ionice -c3 nice -n {nice_level} {rebuild_cmd}; "
-        f"else exec nice -n {nice_level} {rebuild_cmd}; fi"
-    )
+    # 直接执行，无 nice/ionice 限制，提升性能
+    shell_cmd = f"exec {rebuild_cmd}"
 
     run(
         compose_run_backend_cmd(
@@ -317,7 +309,7 @@ def explain_validation_failure(title: str, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
-    os.environ.setdefault("DOCKER_CONFIG", str(DOCKER_CONFIG_DIR))
+    # os.environ.setdefault("DOCKER_CONFIG", str(DOCKER_CONFIG_DIR))  # 使用系统默认 Docker 配置
     os.environ["MAINTENANCE_BACKEND_CPUS"] = args.cpu_quota
     os.environ["MAINTENANCE_BACKEND_MEMORY"] = args.memory
     os.environ["MAINTENANCE_BACKEND_MEMORY_SWAP"] = args.memory_swap
@@ -334,9 +326,12 @@ def main() -> int:
         log(f"- skip_build={args.skip_build}")
         log(f"- no_cache={args.no_cache}")
         log(f"- allow_prewarm_on_start={args.allow_prewarm_on_start}")
+        log(f"- skip_validation={args.skip_validation}")
         log(f"- cpu_quota={args.cpu_quota}")
         log(f"- memory={args.memory}")
         log(f"- memory_swap={args.memory_swap}")
+        log(f"- nice_level={args.nice_level} (0=无限制)")
+        log("- 已优化：去除线程限制、nice/ionice 限制、提升资源配额")
         log("- 只读预热由服务启动后自行完成，不由维护脚本主动补算")
         return 0
 
@@ -368,19 +363,23 @@ def main() -> int:
             nice_level=args.nice_level,
         )
 
-        log("步骤 5/7: 校验最近120交易日完整性")
-        integrity = verify_recent_120_integrity(compose, args.window_size)
-        print_json_block("recent_120_integrity", integrity)
-        if not integrity.get("success"):
-            explain_validation_failure("recent_120_integrity", integrity)
-            raise RuntimeError(str(integrity.get("message") or "最近120交易日完整性校验失败"))
+        if args.skip_validation:
+            log("步骤 5/7: 跳过完整性校验（--skip-validation）")
+            log("步骤 6/7: 跳过重验证校验（--skip-validation）")
+        else:
+            log("步骤 5/7: 校验最近120交易日完整性")
+            integrity = verify_recent_120_integrity(compose, args.window_size)
+            print_json_block("recent_120_integrity", integrity)
+            if not integrity.get("success"):
+                explain_validation_failure("recent_120_integrity", integrity)
+                raise RuntimeError(str(integrity.get("message") or "最近120交易日完整性校验失败"))
 
-        log(f"步骤 6/7: 校验最新有效交易日 {effective_end_date} 的本地重验证")
-        revalidation = verify_trade_date_revalidation(compose, effective_end_date)
-        print_json_block("trade_date_revalidation", revalidation)
-        if not revalidation.get("success"):
-            explain_validation_failure("trade_date_revalidation", revalidation)
-            raise RuntimeError(str(revalidation.get("message") or f"{effective_end_date} 本地重验证失败"))
+            log(f"步骤 6/7: 校验最新有效交易日 {effective_end_date} 的本地重验证")
+            revalidation = verify_trade_date_revalidation(compose, effective_end_date)
+            print_json_block("trade_date_revalidation", revalidation)
+            if not revalidation.get("success"):
+                explain_validation_failure("trade_date_revalidation", revalidation)
+                raise RuntimeError(str(revalidation.get("message") or f"{effective_end_date} 本地重验证失败"))
 
         log("步骤 7/7: 拉起完整服务栈")
         start_full_services(compose)

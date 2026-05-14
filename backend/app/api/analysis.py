@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.api.cache_decorators import (
@@ -544,6 +545,13 @@ async def get_analysis_results(
     if target_date is None:
         latest_pick_date = (
             db.query(AnalysisResult.pick_date)
+            .join(
+                Candidate,
+                and_(
+                    Candidate.pick_date == AnalysisResult.pick_date,
+                    Candidate.code == AnalysisResult.code,
+                ),
+            )
             .order_by(AnalysisResult.pick_date.desc())
             .limit(1)
             .scalar()
@@ -585,6 +593,13 @@ async def get_analysis_results(
             StockDaily.turnover_rate.label("daily_turnover_rate"),
             StockDaily.volume_ratio.label("daily_volume_ratio"),
             DailyB1CheckDetail,
+        )
+        .join(
+            Candidate,
+            and_(
+                Candidate.pick_date == AnalysisResult.pick_date,
+                Candidate.code == AnalysisResult.code,
+            ),
         )
         .outerjoin(Stock, Stock.code == AnalysisResult.code)
         .outerjoin(

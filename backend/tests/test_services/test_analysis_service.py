@@ -521,7 +521,7 @@ def test_single_stock_analysis_persists_result_by_check_date(analysis_service, t
                         }):
                             result = analysis_service.analyze_stock("600000", reviewer="quant", use_cache=False)
 
-            saved_file = review_dir / "2024-01-15" / "600000.json"
+            saved_file = review_dir / "single" / "2024-01-15" / "600000.json"
             assert result["score"] == 4.6
             assert saved_file.exists()
 

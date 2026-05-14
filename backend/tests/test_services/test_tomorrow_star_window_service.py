@@ -64,6 +64,24 @@ def test_get_window_status_normalizes_stale_running_rows_without_active_task(tes
     assert summary.items[1]["status"] == "missing"
 
 
+def test_get_window_status_ignores_non_candidate_analysis_rows(test_db):
+    test_db.add(Stock(code="000001", name="PingAn"))
+    test_db.add_all([
+        StockDaily(code="000001", trade_date=date(2024, 1, 3), open=10, close=11, high=11, low=9, volume=100),
+        Candidate(pick_date=date(2024, 1, 3), code="000001", strategy="b1"),
+        AnalysisResult(pick_date=date(2024, 1, 3), code="000001", reviewer="quant", verdict="WATCH", signal_type="rebound"),
+        AnalysisResult(pick_date=date(2024, 1, 3), code="000002", reviewer="quant", verdict="PASS", signal_type="trend_start"),
+    ])
+    test_db.commit()
+
+    summary = TomorrowStarWindowService(test_db).get_window_status(window_size=1)
+
+    assert summary.items[0]["analysis_count"] == 1
+    assert summary.items[0]["trend_start_count"] == 0
+    assert summary.items[0]["pass_count"] == 0
+    assert summary.items[0]["tomorrow_star_count"] == 0
+
+
 def test_market_regime_blocked_item_is_effectively_ready(test_db):
     test_db.add(Stock(code="000001", name="PingAn"))
     test_db.add(StockDaily(code="000001", trade_date=date(2024, 1, 3), open=10, close=11, high=11, low=9, volume=100))
@@ -547,6 +565,11 @@ def test_window_status_includes_tomorrow_star_count(test_db):
         StockDaily(code="000001", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100),
         StockDaily(code="000002", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100),
         StockDaily(code="000003", trade_date=trade_date, open=10, close=11, high=11, low=9, volume=100),
+    ])
+    test_db.add_all([
+        Candidate(pick_date=trade_date, code="000001", strategy="b1"),
+        Candidate(pick_date=trade_date, code="000002", strategy="b1"),
+        Candidate(pick_date=trade_date, code="000003", strategy="b1"),
     ])
     test_db.add_all([
         AnalysisResult(

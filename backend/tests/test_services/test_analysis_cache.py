@@ -285,6 +285,39 @@ def test_save_analysis_result(cache_service, tmp_path):
             assert cache_key in cache_service._memory_cache
 
 
+@pytest.mark.service
+def test_save_analysis_result_single_scope_uses_isolated_directory(cache_service, tmp_path):
+    test_root = tmp_path / "test_save_single_scope"
+    code = "600000"
+    trade_date = "2024-01-15"
+
+    with patch("app.services.analysis_cache.settings") as mock_settings:
+        with patch("app.services.analysis_cache.ROOT", test_root):
+            mock_settings.review_dir = test_root / "review"
+
+            result = {
+                "code": code,
+                "total_score": 4.8,
+                "verdict": "PASS",
+                "signal_type": "trend_start",
+            }
+
+            cache_service.save_analysis_result(code, trade_date, result, storage_scope="single")
+
+            single_file = test_root / "review" / "single" / trade_date / f"{code}.json"
+            review_file = test_root / "review" / trade_date / f"{code}.json"
+
+            assert single_file.exists()
+            assert not review_file.exists()
+
+            cache_service.clear_memory_cache()
+            cached = cache_service.get_cached_analysis(code, trade_date)
+
+            assert cached is not None
+            assert cached["code"] == code
+            assert cached["total_score"] == 4.8
+
+
 # ============================================
 # 观察列表复用测试
 # ============================================

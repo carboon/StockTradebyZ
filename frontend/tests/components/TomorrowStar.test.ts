@@ -483,7 +483,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v9', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v10', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
       latestCandidates: [{ code: 'cached', kdj_j: 5, turnover_rate: 1.3 }],
       latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
@@ -525,7 +525,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v9', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v10', JSON.stringify({
       historyData: [{ date: '2024-01-10', count: 1, pass: 0 }],
       latestCandidates: [{ code: 'cached', kdj_j: 5, turnover_rate: 1.3 }],
       latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
@@ -571,7 +571,7 @@ describe('TomorrowStar.vue', () => {
       () => new Promise((resolve) => { resolveStatus = resolve })
     )
 
-    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v9', JSON.stringify({
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v10', JSON.stringify({
       historyData: [{ date: '2024-01-10', rawDate: '2024-01-10', count: 1, pass: 0, status: 'success' }],
       latestCandidates: [],
       latestAnalysisResults: [],
@@ -600,6 +600,74 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.viewingDate).toBe('2024-01-15')
     expect(wrapper.vm.latestCandidates[0].code).toBe('600000')
     expect(wrapper.vm.latestAnalysisResults).toHaveLength(4)
+  })
+
+  it('replaces stale hydrated history counts after status becomes ready', async () => {
+    const statusPayload = {
+      configured: true,
+      available: true,
+      message: 'Token有效',
+      data_status: {
+        raw_data: { exists: true, count: 3200, latest_date: '2025-04-25' },
+        candidates: { exists: true, count: 30, latest_date: '2025-04-25' },
+        analysis: { exists: true, count: 20, latest_date: '2025-04-25' },
+        kline: { exists: true, count: 100, latest_date: '2025-04-25' },
+      },
+    }
+    let resolveStatus: ((value: any) => void) | null = null
+    vi.mocked(apiConfig.getTushareStatus).mockImplementation(
+      () => new Promise((resolve) => { resolveStatus = resolve })
+    )
+    vi.mocked(apiAnalysis.getFreshness).mockResolvedValue({
+      latest_trade_date: '2024-01-15',
+      latest_trade_data_ready: false,
+      local_latest_date: '2024-01-15',
+      latest_candidate_date: '2024-01-15',
+      latest_result_date: '2024-01-15',
+      needs_update: false,
+      freshness_version: 'cached-v',
+      running_task_id: null,
+      running_task_status: null,
+      incremental_update: buildIncrementalStatus(),
+    } as any)
+    vi.mocked(apiAnalysis.getDates).mockResolvedValue({
+      dates: ['2026-05-12', '2024-01-15'],
+      history: [
+        { date: '2026-05-12', count: 36, pass: 0, tomorrow_star_count: 0 },
+        { date: '2024-01-15', count: 2, pass: 1, tomorrow_star_count: 1 },
+      ],
+    } as any)
+
+    window.sessionStorage.setItem('stocktrade:tomorrow-star:cache:v10', JSON.stringify({
+      historyData: [{ date: '2026-05-12', rawDate: '2026-05-12', count: 36, pass: 2, tomorrowStarCount: 2, status: 'success' }],
+      latestCandidates: [{ code: 'cached', kdj_j: 5, turnover_rate: 1.3 }],
+      latestAnalysisResults: [{ code: 'cached', verdict: 'WATCH', total_score: 3.5 }],
+      selectedDate: '2026-05-12',
+      viewingDate: '2026-05-12',
+      latestDate: '2026-05-12',
+      latestDataDate: '2026-05-12',
+      historyPage: 1,
+      latestCandidatePage: 1,
+      lastHistorySignature: 'cached',
+      freshnessVersion: 'cached-v',
+      cachedAt: Date.now(),
+    }))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.hydratedFromCache).toBe(true)
+    expect(wrapper.vm.historyData[0].pass).toBe(2)
+    expect(wrapper.vm.historyData[0].tomorrowStarCount).toBe(2)
+
+    resolveStatus?.(statusPayload)
+    await flushPromises()
+    await flushPromises()
+
+    const targetRow = wrapper.vm.historyData.find((item: { rawDate: string }) => item.rawDate === '2026-05-12')
+    expect(targetRow?.pass).toBe(0)
+    expect(targetRow?.tomorrowStarCount).toBe(0)
+    expect(wrapper.vm.latestCandidates[0].code).toBe('600000')
   })
 
   it('refreshes the current date and shows success feedback', async () => {

@@ -56,6 +56,7 @@ def test_get_tomorrow_star_dates_exposes_market_regime_block_reason(test_client_
 def test_get_tomorrow_star_results_reads_db(test_client_with_db):
     db = test_client_with_db.db
     db.add(Stock(code="000001", name="PingAn"))
+    db.add(Candidate(pick_date=date(2024, 1, 3), code="000001", strategy="b1"))
     db.add(AnalysisResult(
         pick_date=date(2024, 1, 3),
         code="000001",
@@ -97,6 +98,12 @@ def test_get_tomorrow_star_results_prioritizes_trend_start_then_score(test_clien
         Stock(code="000004", name="D"),
     ])
     db.add_all([
+        Candidate(pick_date=pick_date, code="000001", strategy="b1"),
+        Candidate(pick_date=pick_date, code="000002", strategy="b1"),
+        Candidate(pick_date=pick_date, code="000003", strategy="b1"),
+        Candidate(pick_date=pick_date, code="000004", strategy="b1"),
+    ])
+    db.add_all([
         AnalysisResult(pick_date=pick_date, code="000001", reviewer="quant", verdict="WATCH", total_score=4.6, signal_type="rebound"),
         AnalysisResult(pick_date=pick_date, code="000002", reviewer="quant", verdict="PASS", total_score=4.2, signal_type="trend_start"),
         AnalysisResult(pick_date=pick_date, code="000003", reviewer="quant", verdict="PASS", total_score=5.0, signal_type="trend_start"),
@@ -109,3 +116,23 @@ def test_get_tomorrow_star_results_prioritizes_trend_start_then_score(test_clien
     assert response.status_code == 200
     data = response.json()
     assert [item["code"] for item in data["results"]] == ["000003", "000002", "000004", "000001"]
+
+
+def test_get_tomorrow_star_results_filters_non_candidate_rows(test_client_with_db):
+    db = test_client_with_db.db
+    pick_date = date(2024, 1, 3)
+    db.add_all([
+        Stock(code="000001", name="A"),
+        Stock(code="000002", name="B"),
+        Candidate(pick_date=pick_date, code="000001", strategy="b1"),
+        AnalysisResult(pick_date=pick_date, code="000001", reviewer="quant", verdict="WATCH", total_score=3.8, signal_type="rebound"),
+        AnalysisResult(pick_date=pick_date, code="000002", reviewer="quant", verdict="PASS", total_score=4.9, signal_type="trend_start"),
+    ])
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/tomorrow-star/results?date=2024-01-03")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert [item["code"] for item in data["results"]] == ["000001"]

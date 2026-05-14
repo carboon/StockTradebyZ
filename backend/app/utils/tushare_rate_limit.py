@@ -23,7 +23,10 @@ STATE_DIR = ROOT / "data" / "run"
 FALLBACK_STATE_DIR = Path(tempfile.gettempdir()) / "stocktrade_run"
 
 WINDOW_SECONDS = int(os.environ.get("TUSHARE_RATE_LIMIT_WINDOW_SECONDS", "60"))
-MAX_REQUESTS_PER_WINDOW = int(os.environ.get("TUSHARE_MAX_REQUESTS_PER_MINUTE", "800"))
+# 提高默认限流阈值以加速数据抓取
+MAX_REQUESTS_PER_WINDOW = int(os.environ.get("TUSHARE_MAX_REQUESTS_PER_MINUTE", "5000"))
+# 设置环境变量 TUSHARE_NO_RATE_LIMIT=1 可完全跳过限流
+NO_RATE_LIMIT = os.environ.get("TUSHARE_NO_RATE_LIMIT", "0") == "1"
 
 
 def _resolve_state_paths() -> tuple[Path, Path]:
@@ -65,7 +68,8 @@ def _save_state(state: dict[str, Any]) -> None:
 def acquire_tushare_slot(endpoint: str = "unknown") -> None:
     del endpoint
 
-    if MAX_REQUESTS_PER_WINDOW <= 0 or WINDOW_SECONDS <= 0:
+    # 完全跳过限流检查以加速
+    if NO_RATE_LIMIT or MAX_REQUESTS_PER_WINDOW <= 0 or WINDOW_SECONDS <= 0:
         return
 
     _, lock_file = _resolve_state_paths()

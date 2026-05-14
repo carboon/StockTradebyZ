@@ -659,13 +659,16 @@ class DailyDataService:
                     }
                     df = df.rename(columns=column_map)
 
-                    # 确保 code 列存在
-                    if "code" not in df.columns:
-                        df["code"] = code
+                    # data/raw 导入时以文件名作为权威代码，避免 CSV 内空 code/脏 code 造成串档。
+                    df["code"] = code
 
                     # 确保 trade_date 是 date 类型
                     if "trade_date" in df.columns:
                         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+
+                    # 同一股票同一交易日可能存在重复行，保留最后一条有效记录。
+                    if "trade_date" in df.columns:
+                        df = df.sort_values("trade_date").drop_duplicates(subset=["trade_date"], keep="last")
 
                     # 转换为记录
                     for _, row in df.iterrows():
@@ -757,13 +760,16 @@ class DailyDataService:
                     }
                     df = df.rename(columns=column_map)
 
-                    # 确保 code 列存在
-                    if "code" not in df.columns:
-                        df["code"] = code
+                    # data/raw 导入时以文件名作为权威代码，避免 CSV 内空 code/脏 code 造成串档。
+                    df["code"] = code
 
                     # 确保 trade_date 是 date 类型并格式化为 YYYY-MM-DD
                     if "trade_date" in df.columns:
                         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date.astype(str)
+
+                    # 同一股票同一交易日可能存在重复行，保留最后一条有效记录。
+                    if "trade_date" in df.columns:
+                        df = df.sort_values("trade_date").drop_duplicates(subset=["trade_date"], keep="last")
 
                     # 确保所有必需列存在
                     required_cols = ["code", "trade_date", "open", "close", "high", "low", "volume"]
