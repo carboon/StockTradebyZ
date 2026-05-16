@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from app.config import settings
-from app.models import Candidate, DailyB1Check, IntradayAnalysisSnapshot, Stock, StockDaily
+from app.models import Candidate, DailyB1Check, IntradayAnalysisSnapshot, Stock, StockActivePoolRank, StockDaily
 from app.services.intraday_analysis_service import ASIA_SHANGHAI
 
 
@@ -54,6 +54,18 @@ def test_intraday_status_returns_admin_debug_state_without_snapshot(test_client_
     assert data["status"] == "window_closed"
     assert data["window_open"] is False
     assert data["has_data"] is False
+
+
+def test_intraday_status_opens_during_midday_break(test_client_with_db: Any) -> None:
+    fake_now = datetime(2026, 5, 8, 11, 33, tzinfo=ASIA_SHANGHAI)
+
+    with patch("app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai", return_value=fake_now):
+        response = test_client_with_db.get("/api/v1/analysis/intraday/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["window_open"] is True
+    assert data["status"] == "not_ready"
 
 
 def test_intraday_data_returns_snapshot_for_admin_when_exists(test_client_with_db: Any) -> None:
@@ -132,6 +144,48 @@ def test_intraday_data_returns_snapshot_for_admin_when_exists(test_client_with_d
     assert data["items"][0]["active_pool_rank"] == 21
 
 
+def test_intraday_data_remains_visible_for_regular_user_after_window_closes(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    trade_date = date(2026, 5, 8)
+    source_pick_date = date(2026, 5, 7)
+    snapshot_time = datetime(2026, 5, 8, 11, 35, tzinfo=ASIA_SHANGHAI)
+    after_close = datetime(2026, 5, 8, 15, 30, tzinfo=ASIA_SHANGHAI)
+
+    db.add(Stock(code="600000", name="浦发银行", market="SH"))
+    db.add(
+        IntradayAnalysisSnapshot(
+            trade_date=trade_date,
+            code="600000",
+            source_pick_date=source_pick_date,
+            snapshot_time=snapshot_time,
+            open_price=10.0,
+            close_price=10.5,
+            high_price=10.8,
+            low_price=9.9,
+            volume=123456.0,
+            amount=7890000.0,
+            change_pct=2.5,
+            b1_passed=True,
+            score=5.2,
+            verdict="PASS",
+            signal_type="trend_start",
+            details_json={"midday_price": 10.3, "latest_price": 10.5, "midday_time": "11:30:00"},
+        )
+    )
+    db.commit()
+
+    with patch("app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai", return_value=after_close):
+        response = test_client_with_db.get("/api/v1/analysis/intraday/data")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["has_data"] is True
+    assert data["window_open"] is False
+    assert data["total"] == 1
+    assert data["items"][0]["code"] == "600000"
+
+
 def test_intraday_generate_creates_snapshot_for_admin(test_client_with_db: Any) -> None:
     db = test_client_with_db.db
     trade_date = date(2026, 5, 8)
@@ -139,6 +193,22 @@ def test_intraday_generate_creates_snapshot_for_admin(test_client_with_db: Any) 
     db.add(Stock(code="600000", name="浦发银行", market="SH"))
     db.add(Candidate(pick_date=source_pick_date, code="600000", strategy="b1"))
     _seed_stock_history(test_client_with_db, "600000", source_pick_date, days=90)
+    source_daily = db.query(StockDaily).filter(StockDaily.code == "600000", StockDaily.trade_date == source_pick_date).first()
+    if source_daily is not None:
+        source_daily.turnover_rate = 5.6
+        source_daily.volume_ratio = 1.8
+    db.add(
+        StockActivePoolRank(
+            trade_date=source_pick_date,
+            code="600000",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=100000.0,
+            active_pool_rank=21,
+            in_active_pool=True,
+        )
+    )
+    db.commit()
 
     fake_now = datetime(2026, 5, 8, 12, 30, tzinfo=ASIA_SHANGHAI)
     fake_quote = pd.DataFrame(
@@ -223,6 +293,9 @@ def test_intraday_generate_creates_snapshot_for_admin(test_client_with_db: Any) 
     assert row.source_pick_date == source_pick_date
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert row.details_json["turnover_rate"] == 5.6
+    assert row.details_json["volume_ratio"] == 1.8
+    assert row.details_json["active_pool_rank"] == 21
 
 
 def test_intraday_generate_rebuilds_from_local_raw_cache(
@@ -323,6 +396,67 @@ def test_intraday_generate_rebuilds_from_local_raw_cache(
     row = db.query(IntradayAnalysisSnapshot).filter(IntradayAnalysisSnapshot.trade_date == trade_date).one()
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+
+
+def test_intraday_prefetch_downloads_raw_data_for_candidates_and_benchmarks(
+    test_client_with_db: Any,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    db = test_client_with_db.db
+    trade_date = date(2026, 5, 8)
+    source_pick_date = date(2026, 5, 7)
+    monkeypatch.setattr(settings, "intraday_raw_data_dir", tmp_path / "raw_intraday")
+
+    db.add(Stock(code="600000", name="浦发银行", market="SH"))
+    db.add(Candidate(pick_date=source_pick_date, code="600000", strategy="b1"))
+    db.add(StockDaily(code="600000", trade_date=source_pick_date, open=10.0, close=10.1, high=10.2, low=9.9, volume=100000))
+    db.add(StockDaily(code="600000", trade_date=trade_date, open=10.2, close=10.3, high=10.4, low=10.1, volume=110000))
+    db.commit()
+
+    fake_now = datetime(2026, 5, 8, 11, 33, tzinfo=ASIA_SHANGHAI)
+
+    def fake_fetch(_self: Any, ts_code: str) -> pd.DataFrame:
+        normalized_ts_code = str(ts_code).upper()
+        code = normalized_ts_code.split(".")[0].zfill(6)
+        return pd.DataFrame([
+            {
+                "ts_code": normalized_ts_code,
+                "normalized_ts_code": normalized_ts_code,
+                "code": code,
+                "trade_time": "2026-05-08 11:30:00",
+                "time": "2026-05-08 11:30:00",
+                "open": 12.0,
+                "close": 12.4,
+                "high": 12.5,
+                "low": 11.9,
+                "vol": 125000.0,
+                "amount": 1550000.0,
+                "pre_close": 10.92,
+            },
+        ])
+
+    with patch("app.api.analysis.ensure_tushare_ready_if_configured", return_value=None), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai",
+        return_value=fake_now,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_eastmoney_trends",
+        autospec=True,
+        side_effect=fake_fetch,
+    ), patch(
+        "app.services.intraday_analysis_service.IntradayAnalysisService._fetch_tencent_minute_trends",
+        return_value=pd.DataFrame(),
+    ):
+        response = test_client_with_db.post("/api/v1/analysis/intraday/prefetch?date=2026-05-08")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["requested_count"] == 4
+    assert payload["ready_count"] == 4
+    assert payload["midday_ready_count"] == 4
+    assert (tmp_path / "raw_intraday" / "2026-05-08" / "eastmoney" / "600000.SH.json").exists()
+    assert (tmp_path / "raw_intraday" / "2026-05-08" / "eastmoney" / "000905.SH.json").exists()
 
 
 def test_intraday_generate_falls_back_to_tencent_minute_data(

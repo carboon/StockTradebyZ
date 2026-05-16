@@ -12,6 +12,7 @@ import type {
   CurrentHotCandidatesResponse,
   CurrentHotDatesResponse,
   CurrentHotIntradayAnalysisActionResponse,
+  CurrentHotIntradayAnalysisPrefetchResponse,
   CurrentHotIntradayAnalysisResponse,
   CurrentHotIntradayAnalysisStatusResponse,
   DataFreshnessResponse,
@@ -23,6 +24,7 @@ import type {
   DiagnosisResultResponse,
   FreshnessResponse,
   IntradayAnalysisActionResponse,
+  IntradayAnalysisPrefetchResponse,
   IntradayAnalysisResponse,
   IntradayAnalysisStatusResponse,
   DailyBatchUpdateResponse,
@@ -265,6 +267,10 @@ export const apiAnalysis = {
   refreshMidday: () =>
     api.post<null, IntradayAnalysisActionResponse>('/v1/analysis/intraday/generate', null, { timeout: TIMEOUTS.standard }),
 
+  // 预下载中盘分时数据
+  prefetchMidday: () =>
+    api.post<null, IntradayAnalysisPrefetchResponse>('/v1/analysis/intraday/prefetch', null, { timeout: TIMEOUTS.standard }),
+
   // 获取当前热盘中盘分析状态
   getCurrentHotMiddayStatus: (options?: RequestOptions) =>
     api.get<never, CurrentHotIntradayAnalysisStatusResponse>('/v1/analysis/current-hot/intraday/status', withRequestOptions(options, TIMEOUTS.short)),
@@ -280,6 +286,10 @@ export const apiAnalysis = {
   // 手动刷新当前热盘中盘分析
   refreshCurrentHotMidday: () =>
     api.post<null, CurrentHotIntradayAnalysisActionResponse>('/v1/analysis/current-hot/intraday/generate', null, { timeout: TIMEOUTS.standard }),
+
+  // 预下载当前热盘中盘分时数据
+  prefetchCurrentHotMidday: () =>
+    api.post<null, CurrentHotIntradayAnalysisPrefetchResponse>('/v1/analysis/current-hot/intraday/prefetch', null, { timeout: TIMEOUTS.standard }),
 
   // 获取单股诊断历史
   getDiagnosisHistory: (

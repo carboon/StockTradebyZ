@@ -555,6 +555,14 @@
                   </el-tag>
                   <el-button
                     v-if="authStore.isAdmin"
+                    size="small"
+                    :loading="loadingMiddayAction"
+                    @click="runMiddayAdminAction('prefetch')"
+                  >
+                    预下载
+                  </el-button>
+                  <el-button
+                    v-if="authStore.isAdmin"
                     type="primary"
                     size="small"
                     :loading="loadingMiddayAction"
@@ -696,6 +704,14 @@
                   >
                     生成中
                   </el-tag>
+                  <el-button
+                    v-if="authStore.isAdmin"
+                    size="small"
+                    :loading="loadingMiddayAction"
+                    @click="runMiddayAdminAction('prefetch')"
+                  >
+                    预下载
+                  </el-button>
                   <el-button
                     v-if="authStore.isAdmin"
                     type="primary"
@@ -2536,7 +2552,7 @@ async function refreshMiddayView() {
   await loadMiddayData(true)
 }
 
-async function runMiddayAdminAction(action: 'generate' | 'refresh') {
+async function runMiddayAdminAction(action: 'generate' | 'refresh' | 'prefetch') {
   if (loadingMiddayAction.value) return
 
   loadingMiddayAction.value = true
@@ -2548,16 +2564,37 @@ async function runMiddayAdminAction(action: 'generate' | 'refresh') {
           ? await apiAnalysis.refreshCurrentHotMidday()
           : await apiAnalysis.refreshMidday()
       )
-      : (
-        isCurrentHotSource
-          ? await apiAnalysis.generateCurrentHotMidday()
-          : await apiAnalysis.generateMidday()
-      )
-    ElMessage.success(response.message || (action === 'refresh' ? '中盘分析已刷新' : '中盘分析已生成'))
+      : action === 'prefetch'
+        ? (
+          isCurrentHotSource
+            ? await apiAnalysis.prefetchCurrentHotMidday()
+            : await apiAnalysis.prefetchMidday()
+        )
+        : (
+          isCurrentHotSource
+            ? await apiAnalysis.generateCurrentHotMidday()
+            : await apiAnalysis.generateMidday()
+        )
+    ElMessage.success(
+      response.message || (
+        action === 'refresh'
+          ? '中盘分析已刷新'
+          : action === 'prefetch'
+            ? '中盘分时数据已预下载'
+            : '中盘分析已生成'
+      ),
+    )
     await loadMiddayData(true)
   } catch (error) {
     console.error(`Failed to ${action} intraday analysis:`, error)
-    ElMessage.error(getUserSafeErrorMessage(error, action === 'refresh' ? '刷新中盘分析失败' : '生成中盘分析失败'))
+    ElMessage.error(getUserSafeErrorMessage(
+      error,
+      action === 'refresh'
+        ? '刷新中盘分析失败'
+        : action === 'prefetch'
+          ? '预下载中盘分时数据失败'
+          : '生成中盘分析失败',
+    ))
   } finally {
     loadingMiddayAction.value = false
   }

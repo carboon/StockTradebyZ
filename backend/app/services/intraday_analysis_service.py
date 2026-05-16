@@ -19,7 +19,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import AnalysisResult, Candidate, DailyB1Check, DailyB1CheckDetail, IntradayAnalysisSnapshot, Stock, StockDaily
+from app.models import AnalysisResult, Candidate, DailyB1Check, DailyB1CheckDetail, IntradayAnalysisSnapshot, Stock, StockActivePoolRank, StockDaily
 from app.services.analysis_service import analysis_service
 from app.services.exit_plan_service import ExitPlanService
 from app.services.tushare_service import TushareService
@@ -47,7 +47,7 @@ class IntradayAnalysisService:
     EASTMONEY_UT = "fa5fd1943c7b386f172d6893dbfba10b"
     TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
     MARKET_MINUTES_PER_DAY = 240
-    WINDOW_START = time(12, 0)
+    WINDOW_START = time(11, 30)
     WINDOW_END = time(15, 0)
     MIDDAY_CUTOFF = "11:30:00"
     MARKET_BENCHMARKS = (
@@ -161,7 +161,7 @@ class IntradayAnalysisService:
             message = "尚未生成中盘分析快照"
         elif not window_open:
             status = "window_closed"
-            message = "普通用户仅可在 12:00-15:00 查看中盘分析"
+            message = "普通用户仅可在 11:30-15:00 查看中盘分析"
         else:
             status = "not_ready"
             message = "今日中盘分析快照尚未生成"
@@ -523,6 +523,130 @@ class IntradayAnalysisService:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
 
+    def _prefetch_intraday_raw_data(
+        self,
+        *,
+        trade_date: date,
+        codes: list[str],
+        include_market_benchmarks: bool = True,
+    ) -> dict[str, Any]:
+        current_trade_date = self.get_trade_date()
+        requested_ts_codes = [self._with_suffix(code) for code in codes]
+        if include_market_benchmarks:
+            requested_ts_codes.extend(benchmark["ts_code"] for benchmark in self.MARKET_BENCHMARKS)
+
+        normalized_ts_codes: list[str] = []
+        seen: set[str] = set()
+        for ts_code in requested_ts_codes:
+            normalized_ts_code = self._with_suffix(ts_code)
+            if normalized_ts_code in seen:
+                continue
+            normalized_ts_codes.append(normalized_ts_code)
+            seen.add(normalized_ts_code)
+
+        requested_count = len(normalized_ts_codes)
+        ready_count = 0
+        missing_count = 0
+        midday_ready_count = 0
+        cached_count = 0
+        downloaded_count = 0
+
+        for ts_code in normalized_ts_codes:
+            cached_before = not self._read_intraday_raw(trade_date, ts_code).empty
+            frame = self._fetch_intraday_raw_once(trade_date, ts_code)
+            if frame is None or frame.empty:
+                missing_count += 1
+                continue
+
+            ready_count += 1
+            if cached_before:
+                cached_count += 1
+            elif trade_date == current_trade_date:
+                downloaded_count += 1
+
+            if self._has_midday_row(frame, code=ts_code.split(".")[0]):
+                midday_ready_count += 1
+
+        if requested_count == 0:
+            status = "empty"
+            message = "无可预下载的分时标的"
+        elif ready_count == 0:
+            status = "fetch_failed"
+            message = "分时数据预下载失败"
+        elif missing_count == 0:
+            status = "ok"
+            message = f"已准备 {ready_count}/{requested_count} 份分时数据，其中 {midday_ready_count} 份含 11:30 行情"
+        else:
+            status = "partial"
+            message = (
+                f"已准备 {ready_count}/{requested_count} 份分时数据，"
+                f"仍缺失 {missing_count} 份，其中 {midday_ready_count} 份含 11:30 行情"
+            )
+
+        return {
+            "trade_date": trade_date,
+            "window_open": self.is_window_open(),
+            "status": status,
+            "message": message,
+            "requested_count": requested_count,
+            "ready_count": ready_count,
+            "missing_count": missing_count,
+            "midday_ready_count": midday_ready_count,
+            "cached_count": cached_count,
+            "downloaded_count": downloaded_count,
+        }
+
+    def prefetch_snapshot_data(self, *, trade_date: Optional[date] = None) -> dict[str, Any]:
+        target_trade_date = trade_date or self.get_trade_date()
+        source_pick_date = self._get_source_pick_date(target_trade_date)
+        snapshot_time = self._get_latest_snapshot_time(target_trade_date)
+        has_data = snapshot_time is not None
+
+        if source_pick_date is None:
+            return {
+                "trade_date": target_trade_date,
+                "source_pick_date": None,
+                "snapshot_time": snapshot_time,
+                "window_open": self.is_window_open(),
+                "has_data": has_data,
+                "status": "missing_source",
+                "message": "未找到前一交易日候选股，无法预下载中盘分时数据",
+                "requested_count": 0,
+                "ready_count": 0,
+                "missing_count": 0,
+                "midday_ready_count": 0,
+                "cached_count": 0,
+                "downloaded_count": 0,
+            }
+
+        candidates = self._get_candidates(source_pick_date)
+        if not candidates:
+            return {
+                "trade_date": target_trade_date,
+                "source_pick_date": source_pick_date,
+                "snapshot_time": snapshot_time,
+                "window_open": self.is_window_open(),
+                "has_data": has_data,
+                "status": "missing_source",
+                "message": "前一交易日无候选股数据，无法预下载中盘分时数据",
+                "requested_count": 0,
+                "ready_count": 0,
+                "missing_count": 0,
+                "midday_ready_count": 0,
+                "cached_count": 0,
+                "downloaded_count": 0,
+            }
+
+        payload = self._prefetch_intraday_raw_data(
+            trade_date=target_trade_date,
+            codes=[candidate.code.zfill(6) for candidate in candidates],
+            include_market_benchmarks=True,
+        )
+        payload["source_pick_date"] = source_pick_date
+        payload["snapshot_time"] = snapshot_time
+        payload["has_data"] = has_data
+        return payload
+
     def _build_realtime_quotes_from_minute_df(self, minute_df: pd.DataFrame) -> pd.DataFrame:
         if minute_df is None or minute_df.empty or "code" not in minute_df.columns:
             return pd.DataFrame()
@@ -798,6 +922,7 @@ class IntradayAnalysisService:
         b1_check = b1_row[0] if b1_row else None
         detail = b1_row[1] if b1_row else None
         score_details = detail.score_details_json if detail and isinstance(detail.score_details_json, dict) else {}
+        fallback_metrics = self._get_market_metric_fallback(code, source_pick_date)
 
         result = {
             "pick_date": source_pick_date.isoformat(),
@@ -806,11 +931,49 @@ class IntradayAnalysisService:
             "signal_type": analysis_row.signal_type if analysis_row else score_details.get("signal_type"),
             "comment": analysis_row.comment if analysis_row else score_details.get("comment"),
             "b1_passed": b1_check.b1_passed if b1_check else None,
-            "active_pool_rank": b1_check.active_pool_rank if b1_check else None,
-            "turnover_rate": b1_check.turnover_rate if b1_check else None,
-            "volume_ratio": b1_check.volume_ratio if b1_check else None,
+            "active_pool_rank": (
+                b1_check.active_pool_rank
+                if b1_check and b1_check.active_pool_rank is not None
+                else fallback_metrics.get("active_pool_rank")
+            ),
+            "turnover_rate": (
+                b1_check.turnover_rate
+                if b1_check and b1_check.turnover_rate is not None
+                else fallback_metrics.get("turnover_rate")
+            ),
+            "volume_ratio": (
+                b1_check.volume_ratio
+                if b1_check and b1_check.volume_ratio is not None
+                else fallback_metrics.get("volume_ratio")
+            ),
         }
         return result
+
+    def _get_market_metric_fallback(self, code: str, reference_date: date) -> dict[str, Any]:
+        daily_row = (
+            self.db.query(StockDaily.trade_date, StockDaily.turnover_rate, StockDaily.volume_ratio)
+            .filter(
+                StockDaily.code == str(code).zfill(6),
+                StockDaily.trade_date <= reference_date,
+            )
+            .order_by(StockDaily.trade_date.desc())
+            .first()
+        )
+        active_rank_row = (
+            self.db.query(StockActivePoolRank.trade_date, StockActivePoolRank.active_pool_rank)
+            .filter(
+                StockActivePoolRank.code == str(code).zfill(6),
+                StockActivePoolRank.trade_date <= reference_date,
+            )
+            .order_by(StockActivePoolRank.trade_date.desc(), StockActivePoolRank.active_pool_rank.asc())
+            .first()
+        )
+        return {
+            "metrics_trade_date": daily_row[0] if daily_row else (active_rank_row[0] if active_rank_row else None),
+            "turnover_rate": daily_row[1] if daily_row and daily_row[1] is not None else None,
+            "volume_ratio": daily_row[2] if daily_row and daily_row[2] is not None else None,
+            "active_pool_rank": active_rank_row[1] if active_rank_row and active_rank_row[1] is not None else None,
+        }
 
     def _build_relative_market_status(
         self,
@@ -1157,7 +1320,7 @@ class IntradayAnalysisService:
 
     def get_snapshot_payload(self, *, trade_date: Optional[date] = None, is_admin: bool = False) -> dict[str, Any]:
         status = self.get_status(trade_date=trade_date, is_admin=is_admin)
-        if not is_admin and (not status.window_open or not status.has_data):
+        if not is_admin and not status.has_data:
             return {
                 "trade_date": status.trade_date,
                 "source_pick_date": status.source_pick_date,

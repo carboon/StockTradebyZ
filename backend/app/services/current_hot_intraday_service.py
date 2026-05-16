@@ -38,7 +38,7 @@ class CurrentHotIntradayStatus:
 class CurrentHotIntradayAnalysisService:
     """当前热盘中盘分析服务。"""
 
-    WINDOW_START = time(12, 0)
+    WINDOW_START = time(11, 30)
     WINDOW_END = time(15, 0)
     MIDDAY_CUTOFF = "11:30:00"
 
@@ -108,7 +108,7 @@ class CurrentHotIntradayAnalysisService:
             message = "尚未生成当前热盘中盘分析快照"
         elif not window_open:
             status = "window_closed"
-            message = "普通用户仅可在 12:00-15:00 查看当前热盘中盘分析"
+            message = "普通用户仅可在 11:30-15:00 查看当前热盘中盘分析"
         else:
             status = "not_ready"
             message = "今日当前热盘中盘分析快照尚未生成"
@@ -210,6 +210,7 @@ class CurrentHotIntradayAnalysisService:
         b1_check = row[0] if row else None
         detail = row[1] if row else None
         score_details = detail.score_details_json if detail and isinstance(detail.score_details_json, dict) else {}
+        fallback_metrics = IntradayAnalysisService(self.db)._get_market_metric_fallback(code, trade_date)
         return {
             "pick_date": trade_date.isoformat(),
             "verdict": score_details.get("verdict"),
@@ -217,9 +218,21 @@ class CurrentHotIntradayAnalysisService:
             "signal_type": score_details.get("signal_type"),
             "comment": score_details.get("comment"),
             "b1_passed": b1_check.b1_passed if b1_check else None,
-            "active_pool_rank": b1_check.active_pool_rank if b1_check else None,
-            "turnover_rate": b1_check.turnover_rate if b1_check else None,
-            "volume_ratio": b1_check.volume_ratio if b1_check else None,
+            "active_pool_rank": (
+                b1_check.active_pool_rank
+                if b1_check and b1_check.active_pool_rank is not None
+                else fallback_metrics.get("active_pool_rank")
+            ),
+            "turnover_rate": (
+                b1_check.turnover_rate
+                if b1_check and b1_check.turnover_rate is not None
+                else fallback_metrics.get("turnover_rate")
+            ),
+            "volume_ratio": (
+                b1_check.volume_ratio
+                if b1_check and b1_check.volume_ratio is not None
+                else fallback_metrics.get("volume_ratio")
+            ),
         }
 
     def _build_pool_metric_map(self, trade_date: date) -> dict[str, dict[str, Any]]:
@@ -370,9 +383,12 @@ class CurrentHotIntradayAnalysisService:
             relative_market_status=relative_market_status,
             market_bias=market_overview.get("market_bias"),
         )
-        turnover_rate = self._to_float(pool_item.get("turnover_rate")) if pool_item else previous_analysis.get("turnover_rate")
-        volume_ratio = self._to_float(pool_item.get("volume_ratio")) if pool_item else previous_analysis.get("volume_ratio")
-        active_pool_rank = pool_item.get("active_pool_rank") if pool_item else previous_analysis.get("active_pool_rank")
+        pool_turnover_rate = self._to_float(pool_item.get("turnover_rate")) if pool_item else None
+        pool_volume_ratio = self._to_float(pool_item.get("volume_ratio")) if pool_item else None
+        pool_active_pool_rank = pool_item.get("active_pool_rank") if pool_item else None
+        turnover_rate = pool_turnover_rate if pool_turnover_rate is not None else previous_analysis.get("turnover_rate")
+        volume_ratio = pool_volume_ratio if pool_volume_ratio is not None else previous_analysis.get("volume_ratio")
+        active_pool_rank = pool_active_pool_rank if pool_active_pool_rank is not None else previous_analysis.get("active_pool_rank")
 
         return {
             "trade_date": trade_date,
@@ -550,7 +566,7 @@ class CurrentHotIntradayAnalysisService:
 
     def get_snapshot_payload(self, *, trade_date: Optional[date] = None, is_admin: bool = False) -> dict[str, Any]:
         status = self.get_status(trade_date=trade_date, is_admin=is_admin)
-        if not is_admin and (not status.window_open or not status.has_data):
+        if not is_admin and not status.has_data:
             return {
                 "trade_date": status.trade_date,
                 "source_pick_date": status.source_pick_date,
@@ -628,3 +644,36 @@ class CurrentHotIntradayAnalysisService:
             "items": items,
             "total": len(items),
         }
+
+    def prefetch_snapshot_data(self, *, trade_date: Optional[date] = None) -> dict[str, Any]:
+        target_trade_date = trade_date or self.get_trade_date()
+        snapshot_time = self._get_latest_snapshot_time(target_trade_date)
+        has_data = snapshot_time is not None
+        entries = self.current_hot_service.get_pool_entries()
+        if not entries:
+            return {
+                "trade_date": target_trade_date,
+                "source_pick_date": target_trade_date,
+                "snapshot_time": snapshot_time,
+                "window_open": self.is_window_open(),
+                "has_data": has_data,
+                "status": "empty_pool",
+                "message": "当前热盘配置为空，无法预下载中盘分时数据",
+                "requested_count": 0,
+                "ready_count": 0,
+                "missing_count": 0,
+                "midday_ready_count": 0,
+                "cached_count": 0,
+                "downloaded_count": 0,
+            }
+
+        payload = IntradayAnalysisService(self.db)._prefetch_intraday_raw_data(
+            trade_date=target_trade_date,
+            codes=[entry.code for entry in entries],
+            include_market_benchmarks=True,
+        )
+        payload["source_pick_date"] = target_trade_date
+        payload["snapshot_time"] = snapshot_time
+        payload["has_data"] = has_data
+        payload["window_open"] = self.is_window_open()
+        return payload

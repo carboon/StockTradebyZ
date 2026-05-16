@@ -45,10 +45,12 @@ vi.mock('@/api', () => ({
     getMiddayCurrent: vi.fn(),
     generateMidday: vi.fn(),
     refreshMidday: vi.fn(),
+    prefetchMidday: vi.fn(),
     getCurrentHotMiddayStatus: vi.fn(),
     getCurrentHotMiddayCurrent: vi.fn(),
     generateCurrentHotMidday: vi.fn(),
     refreshCurrentHotMidday: vi.fn(),
+    prefetchCurrentHotMidday: vi.fn(),
   },
   apiTasks: {
     startIncrementalUpdate: vi.fn(),

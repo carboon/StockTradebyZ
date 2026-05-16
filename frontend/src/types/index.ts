@@ -644,9 +644,26 @@ export interface IntradayAnalysisActionResponse {
   skipped_count?: number
 }
 
+export interface IntradayAnalysisPrefetchResponse {
+  trade_date?: string | null
+  source_pick_date?: string | null
+  snapshot_time?: string | null
+  window_open?: boolean | null
+  has_data?: boolean
+  status?: string | null
+  message?: string | null
+  requested_count?: number
+  ready_count?: number
+  missing_count?: number
+  midday_ready_count?: number
+  cached_count?: number
+  downloaded_count?: number
+}
+
 export type CurrentHotIntradayAnalysisStatusResponse = IntradayAnalysisStatusResponse
 export type CurrentHotIntradayAnalysisResponse = IntradayAnalysisResponse
 export type CurrentHotIntradayAnalysisActionResponse = IntradayAnalysisActionResponse
+export type CurrentHotIntradayAnalysisPrefetchResponse = IntradayAnalysisPrefetchResponse
 
 export interface DiagnosisHistoryResponse {
   code: string

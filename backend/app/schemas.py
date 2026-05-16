@@ -271,6 +271,23 @@ class IntradayAnalysisGenerateResponse(BaseModel):
     skipped_count: int = 0
 
 
+class IntradayAnalysisPrefetchResponse(BaseModel):
+    """中盘分析分时原始数据预下载响应"""
+    trade_date: date_class
+    source_pick_date: Optional[date_class] = None
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    requested_count: int = 0
+    ready_count: int = 0
+    missing_count: int = 0
+    midday_ready_count: int = 0
+    cached_count: int = 0
+    downloaded_count: int = 0
+
+
 class CurrentHotIntradayAnalysisItem(BaseModel):
     """当前热盘中盘分析快照项"""
     id: int
@@ -339,6 +356,23 @@ class CurrentHotIntradayAnalysisGenerateResponse(BaseModel):
     message: Optional[str] = None
     generated_count: int = 0
     skipped_count: int = 0
+
+
+class CurrentHotIntradayAnalysisPrefetchResponse(BaseModel):
+    """当前热盘中盘分时原始数据预下载响应"""
+    trade_date: date_class
+    source_pick_date: Optional[date_class] = None
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    requested_count: int = 0
+    ready_count: int = 0
+    missing_count: int = 0
+    midday_ready_count: int = 0
+    cached_count: int = 0
+    downloaded_count: int = 0
 
 
 class TomorrowStarHistoryItem(BaseModel):

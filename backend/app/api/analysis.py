@@ -48,11 +48,13 @@ from app.schemas import (
     CurrentHotDatesResponse,
     CurrentHotHistoryItem,
     CurrentHotIntradayAnalysisGenerateResponse,
+    CurrentHotIntradayAnalysisPrefetchResponse,
     CurrentHotIntradayAnalysisResponse,
     TomorrowStarDatesResponse,
     TomorrowStarHistoryItem,
     TomorrowStarWindowStatusResponse,
     IntradayAnalysisGenerateResponse,
+    IntradayAnalysisPrefetchResponse,
     IntradayAnalysisResponse,
     DiagnosisHistoryResponse,
     DiagnosisHistoryDetailResponse,
@@ -852,6 +854,21 @@ async def generate_current_hot_intraday(
     return CurrentHotIntradayAnalysisGenerateResponse(**payload)
 
 
+@router.post("/current-hot/intraday/prefetch", response_model=CurrentHotIntradayAnalysisPrefetchResponse)
+async def prefetch_current_hot_intraday(
+    date: Optional[str] = Query(default=None, description="交易日，格式 YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> CurrentHotIntradayAnalysisPrefetchResponse:
+    ensure_tushare_ready_if_configured()
+    service = CurrentHotIntradayAnalysisService(db)
+    parsed_date = _parse_date_or_none(date)
+    if date and parsed_date is None:
+        raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
+    payload = service.prefetch_snapshot_data(trade_date=parsed_date)
+    return CurrentHotIntradayAnalysisPrefetchResponse(**payload)
+
+
 @router.get("/intraday/status")
 async def get_intraday_analysis_status(
     db: Session = Depends(get_db),
@@ -893,6 +910,21 @@ async def generate_intraday_analysis(
         raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
     payload = service.generate_snapshot(trade_date=parsed_date)
     return IntradayAnalysisGenerateResponse(**payload)
+
+
+@router.post("/intraday/prefetch", response_model=IntradayAnalysisPrefetchResponse)
+async def prefetch_intraday_analysis(
+    date: Optional[str] = Query(default=None, description="交易日，格式 YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+) -> IntradayAnalysisPrefetchResponse:
+    ensure_tushare_ready_if_configured()
+    service = IntradayAnalysisService(db)
+    parsed_date = _parse_date_or_none(date)
+    if date and parsed_date is None:
+        raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
+    payload = service.prefetch_snapshot_data(trade_date=parsed_date)
+    return IntradayAnalysisPrefetchResponse(**payload)
 
 
 @router.get("/diagnosis/{code}/history", response_model=DiagnosisHistoryResponse)
