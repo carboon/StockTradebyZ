@@ -16,6 +16,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
+import pandas as pd
 
 from app.api.cache_decorators import (
     build_candidates_cache_key,
@@ -25,8 +26,9 @@ from app.api.deps import get_admin_user, require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
 from app.api.tasks import _cleanup_stale_active_tasks, _raise_initialization_in_progress
 from app.cache import cache
+from app.config import settings
 from app.database import get_db
-from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, StockDaily, Task
+from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, StockDaily, Task, CurrentHotAnalysisResult
 from app.services.analysis_service import analysis_service
 from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysisService
 from app.services.current_hot_service import CurrentHotService
@@ -61,13 +63,24 @@ from app.schemas import (
     B1CheckItem,
     DiagnosisRequest,
     DiagnosisResponse,
+    SignalReturnAnalysisResponse,
+    SignalReturnBenchmark,
+    SignalReturnEventPoint,
+    SignalReturnItem,
+    SignalReturnTimelinePoint,
 )
+from pipeline.review_prefilter import TushareMetadataStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 DIAGNOSIS_HISTORY_WINDOW_DAYS = analysis_service.HISTORY_WINDOW_DAYS
+SIGNAL_RETURN_BENCHMARK = {
+    "name": "上证指数",
+    "ts_code": "000001.SH",
+}
 
 ROOT = Path(__file__).parent.parent.parent.parent
+_signal_return_benchmark_store: TushareMetadataStore | None = None
 
 
 def _parse_date_or_none(value: Optional[str]) -> Optional[date]:
@@ -1313,3 +1326,603 @@ async def generate_tomorrow_star(
         "task_id": result["task_id"],
         "ws_url": result["ws_url"],
     }
+
+
+def _get_next_trade_date(db: Session, pick_date: date) -> Optional[date]:
+    """获取下一个交易日"""
+    next_date = db.query(StockDaily.trade_date).filter(
+        StockDaily.trade_date > pick_date
+    ).order_by(StockDaily.trade_date.asc()).first()
+    return next_date[0] if next_date else None
+
+
+def _get_trade_date_offset(db: Session, base_date: date, offset_days: int, code: Optional[str] = None) -> Optional[date]:
+    """获取指定日期后N个交易日的日期
+
+    Args:
+        db: 数据库会话
+        base_date: 基准日期
+        offset_days: 偏移交易日数
+        code: 股票代码（可选，如果指定则按该股票的交易日历计算）
+    """
+    query = db.query(StockDaily.trade_date).filter(
+        StockDaily.trade_date > base_date
+    )
+    if code:
+        query = query.filter(StockDaily.code == code)
+    dates = query.order_by(StockDaily.trade_date.asc()).limit(offset_days).all()
+    if len(dates) >= offset_days:
+        return dates[offset_days - 1][0]
+    return None
+
+
+def _calculate_return(buy_price: float, current_price: float) -> float:
+    """计算收益率"""
+    if buy_price is None or current_price is None or buy_price == 0:
+        return None
+    return round((current_price - buy_price) / buy_price * 100, 2)
+
+
+def _get_stock_open_price(db: Session, code: str, trade_date: date) -> Optional[float]:
+    """获取股票在指定交易日的开盘价"""
+    record = db.query(StockDaily.open).filter(
+        StockDaily.code == code,
+        StockDaily.trade_date == trade_date
+    ).first()
+    return record[0] if record else None
+
+
+def _get_stock_close_price(db: Session, code: str, trade_date: date) -> Optional[float]:
+    """获取股票在指定交易日的收盘价"""
+    record = db.query(StockDaily.close).filter(
+        StockDaily.code == code,
+        StockDaily.trade_date == trade_date
+    ).first()
+    return record[0] if record else None
+
+
+def _get_stock_prices_range(db: Session, code: str, start_date: date, end_date: date) -> List[tuple]:
+    """获取股票在指定日期区间内的价格数据（日期，最高价，最低价，收盘价）"""
+    records = db.query(
+        StockDaily.trade_date,
+        StockDaily.high,
+        StockDaily.low,
+        StockDaily.close
+    ).filter(
+        StockDaily.code == code,
+        StockDaily.trade_date >= start_date,
+        StockDaily.trade_date <= end_date
+    ).order_by(StockDaily.trade_date.asc()).all()
+    return records
+
+
+def _get_stock_trade_dates_range(db: Session, code: str, start_date: date, end_date: date) -> List[date]:
+    """获取股票在指定日期区间内的交易日列表。"""
+    rows = db.query(
+        StockDaily.trade_date
+    ).filter(
+        StockDaily.code == code,
+        StockDaily.trade_date >= start_date,
+        StockDaily.trade_date <= end_date
+    ).order_by(StockDaily.trade_date.asc()).all()
+    return [row[0] for row in rows if row and row[0]]
+
+
+def _get_signal_return_benchmark_store() -> TushareMetadataStore | None:
+    """获取历史收益分析使用的大盘基准缓存。"""
+    global _signal_return_benchmark_store
+    if _signal_return_benchmark_store is not None:
+        return _signal_return_benchmark_store
+
+    token = os.environ.get("TUSHARE_TOKEN") or getattr(settings, "tushare_token", "")
+    if not token:
+        return None
+
+    try:
+        _signal_return_benchmark_store = TushareMetadataStore(
+            cache_dir=ROOT / "data" / "tushare_cache",
+            token=token,
+        )
+    except Exception:
+        logger.warning("初始化历史收益分析基准缓存失败", exc_info=True)
+        _signal_return_benchmark_store = None
+    return _signal_return_benchmark_store
+
+
+def _build_signal_return_benchmark_series(
+    start_date: date,
+    end_date: date,
+) -> tuple[Optional[SignalReturnBenchmark], dict[date, tuple[Optional[float], Optional[float]]]]:
+    """获取大盘基准曲线与按日期索引的收益率。"""
+    store = _get_signal_return_benchmark_store()
+    if store is None:
+        return None, {}
+
+    try:
+        frame = store.index_daily(
+            SIGNAL_RETURN_BENCHMARK["ts_code"],
+            start_date.strftime("%Y%m%d"),
+            end_date.strftime("%Y%m%d"),
+        )
+    except Exception:
+        logger.warning("获取历史收益分析基准数据失败", exc_info=True)
+        return None, {}
+
+    if frame is None or frame.empty:
+        return None, {}
+
+    normalized = frame.copy()
+    normalized.columns = [str(col).lower() for col in normalized.columns]
+    if "trade_date" not in normalized.columns or "close" not in normalized.columns:
+        return None, {}
+
+    trade_dates = pd.to_datetime(
+        normalized["trade_date"].astype(str).str.replace("-", "", regex=False).str.replace("/", "", regex=False),
+        format="%Y%m%d",
+        errors="coerce",
+    )
+    if trade_dates.isna().all():
+        trade_dates = pd.to_datetime(normalized["trade_date"], errors="coerce")
+    normalized["trade_date"] = trade_dates.dt.date
+    normalized["close"] = pd.to_numeric(normalized["close"], errors="coerce")
+    normalized = normalized.dropna(subset=["trade_date", "close"]).sort_values("trade_date").reset_index(drop=True)
+    if normalized.empty:
+        return None, {}
+
+    base_rows = normalized[normalized["trade_date"] == start_date]
+    if base_rows.empty:
+        base_rows = normalized[normalized["trade_date"] <= start_date].tail(1)
+    if base_rows.empty:
+        base_rows = normalized.head(1)
+
+    base_row = base_rows.iloc[0]
+    base_close = float(base_row["close"])
+    if not math.isfinite(base_close) or base_close == 0:
+        return None, {}
+
+    base_date = base_row["trade_date"]
+    benchmark = SignalReturnBenchmark(
+        name=SIGNAL_RETURN_BENCHMARK["name"],
+        ts_code=SIGNAL_RETURN_BENCHMARK["ts_code"],
+        base_date=base_date,
+        base_close=round(base_close, 2),
+    )
+
+    benchmark_points: dict[date, tuple[Optional[float], Optional[float]]] = {}
+    for row in normalized.itertuples(index=False):
+        trade_date = getattr(row, "trade_date", None)
+        close = getattr(row, "close", None)
+        if not isinstance(trade_date, date):
+            continue
+        if close is None or not math.isfinite(float(close)):
+            continue
+        close_value = round(float(close), 2)
+        benchmark_points[trade_date] = (
+            close_value,
+            _calculate_return(base_close, close_value),
+        )
+
+    return benchmark, benchmark_points
+
+
+def _ensure_signal_return_history_ready(
+    db: Session,
+    code: str,
+    *,
+    buy_date: Optional[date],
+    stock_current_date: Optional[date],
+) -> None:
+    """按需补齐 signal-return 依赖的历史诊断数据，避免结果留白。"""
+    if buy_date is None or stock_current_date is None or stock_current_date <= buy_date:
+        return
+
+    target_dates = [
+        item for item in _get_stock_trade_dates_range(db, code, buy_date, stock_current_date)
+        if item > buy_date
+    ]
+    if not target_dates:
+        return
+
+    existing_dates = {
+        row[0]
+        for row in (
+            db.query(DailyB1Check.check_date)
+            .join(
+                DailyB1CheckDetail,
+                (DailyB1CheckDetail.code == DailyB1Check.code)
+                & (DailyB1CheckDetail.check_date == DailyB1Check.check_date),
+            )
+            .filter(
+                DailyB1Check.code == code,
+                DailyB1Check.check_date.in_(target_dates),
+                DailyB1CheckDetail.status == "ready",
+            )
+            .all()
+        )
+        if row and row[0]
+    }
+    missing_dates = [item for item in target_dates if item not in existing_dates]
+    if not missing_dates:
+        return
+
+    result = analysis_service.ensure_history_dates(code, missing_dates)
+    if not result.get("success"):
+        logger.warning(
+            "signal return precompute failed code=%s buy_date=%s current_date=%s error=%s",
+            code,
+            buy_date,
+            stock_current_date,
+            result.get("error"),
+        )
+
+
+def _is_tomorrow_star(details_json: Optional[dict[str, Any]], verdict: Optional[str], signal_type: Optional[str]) -> bool:
+    """判断是否是明日之星"""
+    if not isinstance(details_json, dict):
+        return False
+
+    # 首先检查显式的tomorrow_star_pass
+    direct = details_json.get("tomorrow_star_pass")
+    if isinstance(direct, bool):
+        return direct
+
+    rules = details_json.get("rules")
+    if isinstance(rules, dict) and isinstance(rules.get("tomorrow_star_pass"), bool):
+        return rules["tomorrow_star_pass"]
+
+    details = details_json.get("details")
+    if isinstance(details, dict) and isinstance(details.get("tomorrow_star_pass"), bool):
+        return details["tomorrow_star_pass"]
+
+    # 如果没有显式标记，使用推导逻辑
+    prefilter = details_json.get("prefilter", {})
+    prefilter_passed = prefilter.get("passed") if isinstance(prefilter, dict) else None
+
+    if prefilter_passed is None:
+        return False
+
+    return bool(prefilter_passed and verdict == "PASS" and signal_type == "trend_start")
+
+
+@router.get("/signal-returns/{source}/{signal_type}/{pick_date}", response_model=SignalReturnAnalysisResponse)
+async def get_signal_returns(
+    source: str,
+    signal_type: str,
+    pick_date: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> SignalReturnAnalysisResponse:
+    """
+    获取历史信号收益率分析
+
+    参数:
+    - source: "tomorrow_star" | "current_hot"
+    - signal_type: "trend_start" | "tomorrow_star"
+    - pick_date: 信号日期 (YYYY-MM-DD)
+    """
+    try:
+        target_date = datetime.strptime(pick_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD 格式")
+
+    # 验证参数
+    if source not in ["tomorrow_star", "current_hot"]:
+        raise HTTPException(status_code=400, detail="source 参数必须是 tomorrow_star 或 current_hot")
+    if signal_type not in ["trend_start", "tomorrow_star"]:
+        raise HTTPException(status_code=400, detail="signal_type 参数必须是 trend_start 或 tomorrow_star")
+
+    # 获取下一个交易日（买入日）
+    buy_date = _get_next_trade_date(db, target_date)
+    if not buy_date:
+        raise HTTPException(status_code=404, detail="未找到下一个交易日数据")
+
+    # 获取股票代码列表
+    stock_codes = []
+    stock_names = {}
+
+    if source == "tomorrow_star":
+        # 从 AnalysisResult 获取
+        query = db.query(AnalysisResult.code, Stock.name, AnalysisResult.details_json, AnalysisResult.verdict, AnalysisResult.signal_type).join(
+            Stock, AnalysisResult.code == Stock.code
+        ).filter(AnalysisResult.pick_date == target_date)
+
+        if signal_type == "trend_start":
+            query = query.filter(AnalysisResult.signal_type == "trend_start")
+            results = query.all()
+            stock_codes = [r[0] for r in results]
+            stock_names = {r[0]: r[1] for r in results}
+        else:  # tomorrow_star - 需要从details_json中提取
+            results = query.all()
+            # 过滤出明日之星的记录
+            stock_codes = []
+            stock_names = {}
+            for r in results:
+                details_json = r[2]
+                verdict = r[3]
+                sig_type = r[4]
+                if _is_tomorrow_star(details_json, verdict, sig_type):
+                    stock_codes.append(r[0])
+                    stock_names[r[0]] = r[1]
+
+    else:  # current_hot
+        query = db.query(CurrentHotAnalysisResult.code, Stock.name, CurrentHotAnalysisResult.details_json, CurrentHotAnalysisResult.verdict, CurrentHotAnalysisResult.signal_type).join(
+            Stock, CurrentHotAnalysisResult.code == Stock.code
+        ).filter(CurrentHotAnalysisResult.pick_date == target_date)
+
+        if signal_type == "trend_start":
+            query = query.filter(CurrentHotAnalysisResult.signal_type == "trend_start")
+            results = query.all()
+            stock_codes = [r[0] for r in results]
+            stock_names = {r[0]: r[1] for r in results}
+        else:  # tomorrow_star - 需要从details_json中提取
+            results = query.all()
+            # 过滤出明日之星的记录
+            stock_codes = []
+            stock_names = {}
+            for r in results:
+                details_json = r[2]
+                verdict = r[3]
+                sig_type = r[4]
+                if _is_tomorrow_star(details_json, verdict, sig_type):
+                    stock_codes.append(r[0])
+                    stock_names[r[0]] = r[1]
+
+    if not stock_codes:
+        return SignalReturnAnalysisResponse(
+            pick_date=target_date,
+            signal_type=signal_type,
+            signal_label="启动" if signal_type == "trend_start" else "明日之星",
+            source=source,
+            stocks=[],
+            total=0,
+        )
+
+    # 计算每个股票的收益率
+    stock_contexts: list[dict[str, Any]] = []
+    day5_returns = []
+    day10_returns = []
+    day15_returns = []
+    current_returns = []
+    benchmark_end_date = buy_date
+
+    for code in stock_codes:
+        # 获取该股票的买入价格（开盘价）
+        buy_price = _get_stock_open_price(db, code, buy_date)
+
+        # 获取该股票各个持有期的结束日期（按该股票的交易日历）
+        day5_date = _get_trade_date_offset(db, buy_date, 5, code)
+        day10_date = _get_trade_date_offset(db, buy_date, 10, code)
+        day15_date = _get_trade_date_offset(db, buy_date, 15, code)
+
+        # 获取该股票的最新交易日日期
+        stock_latest_date_record = db.query(StockDaily.trade_date).filter(
+            StockDaily.code == code
+        ).order_by(StockDaily.trade_date.desc()).first()
+        stock_current_date = stock_latest_date_record[0] if stock_latest_date_record else None
+
+        _ensure_signal_return_history_ready(
+            db,
+            code,
+            buy_date=buy_date,
+            stock_current_date=stock_current_date,
+        )
+
+        # 获取各期价格（收盘价）
+        day5_price = _get_stock_close_price(db, code, day5_date) if day5_date else None
+        day10_price = _get_stock_close_price(db, code, day10_date) if day10_date else None
+        day15_price = _get_stock_close_price(db, code, day15_date) if day15_date else None
+        current_price = _get_stock_close_price(db, code, stock_current_date) if stock_current_date else None
+
+        # 计算收益率
+        day5_return = _calculate_return(buy_price, day5_price) if (buy_price and day5_price) else None
+        day10_return = _calculate_return(buy_price, day10_price) if (buy_price and day10_price) else None
+        day15_return = _calculate_return(buy_price, day15_price) if (buy_price and day15_price) else None
+        current_return = _calculate_return(buy_price, current_price) if (buy_price and current_price) else None
+
+        # 获取持有期间所有价格数据，计算最大收益和最大亏损
+        max_return = None
+        max_return_date = None
+        max_loss = None
+        max_loss_date = None
+
+        price_records: list[tuple] = []
+        if stock_current_date and buy_price:
+            price_records = _get_stock_prices_range(db, code, buy_date, stock_current_date)
+            if price_records:
+                for trade_date, high, low, close in price_records:
+                    # 用最高价计算最大收益
+                    if high:
+                        high_return = _calculate_return(buy_price, high)
+                        if max_return is None or (high_return is not None and high_return > max_return):
+                            max_return = high_return
+                            max_return_date = trade_date
+
+                    # 用最低价计算最大亏损
+                    if low:
+                        low_return = _calculate_return(buy_price, low)
+                        if max_loss is None or (low_return is not None and low_return < max_loss):
+                            max_loss = low_return
+                            max_loss_date = trade_date
+
+        # 查找信号转为fail的日期
+        fail_date = None
+        fail_return = None
+        fail_sell_date = None
+
+        # 查询该股票从buy_date之后的DailyB1Check记录
+        check_records = db.query(DailyB1Check, DailyB1CheckDetail).join(
+            DailyB1CheckDetail,
+            (DailyB1CheckDetail.code == DailyB1Check.code) &
+            (DailyB1CheckDetail.check_date == DailyB1Check.check_date)
+        ).filter(
+            DailyB1Check.code == code,
+            DailyB1Check.check_date > buy_date
+        ).order_by(DailyB1Check.check_date.asc()).all()
+
+        for check, detail in check_records:
+            # 检查是否转为fail
+            is_fail = False
+
+            # 从detail的score_details_json中获取verdict
+            if detail and isinstance(detail.score_details_json, dict):
+                verdict = detail.score_details_json.get('verdict')
+                if verdict != 'PASS':
+                    is_fail = True
+
+            # 检查tomorrow_star_pass
+            if not is_fail and detail and isinstance(detail.rules_json, dict):
+                tomorrow_star_pass = detail.rules_json.get('tomorrow_star_pass')
+                if tomorrow_star_pass is False:
+                    is_fail = True
+
+            if is_fail:
+                fail_date = check.check_date
+                # 获取fail次日开盘价
+                next_trade_date = _get_next_trade_date(db, fail_date)
+                if next_trade_date:
+                    fail_sell_date = next_trade_date
+                    fail_sell_price = _get_stock_open_price(db, code, fail_sell_date)
+                    if fail_sell_price and buy_price:
+                        fail_return = _calculate_return(buy_price, fail_sell_price)
+                break
+
+        # 收集用于计算平均值
+        if day5_return is not None:
+            day5_returns.append(day5_return)
+        if day10_return is not None:
+            day10_returns.append(day10_return)
+        if day15_return is not None:
+            day15_returns.append(day15_return)
+        if current_return is not None:
+            current_returns.append(current_return)
+
+        if stock_current_date and stock_current_date > benchmark_end_date:
+            benchmark_end_date = stock_current_date
+
+        stock_contexts.append({
+            "code": code,
+            "name": stock_names.get(code),
+            "buy_price": buy_price,
+            "day5_date": day5_date,
+            "day5_price": day5_price,
+            "day5_return": day5_return,
+            "day10_date": day10_date,
+            "day10_price": day10_price,
+            "day10_return": day10_return,
+            "day15_date": day15_date,
+            "day15_price": day15_price,
+            "day15_return": day15_return,
+            "current_price": current_price,
+            "current_return": current_return,
+            "max_return": max_return,
+            "max_return_date": max_return_date,
+            "max_loss": max_loss,
+            "max_loss_date": max_loss_date,
+            "fail_return": fail_return,
+            "fail_date": fail_date,
+            "fail_sell_date": fail_sell_date,
+            "stock_current_date": stock_current_date,
+            "price_records": price_records,
+        })
+
+    benchmark_meta, benchmark_points = _build_signal_return_benchmark_series(buy_date, benchmark_end_date)
+
+    stock_returns = []
+    for context in stock_contexts:
+        price_lookup: dict[date, tuple[Optional[float], Optional[float], Optional[float]]] = {}
+        for trade_date, high, low, close in context["price_records"]:
+            price_lookup[trade_date] = (high, low, close)
+
+        timeline: list[SignalReturnTimelinePoint] = []
+        for trade_date, high, low, close in context["price_records"]:
+            benchmark_close, benchmark_return = benchmark_points.get(trade_date, (None, None))
+            stock_return = _calculate_return(context["buy_price"], close) if context["buy_price"] and close else None
+            timeline.append(
+                SignalReturnTimelinePoint(
+                    trade_date=trade_date,
+                    close_price=round(float(close), 2) if close is not None and math.isfinite(float(close)) else None,
+                    return_pct=stock_return,
+                    benchmark_close=benchmark_close,
+                    benchmark_return_pct=benchmark_return,
+                )
+            )
+
+        def _build_event(
+            key: str,
+            label: str,
+            event_date: Optional[date],
+            price: Optional[float],
+            return_pct: Optional[float],
+        ) -> Optional[SignalReturnEventPoint]:
+            if event_date is None:
+                return None
+            benchmark_return = benchmark_points.get(event_date, (None, None))[1]
+            price_value = round(float(price), 2) if price is not None and math.isfinite(float(price)) else None
+            return SignalReturnEventPoint(
+                key=key,
+                label=label,
+                trade_date=event_date,
+                price=price_value,
+                return_pct=return_pct,
+                benchmark_return_pct=benchmark_return,
+            )
+
+        fail_close_price = None
+        if context["fail_date"] is not None:
+            fail_close_price = price_lookup.get(context["fail_date"], (None, None, None))[2]
+
+        events = [
+            _build_event("day5", "5日", context["day5_date"], context["day5_price"], context["day5_return"]),
+            _build_event("day10", "10日", context["day10_date"], context["day10_price"], context["day10_return"]),
+            _build_event("day15", "15日", context["day15_date"], context["day15_price"], context["day15_return"]),
+            _build_event("max_return", "Max收益", context["max_return_date"], price_lookup.get(context["max_return_date"], (None, None, None))[0] if context["max_return_date"] else None, context["max_return"]),
+            _build_event("max_loss", "Max亏损", context["max_loss_date"], price_lookup.get(context["max_loss_date"], (None, None, None))[1] if context["max_loss_date"] else None, context["max_loss"]),
+            _build_event("fail", "Fail首次出现", context["fail_date"], fail_close_price, _calculate_return(context["buy_price"], fail_close_price) if context["buy_price"] and fail_close_price else None),
+            _build_event("fail_sell", "次日开盘卖点", context["fail_sell_date"], _get_stock_open_price(db, context["code"], context["fail_sell_date"]) if context["fail_sell_date"] else None, context["fail_return"]),
+        ]
+        event_points = [item for item in events if item is not None]
+        event_points.sort(key=lambda item: (item.trade_date, item.key))
+
+        stock_returns.append(
+            SignalReturnItem(
+                code=context["code"],
+                name=context["name"],
+                pick_date=target_date,
+                buy_date=buy_date,
+                buy_price=context["buy_price"],
+                day5_return=context["day5_return"],
+                day10_return=context["day10_return"],
+                day15_return=context["day15_return"],
+                current_return=context["current_return"],
+                max_return=context["max_return"],
+                max_return_date=context["max_return_date"],
+                max_loss=context["max_loss"],
+                max_loss_date=context["max_loss_date"],
+                fail_return=context["fail_return"],
+                fail_date=context["fail_date"],
+                fail_sell_date=context["fail_sell_date"],
+                current_price=context["current_price"],
+                timeline=timeline,
+                events=event_points,
+            )
+        )
+
+    # 计算平均收益率
+    avg_day5_return = round(sum(day5_returns) / len(day5_returns), 2) if day5_returns else None
+    avg_day10_return = round(sum(day10_returns) / len(day10_returns), 2) if day10_returns else None
+    avg_day15_return = round(sum(day15_returns) / len(day15_returns), 2) if day15_returns else None
+    avg_current_return = round(sum(current_returns) / len(current_returns), 2) if current_returns else None
+
+    return SignalReturnAnalysisResponse(
+        pick_date=target_date,
+        signal_type=signal_type,
+        signal_label="启动" if signal_type == "trend_start" else "明日之星",
+        source=source,
+        benchmark=benchmark_meta,
+        stocks=stock_returns,
+        total=len(stock_returns),
+        avg_day5_return=avg_day5_return,
+        avg_day10_return=avg_day10_return,
+        avg_day15_return=avg_day15_return,
+        avg_current_return=avg_current_return,
+    )

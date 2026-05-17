@@ -17,6 +17,7 @@ Analysis API Tests
 - 使用 patch 来隔离外部依赖
 """
 import json
+from contextlib import nullcontext
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,8 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import DailyB1Check, DailyB1CheckDetail, Stock, Task
+from app.models import AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, StockDaily, Task
+from app.schemas import SignalReturnBenchmark
 
 
 @pytest.mark.api
@@ -1215,3 +1217,193 @@ def test_diagnosis_history_prewarm_read_only_no_generate(mocker) -> None:
         force=False,
         generate_if_missing=False,
     )
+
+
+@pytest.mark.api
+def test_get_signal_returns_precomputes_missing_fail_data(test_client_with_db) -> None:
+    db = test_client_with_db.db
+    code = "600010"
+
+    db.add(Stock(code=code, name="包钢股份", market="SH"))
+    db.add(
+        AnalysisResult(
+            pick_date=date(2026, 3, 11),
+            code=code,
+            reviewer="quant",
+            verdict="PASS",
+            signal_type="trend_start",
+            details_json={"prefilter": {"passed": True}},
+        )
+    )
+    db.add_all([
+        StockDaily(code=code, trade_date=date(2026, 3, 12), open=10.0, high=10.2, low=9.9, close=10.1, volume=1000000),
+        StockDaily(code=code, trade_date=date(2026, 3, 13), open=10.1, high=10.4, low=10.0, close=10.3, volume=1100000),
+        StockDaily(code=code, trade_date=date(2026, 3, 14), open=10.2, high=10.3, low=9.8, close=9.9, volume=1200000),
+        StockDaily(code=code, trade_date=date(2026, 3, 15), open=9.7, high=9.9, low=9.6, close=9.8, volume=1300000),
+    ])
+    db.commit()
+
+    def mock_ensure_history_dates(target_code: str, target_dates: list[date], force: bool = False):
+        assert target_code == code
+        assert date(2026, 3, 13) in target_dates
+        assert date(2026, 3, 14) in target_dates
+        assert date(2026, 3, 15) in target_dates
+
+        if not db.query(DailyB1Check).filter(DailyB1Check.code == code, DailyB1Check.check_date == date(2026, 3, 14)).first():
+            db.add(DailyB1Check(code=code, check_date=date(2026, 3, 13), close_price=10.3, score=5.0))
+            db.add(
+                DailyB1CheckDetail(
+                    code=code,
+                    check_date=date(2026, 3, 13),
+                    status="ready",
+                    score_details_json={"verdict": "PASS"},
+                    rules_json={"tomorrow_star_pass": True},
+                    details_json={},
+                )
+            )
+            db.add(DailyB1Check(code=code, check_date=date(2026, 3, 14), close_price=9.9, score=1.0))
+            db.add(
+                DailyB1CheckDetail(
+                    code=code,
+                    check_date=date(2026, 3, 14),
+                    status="ready",
+                    score_details_json={"verdict": "FAIL"},
+                    rules_json={"tomorrow_star_pass": False},
+                    details_json={},
+                )
+            )
+            db.commit()
+
+        return {
+            "success": True,
+            "code": target_code,
+            "requested_dates": [item.isoformat() for item in target_dates],
+            "generated_dates": ["2026-03-13", "2026-03-14"],
+            "generated_count": 2,
+            "updated": True,
+        }
+
+    with patch("app.api.analysis.analysis_service.ensure_history_dates", side_effect=mock_ensure_history_dates):
+        response = test_client_with_db.get("/api/v1/analysis/signal-returns/tomorrow_star/trend_start/2026-03-11")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["stocks"][0]["code"] == code
+    assert payload["stocks"][0]["fail_sell_date"] == "2026-03-15"
+    assert payload["stocks"][0]["fail_return"] == -3.0
+
+
+@pytest.mark.api
+def test_get_signal_returns_includes_timeline_events_and_benchmark(test_client_with_db) -> None:
+    db = test_client_with_db.db
+    code = "600011"
+
+    db.add(Stock(code=code, name="华能国际", market="SH"))
+    db.add(
+        AnalysisResult(
+            pick_date=date(2026, 4, 29),
+            code=code,
+            reviewer="quant",
+            verdict="PASS",
+            signal_type="trend_start",
+            details_json={"prefilter": {"passed": True}},
+        )
+    )
+    db.add_all([
+        StockDaily(code=code, trade_date=date(2026, 4, 30), open=10.0, high=10.5, low=9.9, close=10.3, volume=1000000),
+        StockDaily(code=code, trade_date=date(2026, 5, 1), open=10.4, high=11.2, low=10.2, close=11.0, volume=1100000),
+        StockDaily(code=code, trade_date=date(2026, 5, 2), open=10.8, high=10.9, low=9.5, close=9.8, volume=1200000),
+        StockDaily(code=code, trade_date=date(2026, 5, 3), open=9.7, high=10.0, low=9.6, close=9.9, volume=900000),
+        StockDaily(code=code, trade_date=date(2026, 5, 4), open=10.0, high=10.6, low=9.9, close=10.5, volume=950000),
+        StockDaily(code=code, trade_date=date(2026, 5, 5), open=10.6, high=10.8, low=10.4, close=10.7, volume=980000),
+    ])
+    db.add_all([
+        DailyB1Check(code=code, check_date=date(2026, 5, 1), close_price=11.0, score=5.0),
+        DailyB1Check(code=code, check_date=date(2026, 5, 2), close_price=9.8, score=1.0),
+        DailyB1Check(code=code, check_date=date(2026, 5, 3), close_price=9.9, score=1.0),
+        DailyB1Check(code=code, check_date=date(2026, 5, 4), close_price=10.5, score=2.0),
+        DailyB1Check(code=code, check_date=date(2026, 5, 5), close_price=10.7, score=2.5),
+    ])
+    db.add_all([
+        DailyB1CheckDetail(
+            code=code,
+            check_date=date(2026, 5, 1),
+            status="ready",
+            score_details_json={"verdict": "PASS"},
+            rules_json={"tomorrow_star_pass": True},
+            details_json={},
+        ),
+        DailyB1CheckDetail(
+            code=code,
+            check_date=date(2026, 5, 2),
+            status="ready",
+            score_details_json={"verdict": "FAIL"},
+            rules_json={"tomorrow_star_pass": False},
+            details_json={},
+        ),
+        DailyB1CheckDetail(
+            code=code,
+            check_date=date(2026, 5, 3),
+            status="ready",
+            score_details_json={"verdict": "FAIL"},
+            rules_json={"tomorrow_star_pass": False},
+            details_json={},
+        ),
+        DailyB1CheckDetail(
+            code=code,
+            check_date=date(2026, 5, 4),
+            status="ready",
+            score_details_json={"verdict": "WATCH"},
+            rules_json={"tomorrow_star_pass": False},
+            details_json={},
+        ),
+        DailyB1CheckDetail(
+            code=code,
+            check_date=date(2026, 5, 5),
+            status="ready",
+            score_details_json={"verdict": "WATCH"},
+            rules_json={"tomorrow_star_pass": False},
+            details_json={},
+        ),
+    ])
+    db.commit()
+
+    benchmark_points = {
+        date(2026, 4, 30): (100.0, 0.0),
+        date(2026, 5, 1): (101.0, 1.0),
+        date(2026, 5, 2): (99.0, -1.0),
+        date(2026, 5, 3): (99.5, -0.5),
+        date(2026, 5, 4): (100.8, 0.8),
+        date(2026, 5, 5): (101.2, 1.2),
+    }
+
+    with patch(
+        "app.api.analysis._build_signal_return_benchmark_series",
+        return_value=(
+            SignalReturnBenchmark(
+                name="上证指数",
+                ts_code="000001.SH",
+                base_date=date(2026, 4, 30),
+                base_close=100.0,
+            ),
+            benchmark_points,
+        ),
+    ):
+        response = test_client_with_db.get("/api/v1/analysis/signal-returns/tomorrow_star/trend_start/2026-04-29")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["benchmark"]["name"] == "上证指数"
+    assert payload["stocks"][0]["timeline"][0]["trade_date"] == "2026-04-30"
+    assert payload["stocks"][0]["timeline"][0]["benchmark_return_pct"] == 0.0
+    assert payload["stocks"][0]["timeline"][1]["return_pct"] == 10.0
+    event_keys = {event["key"] for event in payload["stocks"][0]["events"]}
+    assert {"day5", "max_return", "max_loss", "fail", "fail_sell"} <= event_keys
+    fail_event = next(event for event in payload["stocks"][0]["events"] if event["key"] == "fail")
+    fail_sell_event = next(event for event in payload["stocks"][0]["events"] if event["key"] == "fail_sell")
+    assert fail_event["trade_date"] == "2026-05-02"
+    assert fail_event["price"] == 9.8
+    assert fail_sell_event["trade_date"] == "2026-05-03"
+    assert fail_sell_event["price"] == 9.7
+    assert fail_sell_event["return_pct"] == -3.0

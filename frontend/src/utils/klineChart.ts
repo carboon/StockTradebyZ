@@ -1,5 +1,5 @@
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { KLineData } from '@/types'
+import type { KLineData, SignalReturnBenchmark, SignalReturnEventPoint, SignalReturnItem } from '@/types'
 
 type MovingAverageKey = 'ma5' | 'ma10' | 'ma20' | 'ma60'
 
@@ -12,6 +12,17 @@ type KLineChartOptionParams = {
   highlightedDates?: Iterable<string>
   movingAverages?: MovingAverageKey[]
   extraLegendLabels?: string[]
+}
+
+type SignalReturnTooltipParam = {
+  axisValue?: string
+  componentType?: string
+  dataIndex?: number
+}
+
+type SignalReturnChartOptionParams = {
+  stock: SignalReturnItem
+  benchmark?: SignalReturnBenchmark | null
 }
 
 const MOVING_AVERAGE_LABELS: Record<MovingAverageKey, string> = {
@@ -28,6 +39,29 @@ function formatChartNumber(value: number | null | undefined) {
     return '-'
   }
   return value.toFixed(2)
+}
+
+function formatPercent(value: number | null | undefined) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '-'
+  }
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function formatSignalEventLabel(event: SignalReturnEventPoint) {
+  if (event.key === 'max_return') return 'Max收'
+  if (event.key === 'max_loss') return 'Max亏'
+  if (event.key === 'fail') return 'Fail'
+  if (event.key === 'fail_sell') return '卖点'
+  return event.label
+}
+
+function getSignalEventColor(event: SignalReturnEventPoint) {
+  if (event.key === 'max_return') return '#ef4444'
+  if (event.key === 'max_loss') return '#16a34a'
+  if (event.key === 'fail') return '#f59e0b'
+  if (event.key === 'fail_sell') return '#7c3aed'
+  return '#2563eb'
 }
 
 function buildTooltipFormatter(data: KLineData, movingAverages: MovingAverageKey[]) {
@@ -156,6 +190,174 @@ export function buildKLineChartOption({
   }
 }
 
+function buildSignalReturnTooltipFormatter(stock: SignalReturnItem, benchmarkLabel: string) {
+  const eventMap = new Map<string, SignalReturnEventPoint[]>()
+  for (const event of stock.events || []) {
+    const existing = eventMap.get(event.trade_date) || []
+    existing.push(event)
+    eventMap.set(event.trade_date, existing)
+  }
+
+  return (params: SignalReturnTooltipParam[] | SignalReturnTooltipParam | undefined) => {
+    const paramList = Array.isArray(params) ? params : params ? [params] : []
+    if (paramList.length === 0) return ''
+
+    const pointDate = paramList[0]?.axisValue
+    if (!pointDate) return ''
+    const point = stock.timeline.find((item) => item.trade_date === pointDate)
+    if (!point) return ''
+
+    let result = `<b>${point.trade_date}</b><br/>`
+    result += `${stock.name || stock.code}: <span style="color:#d84b31">${formatPercent(point.return_pct)}</span>`
+    if (typeof point.close_price === 'number') {
+      result += ` / 收盘 ${point.close_price.toFixed(2)}`
+    }
+    result += '<br/>'
+
+    if (typeof point.benchmark_return_pct === 'number') {
+      result += `${benchmarkLabel}: <span style="color:#4463c2">${formatPercent(point.benchmark_return_pct)}</span>`
+      if (typeof point.benchmark_close === 'number') {
+        result += ` / 点位 ${point.benchmark_close.toFixed(2)}`
+      }
+      result += '<br/>'
+    }
+
+    const events = eventMap.get(point.trade_date) || []
+    if (events.length > 0) {
+      result += '<br/><b>关键点</b><br/>'
+      result += events.map((event) => {
+        const priceText = typeof event.price === 'number' ? event.price.toFixed(2) : '-'
+        const returnText = formatPercent(event.return_pct)
+        return `${event.label}: 价格 ${priceText} / 幅度 ${returnText}`
+      }).join('<br/>')
+    }
+
+    return result
+  }
+}
+
+export function buildSignalReturnChartOption({
+  stock,
+  benchmark,
+}: SignalReturnChartOptionParams): EChartsCoreOption {
+  const dates = stock.timeline.map((item) => item.trade_date)
+  const stockReturns = stock.timeline.map((item) => item.return_pct)
+  const benchmarkReturns = stock.timeline.map((item) => item.benchmark_return_pct)
+  const benchmarkLabel = benchmark?.name || '大A基准'
+  const hasBenchmark = benchmarkReturns.some((value) => typeof value === 'number' && !Number.isNaN(value))
+
+  const yValues = [
+    ...stockReturns,
+    ...benchmarkReturns,
+    ...(stock.events || []).map((item) => item.return_pct),
+  ].filter((value): value is number => typeof value === 'number' && !Number.isNaN(value))
+  const yMin = yValues.length > 0 ? Math.min(...yValues) : -5
+  const yMax = yValues.length > 0 ? Math.max(...yValues) : 5
+  const yPadding = Math.max((yMax - yMin) * 0.18, 2)
+
+  const markPointData = (stock.events || [])
+    .filter((event) => typeof event.return_pct === 'number' && !Number.isNaN(event.return_pct))
+    .map((event) => ({
+      name: event.label,
+      coord: [event.trade_date, event.return_pct as number],
+      value: event.return_pct,
+      symbol: 'circle',
+      symbolSize: 24,
+      itemStyle: { color: getSignalEventColor(event) },
+      label: {
+        show: true,
+        formatter: formatSignalEventLabel(event),
+        color: '#1f2937',
+        fontSize: 10,
+        fontWeight: 600,
+        lineHeight: 12,
+      },
+    }))
+
+  return {
+    animationDuration: 400,
+    color: ['#d84b31', '#4463c2'],
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      formatter: buildSignalReturnTooltipFormatter(stock, benchmarkLabel),
+    },
+    legend: {
+      top: 8,
+      data: [stock.name || stock.code, ...(hasBenchmark ? [benchmarkLabel] : [])],
+    },
+    grid: {
+      left: 60,
+      right: 24,
+      top: 48,
+      bottom: 54,
+    },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      boundaryGap: false,
+      axisLabel: {
+        color: '#6b7280',
+        formatter: (value: string) => value.slice(5),
+      },
+      axisLine: {
+        lineStyle: { color: '#d1d5db' },
+      },
+    },
+    yAxis: {
+      type: 'value',
+      min: Math.floor((yMin - yPadding) * 100) / 100,
+      max: Math.ceil((yMax + yPadding) * 100) / 100,
+      axisLabel: {
+        color: '#6b7280',
+        formatter: (value: number) => `${value.toFixed(0)}%`,
+      },
+      splitLine: {
+        lineStyle: { color: '#eef2f7' },
+      },
+    },
+    series: [
+      {
+        name: stock.name || stock.code,
+        type: 'line',
+        data: stockReturns,
+        smooth: false,
+        symbol: 'circle',
+        symbolSize: 7,
+        connectNulls: false,
+        lineStyle: {
+          width: 3,
+          color: '#d84b31',
+        },
+        itemStyle: {
+          color: '#d84b31',
+        },
+        markPoint: {
+          data: markPointData,
+        },
+      },
+      ...(hasBenchmark
+        ? [{
+            name: benchmarkLabel,
+            type: 'line' as const,
+            data: benchmarkReturns,
+            smooth: false,
+            symbol: 'none',
+            connectNulls: false,
+            lineStyle: {
+              width: 2,
+              type: 'dashed' as const,
+              color: '#4463c2',
+            },
+            itemStyle: {
+              color: '#4463c2',
+            },
+          }]
+        : []),
+    ],
+  }
+}
+
 export async function loadKLineChartRuntime() {
   if (!chartRuntimePromise) {
     chartRuntimePromise = (async () => {
@@ -173,6 +375,7 @@ export async function loadKLineChartRuntime() {
         components.TooltipComponent,
         components.LegendComponent,
         components.GridComponent,
+        components.MarkPointComponent,
         renderers.CanvasRenderer,
       ])
 

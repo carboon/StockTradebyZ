@@ -275,9 +275,15 @@
                   </el-table-column>
                   <el-table-column prop="pass" label="启动" :min-width="isCurrentHotTab ? 82 : 64" align="center">
                     <template #default="{ row }">
-                      <el-tag v-if="row.pass !== '-'" :type="row.pass > 0 ? 'success' : 'info'" size="small">
+                      <el-button
+                        v-if="row.pass !== '-' && row.pass > 0"
+                        type="success"
+                        size="small"
+                        text
+                        @click.stop="showSignalReturns(row, 'trend_start')"
+                      >
                         {{ row.pass }}
-                      </el-tag>
+                      </el-button>
                       <span v-else>-</span>
                     </template>
                   </el-table-column>
@@ -291,9 +297,15 @@
                   </el-table-column>
                   <el-table-column v-if="!isCurrentHotTab" prop="tomorrowStarCount" label="星" width="58" align="center">
                     <template #default="{ row }">
-                      <el-tag v-if="row.tomorrowStarCount !== '-'" :type="row.tomorrowStarCount > 0 ? 'success' : 'info'" size="small">
+                      <el-button
+                        v-if="row.tomorrowStarCount !== '-' && row.tomorrowStarCount > 0"
+                        type="success"
+                        size="small"
+                        text
+                        @click.stop="showSignalReturns(row, 'tomorrow_star')"
+                      >
                         {{ row.tomorrowStarCount }}
-                      </el-tag>
+                      </el-button>
                       <span v-else>-</span>
                     </template>
                   </el-table-column>
@@ -920,15 +932,234 @@
         </div>
       </el-tab-pane>
     </el-tabs>
+
+    <!-- 信号收益率分析弹窗 -->
+    <el-dialog
+      v-model="signalReturnDialogVisible"
+      :title="signalReturnData ? `历史信号收益分析 (${signalReturnData.pick_date} - ${signalReturnData.signal_label})` : '历史信号收益分析'"
+      width="min(1120px, calc(100vw - 24px))"
+      :close-on-click-modal="true"
+      :close-on-press-escape="true"
+      class="signal-return-dialog"
+    >
+      <div v-loading="signalReturnLoading" class="signal-return-content">
+        <div v-if="signalReturnError" class="error-message">
+          {{ signalReturnError }}
+        </div>
+        <div v-else-if="signalReturnData && signalReturnData.stocks.length > 0" class="signal-return-body">
+          <div class="signal-return-chart-panel">
+            <div class="signal-return-chart-header">
+              <div class="signal-return-chart-heading">
+                <div class="signal-return-chart-title">
+                  {{ signalReturnSelectedStock ? `${signalReturnSelectedStock.code} ${signalReturnSelectedStock.name || ''}` : '收益率对比' }}
+                </div>
+                <div class="signal-return-chart-subtitle">
+                  {{ signalReturnChartSubtitle }}
+                </div>
+              </div>
+              <div v-if="signalReturnData.stocks.length > 1" class="signal-return-selector">
+                <button
+                  v-for="item in signalReturnData.stocks"
+                  :key="item.code"
+                  type="button"
+                  class="signal-return-selector__button"
+                  :class="{ 'is-active': item.code === signalReturnSelectedCode }"
+                  @click="selectSignalReturnStock(item.code)"
+                >
+                  <span class="selector-code">{{ item.code }}</span>
+                  <span class="selector-name">{{ item.name || '未命名' }}</span>
+                </button>
+              </div>
+            </div>
+
+            <div v-if="signalReturnSelectedStock" class="signal-return-summary">
+              <div class="signal-return-summary__item">
+                <span class="summary-label">买入日</span>
+                <span class="summary-value">{{ formatDateShort(signalReturnSelectedStock.buy_date) }}</span>
+              </div>
+              <div class="signal-return-summary__item">
+                <span class="summary-label">买入价</span>
+                <span class="summary-value">{{ formatPrice(signalReturnSelectedStock.buy_price) }}</span>
+              </div>
+              <div class="signal-return-summary__item">
+                <span class="summary-label">当前收益</span>
+                <span class="summary-value" :class="getReturnClass(signalReturnSelectedStock.current_return)">
+                  {{ formatReturn(signalReturnSelectedStock.current_return) }}
+                </span>
+              </div>
+              <div class="signal-return-summary__item">
+                <span class="summary-label">对照基准</span>
+                <span class="summary-value">
+                  {{ signalReturnHasBenchmark ? signalReturnBenchmarkLabel : '暂未取到大A基准' }}
+                </span>
+              </div>
+            </div>
+
+            <div
+              v-if="signalReturnSelectedStock && signalReturnSelectedStock.timeline.length > 0"
+              ref="signalReturnChartRef"
+              class="signal-return-chart"
+            />
+            <div v-else class="signal-return-chart-empty">
+              暂无收益率曲线数据
+            </div>
+
+            <div
+              v-if="signalReturnSelectedStock && signalReturnSelectedStock.events.length > 0"
+              class="signal-return-events"
+            >
+              <div
+                v-for="event in signalReturnSelectedStock.events"
+                :key="`${signalReturnSelectedStock.code}-${event.key}-${event.trade_date}`"
+                class="signal-return-event"
+              >
+                <span class="signal-return-event__label">{{ event.label }}</span>
+                <span class="signal-return-event__date">{{ formatDateShort(event.trade_date) }}</span>
+                <span class="signal-return-event__price">价 {{ formatPrice(event.price) }}</span>
+                <span class="signal-return-event__return" :class="getReturnClass(event.return_pct)">
+                  {{ formatReturn(event.return_pct) }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="signal-return-table-wrap">
+            <div class="signal-return-table-tip">
+              <span>点击表格行切换上方曲线</span>
+              <span v-if="signalReturnSelectedStock">
+                当前查看：{{ signalReturnSelectedStock.code }} {{ signalReturnSelectedStock.name || '' }}
+              </span>
+            </div>
+
+            <el-table
+              :data="signalReturnData.stocks"
+              stripe
+              size="small"
+              row-key="code"
+              class="signal-return-table"
+              :max-height="320"
+              :row-class-name="getSignalReturnRowClassName"
+              @row-click="handleSignalReturnRowClick"
+            >
+              <el-table-column prop="code" label="代码" width="88" align="center" />
+              <el-table-column prop="name" label="名称" width="110" align="center" show-overflow-tooltip />
+              <el-table-column prop="buy_price" label="买入价" width="78" align="right">
+                <template #default="{ row }">
+                  {{ row.buy_price ? row.buy_price.toFixed(2) : '-' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="5日" width="76" align="right">
+                <template #default="{ row }">
+                  <span :class="getReturnClass(row.day5_return)">
+                    {{ formatReturn(row.day5_return) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="10日" width="76" align="right">
+                <template #default="{ row }">
+                  <span :class="getReturnClass(row.day10_return)">
+                    {{ formatReturn(row.day10_return) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="15日" width="76" align="right">
+                <template #default="{ row }">
+                  <span :class="getReturnClass(row.day15_return)">
+                    {{ formatReturn(row.day15_return) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="至今" width="76" align="right">
+                <template #default="{ row }">
+                  <span :class="getReturnClass(row.current_return)">
+                    {{ formatReturn(row.current_return) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column header-align="center">
+                <template #header>
+                  <el-tooltip content="持有期间最高收益幅度（按最高价）" placement="top">
+                    <span class="signal-return-header-help">Max收益</span>
+                  </el-tooltip>
+                </template>
+                <el-table-column label="幅度" width="82" align="right">
+                  <template #default="{ row }">
+                    <span :class="getReturnClass(row.max_return)">
+                      {{ formatReturn(row.max_return) }}
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="日期" width="72" align="center">
+                  <template #default="{ row }">
+                    {{ formatDateShort(row.max_return_date) }}
+                  </template>
+                </el-table-column>
+              </el-table-column>
+              <el-table-column header-align="center">
+                <template #header>
+                  <el-tooltip content="持有期间最大亏损幅度（按最低价）" placement="top">
+                    <span class="signal-return-header-help">Max亏损</span>
+                  </el-tooltip>
+                </template>
+                <el-table-column label="幅度" width="82" align="right">
+                  <template #default="{ row }">
+                    <el-tooltip content="持有期间曾出现的最大亏损幅度（按最低价计算）" placement="top">
+                      <span :class="getReturnClass(row.max_loss)">
+                        {{ formatReturn(row.max_loss) }}
+                      </span>
+                    </el-tooltip>
+                  </template>
+                </el-table-column>
+                <el-table-column label="日期" width="72" align="center">
+                  <template #default="{ row }">
+                    {{ formatDateShort(row.max_loss_date) }}
+                  </template>
+                </el-table-column>
+              </el-table-column>
+              <el-table-column header-align="center">
+                <template #header>
+                  <el-tooltip content="买入后首次转为 Fail，按其下一交易日开盘卖出，相对买入价的幅度变化" placement="top">
+                    <span class="signal-return-header-help">Fail信号首次出现时卖出</span>
+                  </el-tooltip>
+                </template>
+                <el-table-column label="幅度" width="86" align="right">
+                  <template #default="{ row }">
+                    <el-tooltip content="转为 fail 次日开盘价卖出的收益" placement="top">
+                      <span :class="getReturnClass(row.fail_return)">
+                        {{ formatReturn(row.fail_return) }}
+                      </span>
+                    </el-tooltip>
+                  </template>
+                </el-table-column>
+                <el-table-column label="日期" width="78" align="center">
+                  <template #default="{ row }">
+                    {{ formatDateShort(row.fail_sell_date) }}
+                  </template>
+                </el-table-column>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
+        <div v-else class="empty-message">
+          暂无数据
+        </div>
+      </div>
+      <template #footer>
+        <div class="signal-return-footer">
+          <el-button size="small" @click="closeSignalReturnDialog">关闭</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh, Loading } from '@element-plus/icons-vue'
 import { apiAnalysis, apiTasks, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
+import type { ECharts } from 'echarts/core'
 import type {
   Candidate,
   AnalysisResult,
@@ -942,10 +1173,12 @@ import type {
   IntradayAnalysisStatusResponse,
   TomorrowStarHistoryItem,
   TomorrowStarWindowStatusResponse,
+  SignalReturnAnalysisResponse,
 } from '@/types'
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
+import { buildSignalReturnChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
 import { useResponsive } from '@/composables/useResponsive'
 
 type DataTabKey = 'tomorrow-star' | 'current-hot'
@@ -1115,6 +1348,32 @@ const historyPage = ref(1)
 const historyPageSize = computed(() => (isMobile.value ? 5 : 15))
 const activeHistoryTableHeight = computed(() => (isMobile.value ? undefined : 620))
 const activeCandidateTableHeight = computed(() => (isMobile.value ? undefined : 700))
+
+// 信号收益率分析弹窗
+const signalReturnDialogVisible = ref(false)
+const signalReturnLoading = ref(false)
+const signalReturnData = ref<SignalReturnAnalysisResponse | null>(null)
+const signalReturnError = ref<string | null>(null)
+const signalReturnSelectedCode = ref('')
+const signalReturnChartRef = ref<HTMLElement | null>(null)
+let signalReturnChartInstance: ECharts | null = null
+const signalReturnSelectedStock = computed(() => {
+  const stocks = signalReturnData.value?.stocks || []
+  if (stocks.length === 0) return null
+  return stocks.find((item) => item.code === signalReturnSelectedCode.value) || stocks[0]
+})
+const signalReturnHasBenchmark = computed(() => (
+  signalReturnSelectedStock.value?.timeline?.some((item) => item.benchmark_return_pct != null) ?? false
+))
+const signalReturnBenchmarkLabel = computed(() => signalReturnData.value?.benchmark?.name || '大A基准')
+const signalReturnChartSubtitle = computed(() => {
+  const stock = signalReturnSelectedStock.value
+  if (!stock) return '按交易日展示收益率变化'
+  if (signalReturnHasBenchmark.value) {
+    return `按交易日对比 ${stock.name || stock.code} 与 ${signalReturnBenchmarkLabel.value} 的收益率变化`
+  }
+  return `按交易日展示 ${stock.name || stock.code} 的收益率变化`
+})
 
 // 最新数据（右侧显示）
 const latestCandidates = ref<Candidate[]>([])
@@ -2301,6 +2560,114 @@ async function selectDate(row: HistoryRow) {
   }
 }
 
+// 信号收益率分析相关函数
+async function showSignalReturns(row: HistoryRow, signalType: 'trend_start' | 'tomorrow_star') {
+  // 检查是否有数据可以点击
+  const count = signalType === 'tomorrow_star' ? row.tomorrowStarCount : row.pass
+  if (count === '-' || count === 0) {
+    ElMessage.info('该日期暂无相关信号数据')
+    return
+  }
+
+  signalReturnDialogVisible.value = true
+  signalReturnLoading.value = true
+  signalReturnError.value = null
+
+  const source = isCurrentHotTab.value ? 'current_hot' : 'tomorrow_star'
+
+  try {
+    const response = await apiAnalysis.getSignalReturns(source, signalType, row.rawDate)
+    signalReturnData.value = response
+    signalReturnSelectedCode.value = response.stocks[0]?.code || ''
+  } catch (error) {
+    console.error('Failed to load signal returns:', error)
+    signalReturnError.value = getUserSafeErrorMessage(error, '加载收益率数据失败')
+    ElMessage.error(signalReturnError.value)
+  }
+  signalReturnLoading.value = false
+  await nextTick()
+  await renderSignalReturnChart()
+}
+
+function closeSignalReturnDialog() {
+  signalReturnDialogVisible.value = false
+  signalReturnSelectedCode.value = ''
+  signalReturnData.value = null
+  signalReturnError.value = null
+  disposeSignalReturnChart()
+}
+
+function selectSignalReturnStock(code: string) {
+  if (!code || signalReturnSelectedCode.value === code) return
+  signalReturnSelectedCode.value = code
+  void renderSignalReturnChart()
+}
+
+function handleSignalReturnRowClick(row: { code: string }) {
+  selectSignalReturnStock(row.code)
+}
+
+function getSignalReturnRowClassName({ row }: { row: { code: string } }) {
+  return row.code === signalReturnSelectedCode.value ? 'signal-return-row--active' : ''
+}
+
+async function renderSignalReturnChart() {
+  if (!signalReturnDialogVisible.value) return
+  if (!signalReturnChartRef.value) return
+  if (!signalReturnSelectedStock.value || signalReturnSelectedStock.value.timeline.length === 0) {
+    signalReturnChartInstance?.clear()
+    return
+  }
+
+  const { initChart } = await loadKLineChartRuntime()
+  if (!signalReturnChartInstance) {
+    signalReturnChartInstance = initChart(signalReturnChartRef.value)
+  }
+
+  signalReturnChartInstance.setOption(
+    buildSignalReturnChartOption({
+      stock: signalReturnSelectedStock.value,
+      benchmark: signalReturnData.value?.benchmark || null,
+    }),
+    true,
+  )
+  signalReturnChartInstance.resize()
+}
+
+function disposeSignalReturnChart() {
+  if (signalReturnChartInstance) {
+    signalReturnChartInstance.dispose()
+    signalReturnChartInstance = null
+  }
+}
+
+function handleWindowResize() {
+  signalReturnChartInstance?.resize()
+}
+
+function formatReturn(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '-'
+  const sign = value >= 0 ? '+' : ''
+  return `${sign}${value.toFixed(2)}%`
+}
+
+function formatPrice(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '-'
+  return value.toFixed(2)
+}
+
+function getReturnClass(value: number | null | undefined): string {
+  if (value === null || value === undefined) return ''
+  // 中国股市习惯：红涨绿跌
+  return value >= 0 ? 'return-up' : 'return-down'
+}
+
+function formatDateShort(dateStr: string | null | undefined): string {
+  if (!dateStr) return '-'
+  const date = new Date(dateStr)
+  return `${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`
+}
+
 async function refreshCurrentCandidates() {
   if (activeDataTab.value === 'current-hot') {
     await refreshCurrentHotCandidates()
@@ -3248,6 +3615,7 @@ async function refreshAfterStatusReady(forceReload: boolean = false) {
 }
 
 onMounted(() => {
+  window.addEventListener('resize', handleWindowResize)
   hydrateTomorrowStarCache()
 
   if (historyData.value.length === 0) {
@@ -3309,17 +3677,28 @@ watch(currentHotBoardFilter, () => {
   currentHotAnalysisPage.value = 1
 })
 
+watch(signalReturnDialogVisible, (visible) => {
+  if (visible) return
+  signalReturnSelectedCode.value = ''
+  signalReturnData.value = null
+  signalReturnError.value = null
+  disposeSignalReturnChart()
+})
+
 onDeactivated(() => {
   stopIncrementalPolling()
   cancelAllPageRequests()
   loading.value = false
   loadingLatest.value = false
   checkingFreshness.value = false
+  disposeSignalReturnChart()
 })
 
 onUnmounted(() => {
   stopIncrementalPolling()
   cancelAllPageRequests()
+  window.removeEventListener('resize', handleWindowResize)
+  disposeSignalReturnChart()
 })
 </script>
 
@@ -3953,5 +4332,323 @@ $space-lg: 32px;
 
 .text-down {
   color: #2ecc71;
+}
+
+// 信号收益率分析弹窗样式
+.signal-return-dialog {
+  .el-dialog {
+    margin-top: 5vh !important;
+  }
+
+  .el-dialog__header {
+    padding: 10px 15px;
+    margin-right: 0;
+  }
+
+  .el-dialog__body {
+    padding: 5px 15px 10px;
+  }
+
+  .el-dialog__footer {
+    padding: 5px 15px 10px;
+  }
+
+  .signal-return-content {
+    min-height: 80px;
+  }
+
+  .signal-return-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .signal-return-chart-panel {
+    padding: 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background:
+      radial-gradient(circle at top right, rgba(191, 219, 254, 0.45), transparent 32%),
+      linear-gradient(135deg, #fcfdff, #f7fafc);
+  }
+
+  .signal-return-chart-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .signal-return-chart-heading {
+    min-width: 0;
+  }
+
+  .signal-return-chart-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
+    line-height: 1.4;
+  }
+
+  .signal-return-chart-subtitle {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #64748b;
+    line-height: 1.5;
+  }
+
+  .signal-return-selector {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .signal-return-selector__button {
+    min-width: 102px;
+    padding: 7px 10px;
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.92);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+
+    &:hover {
+      border-color: #93c5fd;
+      transform: translateY(-1px);
+    }
+
+    &.is-active {
+      border-color: #2563eb;
+      background: #eff6ff;
+      box-shadow: 0 6px 18px rgba(37, 99, 235, 0.12);
+    }
+
+    .selector-code {
+      font-size: 12px;
+      font-weight: 700;
+      color: #1e3a8a;
+      line-height: 1.2;
+    }
+
+    .selector-name {
+      font-size: 11px;
+      color: #475569;
+      line-height: 1.3;
+    }
+  }
+
+  .signal-return-summary {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .signal-return-summary__item {
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.88);
+    border: 1px solid #e5edf6;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .signal-return-summary__item .summary-label {
+    font-size: 11px;
+    color: #64748b;
+    letter-spacing: 0.02em;
+  }
+
+  .signal-return-summary__item .summary-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+    line-height: 1.4;
+  }
+
+  .signal-return-chart {
+    margin-top: 12px;
+    height: 340px;
+    width: 100%;
+  }
+
+  .signal-return-chart-empty {
+    margin-top: 12px;
+    height: 240px;
+    border-radius: 10px;
+    border: 1px dashed #cbd5e1;
+    background: rgba(255, 255, 255, 0.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #94a3b8;
+    font-size: 13px;
+  }
+
+  .signal-return-events {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px;
+  }
+
+  .signal-return-event {
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid #e5e7eb;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .signal-return-event__label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1f2937;
+  }
+
+  .signal-return-event__date,
+  .signal-return-event__price {
+    font-size: 11px;
+    color: #64748b;
+    line-height: 1.4;
+  }
+
+  .signal-return-event__return {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+
+  .signal-return-table-wrap {
+    overflow-x: auto;
+  }
+
+  .signal-return-table-tip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: #64748b;
+  }
+
+  .signal-return-table {
+    min-width: 1180px;
+
+    :deep(.el-table__header th) {
+      padding: 5px 0;
+      font-size: 12px;
+      color: #6b7280;
+      background: #fafafa;
+    }
+
+    :deep(.el-table__header th .cell) {
+      white-space: nowrap !important;
+      word-break: keep-all;
+      line-height: 1.3;
+      padding: 0 6px;
+      overflow: visible;
+      font-weight: 600;
+    }
+
+    :deep(.el-table__header-wrapper tr:first-child th) {
+      border-bottom: 0;
+      background: #f5f7fa;
+    }
+
+    :deep(.el-table__header-wrapper tr:last-child th) {
+      background: #fafafa;
+    }
+
+    .signal-return-header-help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: help;
+    }
+
+    :deep(.el-table__body td) {
+      padding: 6px 0;
+      font-size: 12px;
+    }
+
+    :deep(.el-table__body td .cell) {
+      white-space: nowrap !important;
+      word-break: keep-all;
+      line-height: 1.3;
+      padding: 0 6px;
+      overflow: visible;
+      text-overflow: clip;
+    }
+
+    :deep(.el-table__body tr) {
+      cursor: pointer;
+    }
+
+    :deep(.el-table__body tr.signal-return-row--active > td) {
+      background: #eff6ff !important;
+    }
+
+    // 确保收益率数字不换行
+    .return-up,
+    .return-down {
+      white-space: nowrap !important;
+      display: inline-block;
+    }
+  }
+
+  .signal-return-footer {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .error-message,
+  .empty-message {
+    text-align: center;
+    padding: 15px;
+    color: #909399;
+    font-size: 13px;
+  }
+
+  @media (max-width: 768px) {
+    .signal-return-summary {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .signal-return-chart {
+      height: 280px;
+    }
+
+    .signal-return-selector__button {
+      min-width: 92px;
+    }
+  }
+}
+
+// 中国股市习惯：红涨绿跌
+.return-up {
+  color: #f56c6c;
+  font-weight: 500;
+}
+
+.return-down {
+  color: #67c23a;
+  font-weight: 500;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

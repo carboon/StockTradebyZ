@@ -1017,3 +1017,69 @@ class AdminSummaryResponse(BaseModel):
     system_ready: bool
     # 待处理事项
     pending_actions: list[dict[str, str]]
+
+
+# ==================== 历史信号收益率分析 ====================
+class SignalReturnTimelinePoint(BaseModel):
+    """收益率时间序列点"""
+    trade_date: date_class
+    close_price: Optional[float] = None
+    return_pct: Optional[float] = None
+    benchmark_close: Optional[float] = None
+    benchmark_return_pct: Optional[float] = None
+
+
+class SignalReturnEventPoint(BaseModel):
+    """收益率关键事件点"""
+    key: str
+    label: str
+    trade_date: date_class
+    price: Optional[float] = None
+    return_pct: Optional[float] = None
+    benchmark_return_pct: Optional[float] = None
+
+
+class SignalReturnBenchmark(BaseModel):
+    """收益率对照基准"""
+    name: str
+    ts_code: str
+    base_date: date_class
+    base_close: Optional[float] = None
+
+
+class SignalReturnItem(BaseModel):
+    """单个股票的收益率数据"""
+    code: str
+    name: Optional[str] = None
+    pick_date: date_class  # 信号日期
+    buy_date: date_class  # 买入日期（下一个交易日）
+    buy_price: Optional[float] = None  # 买入价格（开盘价）
+    day5_return: Optional[float] = None  # 5日收益率
+    day10_return: Optional[float] = None  # 10日收益率
+    day15_return: Optional[float] = None  # 15日收益率
+    current_return: Optional[float] = None  # 至今收益率
+    max_return: Optional[float] = None  # 最大收益率
+    max_return_date: Optional[date_class] = None  # 最大收益率日期
+    max_loss: Optional[float] = None  # 最大亏损（负值表示亏损）
+    max_loss_date: Optional[date_class] = None  # 最大亏损日期
+    fail_return: Optional[float] = None  # 转fail后次日开盘价卖出的收益率
+    fail_date: Optional[date_class] = None  # 转fail的日期
+    fail_sell_date: Optional[date_class] = None  # 实际卖出日期（fail次日）
+    current_price: Optional[float] = None  # 当前价格
+    timeline: List[SignalReturnTimelinePoint] = Field(default_factory=list)
+    events: List[SignalReturnEventPoint] = Field(default_factory=list)
+
+
+class SignalReturnAnalysisResponse(BaseModel):
+    """历史信号收益率分析响应"""
+    pick_date: date_class  # 信号日期
+    signal_type: str  # "trend_start" | "tomorrow_star"
+    signal_label: str  # "启动" | "明日之星"
+    source: str  # "tomorrow_star" | "current_hot"
+    benchmark: Optional[SignalReturnBenchmark] = None
+    stocks: List[SignalReturnItem]
+    total: int
+    avg_day5_return: Optional[float] = None
+    avg_day10_return: Optional[float] = None
+    avg_day15_return: Optional[float] = None
+    avg_current_return: Optional[float] = None

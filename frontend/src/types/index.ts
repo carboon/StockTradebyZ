@@ -997,3 +997,67 @@ export interface AdminSummaryResponse {
     route: string
   }>
 }
+
+// =====================
+// 历史信号收益率分析类型
+// =====================
+
+export interface SignalReturnTimelinePoint {
+  trade_date: string
+  close_price?: number | null
+  return_pct?: number | null
+  benchmark_close?: number | null
+  benchmark_return_pct?: number | null
+}
+
+export interface SignalReturnEventPoint {
+  key: string
+  label: string
+  trade_date: string
+  price?: number | null
+  return_pct?: number | null
+  benchmark_return_pct?: number | null
+}
+
+export interface SignalReturnBenchmark {
+  name: string
+  ts_code: string
+  base_date: string
+  base_close?: number | null
+}
+
+export interface SignalReturnItem {
+  code: string
+  name?: string | null
+  pick_date: string
+  buy_date: string
+  buy_price?: number | null
+  day5_return?: number | null
+  day10_return?: number | null
+  day15_return?: number | null
+  current_return?: number | null
+  max_return?: number | null
+  max_return_date?: string | null
+  max_loss?: number | null
+  max_loss_date?: string | null
+  fail_return?: number | null
+  fail_date?: string | null
+  fail_sell_date?: string | null
+  current_price?: number | null
+  timeline: SignalReturnTimelinePoint[]
+  events: SignalReturnEventPoint[]
+}
+
+export interface SignalReturnAnalysisResponse {
+  pick_date: string
+  signal_type: 'trend_start' | 'tomorrow_star'
+  signal_label: string
+  source: 'tomorrow_star' | 'current_hot'
+  benchmark?: SignalReturnBenchmark | null
+  stocks: SignalReturnItem[]
+  total: number
+  avg_day5_return?: number | null
+  avg_day10_return?: number | null
+  avg_day15_return?: number | null
+  avg_current_return?: number | null
+}

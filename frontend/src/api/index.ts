@@ -33,6 +33,7 @@ import type {
   KLineData,
   LoginResponse,
   SaveEnvResponse,
+  SignalReturnAnalysisResponse,
   StockInfo,
   StockSearchResponse,
   Task,
@@ -363,6 +364,15 @@ export const apiAnalysis = {
   // 获取单股分析结果
   getResult: (code: string, options?: RequestOptions) =>
     api.get<never, DiagnosisResultResponse>(`/v1/analysis/diagnosis/${code}/result`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 获取历史信号收益率分析
+  // source: "tomorrow_star" | "current_hot"
+  // signalType: "trend_start" | "tomorrow_star"
+  getSignalReturns: (source: string, signalType: string, pickDate: string, options?: RequestOptions) =>
+    api.get<never, SignalReturnAnalysisResponse>(
+      `/v1/analysis/signal-returns/${source}/${signalType}/${pickDate}`,
+      withRequestOptions(options, TIMEOUTS.standard)
+    ),
 }
 
 export const apiWatchlist = {

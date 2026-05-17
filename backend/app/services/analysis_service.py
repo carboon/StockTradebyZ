@@ -918,6 +918,94 @@ class AnalysisService:
             "latest_history_date": latest_history_date,
         }
 
+    def ensure_history_dates(
+        self,
+        code: str,
+        target_dates: list[date_class],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        code = code.zfill(6)
+        normalized_dates = sorted({item for item in target_dates if isinstance(item, date_class)})
+        if not normalized_dates:
+            return {
+                "success": True,
+                "code": code,
+                "requested_dates": [],
+                "generated_dates": [],
+                "generated_count": 0,
+                "updated": False,
+            }
+
+        requested_dates = [item.isoformat() for item in normalized_dates]
+
+        with SessionLocal() as db:
+            existing_dates = {
+                row[0]
+                for row in (
+                    db.query(DailyB1Check.check_date)
+                    .join(
+                        DailyB1CheckDetail,
+                        (DailyB1CheckDetail.code == DailyB1Check.code)
+                        & (DailyB1CheckDetail.check_date == DailyB1Check.check_date),
+                    )
+                    .filter(
+                        DailyB1Check.code == code,
+                        DailyB1Check.check_date.in_(normalized_dates),
+                        DailyB1CheckDetail.status == "ready",
+                    )
+                    .all()
+                )
+                if row and row[0]
+            }
+
+        missing_dates = normalized_dates if force else [item for item in normalized_dates if item not in existing_dates]
+        if not missing_dates:
+            return {
+                "success": True,
+                "code": code,
+                "requested_dates": requested_dates,
+                "generated_dates": [],
+                "generated_count": 0,
+                "updated": False,
+            }
+
+        df = self.load_stock_data(code, days=max(len(normalized_dates) + 300, 365))
+        if df is None or df.empty:
+            return {"success": False, "error": "数据不存在", "code": code}
+        prepared_df = self._prepare_history_dataframe(df)
+        if prepared_df.empty:
+            return {"success": False, "error": "数据不存在", "code": code}
+
+        available_dates = {
+            pd.Timestamp(ts).date()
+            for ts in prepared_df["date"].tolist()
+        }
+        computable_dates = [item for item in missing_dates if item in available_dates]
+        if not computable_dates:
+            return {
+                "success": True,
+                "code": code,
+                "requested_dates": requested_dates,
+                "generated_dates": [],
+                "generated_count": 0,
+                "updated": False,
+            }
+
+        result = self._generate_history_records_for_dates(
+            code=code,
+            df=prepared_df,
+            target_dates=computable_dates,
+        )
+        if not result.get("success"):
+            return result
+
+        return {
+            **result,
+            "requested_dates": requested_dates,
+            "updated": result.get("generated_count", 0) > 0,
+        }
+
     def get_latest_candidate_date(self) -> Optional[str]:
         """读取最新候选日期（优先从数据库，回退到文件）。"""
         from app.services.candidate_service import get_candidate_service
