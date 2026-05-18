@@ -12,7 +12,7 @@ show_help() {
 
 只保留四类操作:
   1. repair    修补数据
-  2. generate  生成新数据（基于已有日线重建结果）
+  2. generate  检查缺口并重建结果
   3. daily     更新每日数据
   4. intraday  更新盘中数据（11:30 后执行，默认只取 09:30~11:30）
 
@@ -30,7 +30,8 @@ show_help() {
     拉取最新交易日或指定交易日的日线，并重建当日明日之星/当前热盘
 
   generate
-    不拉新日线，只基于现有数据库重建近120日窗口的明日之星/当前热盘
+    自动检查近120日窗口的数据缺口；缺失日线会补抓，缺失换手率/量比会补指标，然后重建明日之星/当前热盘/板块分析
+    如只想跳过补数、仅重建派生结果，可手动追加 --skip-data-fetch
 
   intraday
     生成中盘快照；默认截止到 11:30:00
@@ -127,7 +128,6 @@ case "$COMMAND" in
       python
       backend/scripts/rebuild_recent_120_data.py
       --yes
-      --skip-data-fetch
       --window-size "${WINDOW_SIZE:-120}"
       --warmup-trade-days "${WARMUP_TRADE_DAYS:-140}"
       --reviewer "${REVIEWER:-quant}"

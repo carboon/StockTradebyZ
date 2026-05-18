@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { nextTick } from 'vue'
 import ElementPlus from 'element-plus'
 import Config from '@/views/Config.vue'
+import { DEFAULT_SECTOR_ANALYSIS_CATALOG, DEFAULT_SECTOR_ANALYSIS_POOL } from '@/utils/sectorAnalysis'
 
 const mockPush = vi.fn()
 
@@ -181,6 +181,55 @@ describe('Config.vue', () => {
     expect(apiConfig.getAll).toHaveBeenCalled()
     expect(wrapper.vm.configs.tushare_token).toBe('reloaded_token')
     expect(wrapper.vm.configs.min_score_threshold).toBe(3.5)
+  })
+
+  it('loads built-in default sector configs when db values are absent', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.sectorConfigEditors.catalog).toContain(DEFAULT_SECTOR_ANALYSIS_CATALOG.menuTitle)
+    expect(wrapper.vm.sectorConfigEditors.pool).toContain('ai-compute')
+    expect(wrapper.vm.sectorConfigEditors.pool).toContain(DEFAULT_SECTOR_ANALYSIS_POOL['ai-compute'][0].code)
+  })
+
+  it('saves sector configs into two config keys', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.sectorConfigEditors.catalog = JSON.stringify({
+      version: 1,
+      menuTitle: '板块分析',
+      defaultSectorKey: 'overview',
+      sectors: [],
+    })
+    wrapper.vm.sectorConfigEditors.pool = JSON.stringify({
+      robotics: {
+        埃斯顿: '002747',
+      },
+    })
+
+    await wrapper.vm.saveSectorConfigs(false)
+
+    expect(apiConfig.update).toHaveBeenNthCalledWith(
+      1,
+      'sector_analysis_catalog',
+      JSON.stringify({
+        version: 1,
+        menuTitle: '板块分析',
+        defaultSectorKey: 'overview',
+        sectors: [],
+      }, null, 2),
+    )
+    expect(apiConfig.update).toHaveBeenNthCalledWith(
+      2,
+      'sector_analysis_pool',
+      JSON.stringify({
+        robotics: {
+          埃斯顿: '002747',
+        },
+      }, null, 2),
+    )
+    expect(ElMessage.success).toHaveBeenCalledWith('板块配置已保存')
   })
 
   it('shows the mobile action bar on small screens', async () => {

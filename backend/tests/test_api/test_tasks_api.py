@@ -15,6 +15,7 @@ Tasks API Tests
 - 使用 test_client_with_db fixture 用于需要同时访问客户端和数据库的测试
 - Mock task_service 和 tushare_service 以避免实际执行任务
 """
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -183,6 +184,106 @@ def test_get_incremental_status_includes_eta_fields(test_client: TestClient) -> 
     assert data["completed_in_run"] == 40
     assert data["checkpoint_path"] == "/tmp/incremental.json"
     assert data["last_error"] == "网络波动"
+
+
+@pytest.mark.api
+def test_get_incremental_status_ignores_latest_cancelled_task(test_client_with_db: Any) -> None:
+    now = utc_now()
+    completed_task = Task(
+        task_type="daily_batch_update",
+        status="completed",
+        progress=100,
+        params_json={"trade_date": "2025-05-16"},
+        progress_meta_json={
+            "mode": "daily_batch",
+            "current": 1,
+            "total": 1,
+            "stage_label": "按交易日批量刷新",
+            "message": "按交易日批量刷新完成",
+        },
+        result_json={"stock_count": 321, "message": "更新完成"},
+        started_at=now - timedelta(minutes=3),
+        completed_at=now - timedelta(minutes=2),
+        created_at=now - timedelta(minutes=3),
+    )
+    cancelled_task = Task(
+        task_type="incremental_update",
+        status="cancelled",
+        progress=48,
+        params_json={"trade_date": "2025-05-17"},
+        progress_meta_json={
+            "mode": "daily_batch",
+            "current": 1,
+            "total": 1,
+            "message": "任务已取消",
+        },
+        error_message="任务已取消",
+        created_at=now - timedelta(minutes=1),
+    )
+    test_client_with_db.db.add_all([completed_task, cancelled_task])
+    test_client_with_db.db.commit()
+
+    response = test_client_with_db.get("/api/v1/tasks/incremental-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["running"] is False
+    assert data["task_type"] == "daily_batch_update"
+    assert data["mode"] == "daily_batch"
+    assert data["target_trade_date"] == "2025-05-16"
+    assert data["updated_count"] == 321
+
+
+@pytest.mark.api
+def test_get_incremental_status_resets_cancelled_state_without_usable_task(test_client_with_db: Any) -> None:
+    cancelled_task = Task(
+        task_type="incremental_update",
+        status="cancelled",
+        progress=61,
+        params_json={"trade_date": "2025-05-18"},
+        progress_meta_json={
+            "mode": "daily_batch",
+            "current": 1,
+            "total": 1,
+            "message": "任务已取消",
+        },
+        error_message="手动取消",
+        created_at=utc_now(),
+    )
+    test_client_with_db.db.add(cancelled_task)
+    test_client_with_db.db.commit()
+
+    cancelled_state = _mock_incremental_state(
+        status="cancelled",
+        running=False,
+        progress=61,
+        current=4,
+        total=10,
+        current_code="000001",
+        updated_count=3,
+        skipped_count=1,
+        failed_count=0,
+        started_at="2025-05-18T10:00:00",
+        completed_at="2025-05-18T10:05:00",
+        last_error="手动取消",
+        message="任务已取消",
+    )
+
+    with patch("app.services.market_service.MarketService.get_update_state", return_value=cancelled_state):
+        response = test_client_with_db.get("/api/v1/tasks/incremental-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "idle"
+    assert data["running"] is False
+    assert data["mode"] == "idle"
+    assert data["progress"] == 0
+    assert data["current"] == 0
+    assert data["total"] == 0
+    assert data["current_code"] is None
+    assert data["last_error"] is None
+    assert data["display_detail"] == "等待启动"
 
 
 @pytest.mark.api

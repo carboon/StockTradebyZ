@@ -818,6 +818,15 @@ class TaskService:
             failed_dates = ", ".join(current_hot_synced["failed_dates"])
             raise Exception(f"当前热盘历史窗口补齐失败: {failed_dates}")
 
+        sector_analysis_synced = await asyncio.to_thread(
+            self._run_sector_analysis_window_sync,
+            120,
+            reviewer,
+        )
+        if sector_analysis_synced.get("failed_dates"):
+            failed_dates = ", ".join(sector_analysis_synced["failed_dates"])
+            raise Exception(f"板块分析历史窗口补齐失败: {failed_dates}")
+
         status = tushare_service.check_data_status()
         task.result_json = {
             "data_status": status,
@@ -826,6 +835,7 @@ class TaskService:
             "analysis_synced": analysis_synced,
             "tomorrow_star_window_synced": tomorrow_star_window_synced,
             "current_hot_synced": current_hot_synced,
+            "sector_analysis_synced": sector_analysis_synced,
             "stage_metrics": {
                 "durations_seconds": stage_durations,
             },
@@ -1140,6 +1150,14 @@ class TaskService:
         if current_hot_result.get("status") != "ok":
             raise Exception(current_hot_result.get("message") or f"{trade_date} 当前热盘重建失败")
 
+        sector_analysis_result = await asyncio.to_thread(
+            self._run_sector_analysis_rebuild_sync,
+            trade_date,
+            "quant",
+        )
+        if sector_analysis_result.get("status") != "ok":
+            raise Exception(sector_analysis_result.get("message") or f"{trade_date} 板块分析重建失败")
+
         TushareService.clear_data_status_cache()
         self._invalidate_tomorrow_star_caches()
         try:
@@ -1157,6 +1175,7 @@ class TaskService:
             "active_pool_rank": active_pool_rank_result,
             "tomorrow_star_rebuild": consistency_result,
             "current_hot_rebuild": current_hot_result,
+            "sector_analysis_rebuild": sector_analysis_result,
             **result,
         }
         diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db)
@@ -1291,6 +1310,16 @@ class TaskService:
             MarketService.fail_update(message)
             raise Exception(message)
 
+        sector_analysis_result = await asyncio.to_thread(
+            self._run_sector_analysis_rebuild_sync,
+            trade_date,
+            "quant",
+        )
+        if sector_analysis_result.get("status") != "ok":
+            message = str(sector_analysis_result.get("message") or f"{trade_date} 板块分析重建失败")
+            MarketService.fail_update(message)
+            raise Exception(message)
+
         latest_trade_date = TushareService(token=token).get_latest_trade_date()
         if latest_trade_date:
             MarketService(token=token).update_cache(latest_trade_date)
@@ -1317,6 +1346,7 @@ class TaskService:
             "active_pool_rank": active_pool_rank_result,
             "tomorrow_star_rebuild": consistency_result,
             "current_hot_rebuild": current_hot_result,
+            "sector_analysis_rebuild": sector_analysis_result,
             **result,
         }
         diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db)
@@ -1372,6 +1402,17 @@ class TaskService:
             return CurrentHotService(session).generate_for_trade_date(trade_date, reviewer=reviewer)
 
     @staticmethod
+    def _run_sector_analysis_rebuild_sync(
+        trade_date: Optional[str],
+        reviewer: str = "quant",
+    ) -> dict[str, Any]:
+        from app.database import SessionLocal
+        from app.services.sector_analysis_service import SectorAnalysisService
+
+        with SessionLocal() as session:
+            return SectorAnalysisService(session).generate_for_trade_date(trade_date, reviewer=reviewer)
+
+    @staticmethod
     def _run_tomorrow_star_window_sync(
         window_size: int = 120,
         reviewer: str = "quant",
@@ -1397,6 +1438,20 @@ class TaskService:
 
         with SessionLocal() as session:
             return CurrentHotService(session).ensure_window(
+                window_size=window_size,
+                reviewer=reviewer,
+            )
+
+    @staticmethod
+    def _run_sector_analysis_window_sync(
+        window_size: int = 120,
+        reviewer: str = "quant",
+    ) -> dict[str, Any]:
+        from app.database import SessionLocal
+        from app.services.sector_analysis_service import SectorAnalysisService
+
+        with SessionLocal() as session:
+            return SectorAnalysisService(session).ensure_window(
                 window_size=window_size,
                 reviewer=reviewer,
             )
@@ -1713,20 +1768,19 @@ class TaskService:
             .first()
         )
 
-    def get_latest_incremental_task(self) -> Optional[Any]:
+    def get_latest_incremental_task(self, include_cancelled: bool = False) -> Optional[Any]:
         from app.models import Task
 
-        return (
-            self.db.query(Task)
-            .filter(
-                Task.task_type.in_([
-                    self.INCREMENTAL_UPDATE_TASK_TYPE,
-                    self.DAILY_BATCH_UPDATE_TASK_TYPE,
-                ]),
-            )
-            .order_by(Task.created_at.desc(), Task.id.desc())
-            .first()
+        query = self.db.query(Task).filter(
+            Task.task_type.in_([
+                self.INCREMENTAL_UPDATE_TASK_TYPE,
+                self.DAILY_BATCH_UPDATE_TASK_TYPE,
+            ]),
         )
+        if not include_cancelled:
+            query = query.filter(Task.status != "cancelled")
+
+        return query.order_by(Task.created_at.desc(), Task.id.desc()).first()
 
     def is_task_process_alive(self, task_id: int) -> bool:
         """判断任务对应的子进程是否仍然存活。"""

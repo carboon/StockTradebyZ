@@ -134,7 +134,7 @@ cp .env.example deploy/.env
 含义：
 
 - `daily`：抓取日线并重建当日明日之星、当前热盘
-- `generate`：只重建派生结果，不重新抓日线
+- `generate`：自动检查近 120 日窗口的缺失日线和缺失市场指标（换手率/量比），补齐后重建派生结果；如只想重建可追加 `--skip-data-fetch`
 - `intraday`：生成明日之星/当前热盘中盘快照
 - `repair daily`：修复 `stock_daily` 缺失或样本不足
 - `repair scores`：修复历史候选、评分和结果不一致

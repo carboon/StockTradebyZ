@@ -103,6 +103,48 @@ def _resolve_raw_status_for_views(raw_status: dict | None) -> dict:
     }
 
 
+def _normalize_incremental_status_state(
+    state: dict[str, Any],
+    *,
+    latest_incremental_task: Optional[Task],
+) -> dict[str, Any]:
+    """避免取消任务长期占用兼容状态接口。"""
+    if latest_incremental_task is not None:
+        return state
+    if state.get("running"):
+        return state
+    if str(state.get("status") or "idle") != "cancelled":
+        return state
+
+    normalized = dict(state)
+    normalized.update({
+        "status": "idle",
+        "running": False,
+        "task_type": "incremental_update",
+        "mode": "idle",
+        "target_trade_date": None,
+        "stage_label": None,
+        "progress": 0,
+        "current": 0,
+        "total": 0,
+        "current_code": None,
+        "updated_count": 0,
+        "skipped_count": 0,
+        "failed_count": 0,
+        "started_at": None,
+        "completed_at": None,
+        "eta_seconds": None,
+        "elapsed_seconds": 0,
+        "resume_supported": True,
+        "initial_completed": 0,
+        "completed_in_run": 0,
+        "checkpoint_path": None,
+        "last_error": None,
+        "message": "",
+    })
+    return normalized
+
+
 def _clear_all_caches(db: Session | None = None) -> None:
     """清除所有相关缓存"""
     import time
@@ -1007,6 +1049,10 @@ async def get_incremental_status(
         MarketService.sync_update_state_from_task(latest_incremental_task)
 
     state = MarketService.get_update_state()
+    state = _normalize_incremental_status_state(
+        state,
+        latest_incremental_task=latest_incremental_task,
+    )
     mode = str(state.get("mode") or "per_stock")
     task_type = str(state.get("task_type") or ("daily_batch_update" if mode == "daily_batch" else "incremental_update"))
     target_trade_date = state.get("target_trade_date")

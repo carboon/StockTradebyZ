@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ import pandas as pd
 
 from app.config import settings
 from app.models import (
+    Config,
     CurrentHotAnalysisResult,
     CurrentHotCandidate,
     CurrentHotIntradaySnapshot,
@@ -284,6 +286,181 @@ def test_get_current_hot_candidates_prioritizes_trend_start_then_b1_then_score(t
     assert response.status_code == 200
     data = response.json()
     assert [item["code"] for item in data["candidates"]] == ["600001", "688002", "600002", "688001"]
+
+
+def test_get_current_hot_sector_analysis_returns_rankings_and_rotation_history(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    latest_date = date(2026, 5, 8)
+    previous_date = date(2026, 5, 7)
+
+    db.add_all([
+        Config(
+            key="sector_analysis_catalog",
+            value=json.dumps({
+                "version": 1,
+                "menuTitle": "板块分析",
+                "defaultSectorKey": "overview",
+                "sectors": [
+                    {
+                        "key": "compute",
+                        "name": "算力",
+                        "description": "算力主题",
+                        "policyFocus": ["人工智能+"],
+                        "focusTracks": ["服务器"],
+                        "industryHints": ["通信设备"],
+                        "order": 10,
+                    },
+                    {
+                        "key": "marine",
+                        "name": "海工",
+                        "description": "海工主题",
+                        "policyFocus": ["海洋强国"],
+                        "focusTracks": ["船舶"],
+                        "industryHints": ["船舶制造"],
+                        "order": 20,
+                    },
+                ],
+            }, ensure_ascii=False),
+        ),
+        Config(
+            key="sector_analysis_pool",
+            value=json.dumps({
+                "compute": {
+                    "算力A": "600001",
+                    "算力B": "600002",
+                },
+                "marine": {
+                    "海工A": "300001",
+                },
+            }, ensure_ascii=False),
+        ),
+    ])
+    db.add_all([
+        Stock(code="600001", name="算力A", market="SH", industry="通信设备"),
+        Stock(code="600002", name="算力B", market="SH", industry="通信设备"),
+        Stock(code="300001", name="海工A", market="SZ", industry="船舶制造"),
+    ])
+    db.add_all([
+        StockDaily(code="600001", trade_date=previous_date, open=10.0, close=10.2, high=10.4, low=9.9, volume=100000),
+        StockDaily(code="600002", trade_date=previous_date, open=12.0, close=12.1, high=12.3, low=11.8, volume=90000),
+        StockDaily(code="300001", trade_date=previous_date, open=8.0, close=8.5, high=8.6, low=7.9, volume=150000),
+        StockDaily(code="600001", trade_date=latest_date, open=10.2, close=10.8, high=10.9, low=10.1, volume=130000),
+        StockDaily(code="600002", trade_date=latest_date, open=12.1, close=12.9, high=13.0, low=12.0, volume=120000),
+        StockDaily(code="300001", trade_date=latest_date, open=8.5, close=8.3, high=8.6, low=8.1, volume=180000),
+    ])
+    db.add_all([
+        CurrentHotRun(pick_date=previous_date, status="success", candidate_count=3, analysis_count=3, trend_start_count=1),
+        CurrentHotRun(pick_date=latest_date, status="success", candidate_count=3, analysis_count=3, trend_start_count=2),
+    ])
+    db.add_all([
+        CurrentHotCandidate(pick_date=previous_date, code="600001", sector_names_json=["算力"], board_group="other", change_pct=2.0, b1_passed=False),
+        CurrentHotCandidate(pick_date=previous_date, code="600002", sector_names_json=["算力"], board_group="other", change_pct=1.0, b1_passed=False),
+        CurrentHotCandidate(pick_date=previous_date, code="300001", sector_names_json=["海工"], board_group="other", change_pct=6.5, b1_passed=True),
+        CurrentHotCandidate(pick_date=latest_date, code="600001", sector_names_json=["算力"], board_group="other", change_pct=5.6, b1_passed=True),
+        CurrentHotCandidate(pick_date=latest_date, code="600002", sector_names_json=["算力"], board_group="other", change_pct=4.9, b1_passed=True),
+        CurrentHotCandidate(pick_date=latest_date, code="300001", sector_names_json=["海工"], board_group="other", change_pct=-2.3, b1_passed=True),
+    ])
+    db.add_all([
+        CurrentHotAnalysisResult(
+            pick_date=previous_date,
+            code="600001",
+            reviewer="quant",
+            b1_passed=False,
+            verdict="WATCH",
+            total_score=4.1,
+            signal_type="rebound",
+            comment="weak",
+            details_json={},
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=previous_date,
+            code="600002",
+            reviewer="quant",
+            b1_passed=False,
+            verdict="WATCH",
+            total_score=4.0,
+            signal_type="rebound",
+            comment="weak",
+            details_json={},
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=previous_date,
+            code="300001",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.5,
+            signal_type="trend_start",
+            comment="strong",
+            details_json={},
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=latest_date,
+            code="600001",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.6,
+            signal_type="trend_start",
+            comment="strong",
+            details_json={},
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=latest_date,
+            code="600002",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.2,
+            signal_type="trend_start",
+            comment="strong",
+            details_json={},
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=latest_date,
+            code="300001",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="WATCH",
+            total_score=4.2,
+            signal_type="rebound",
+            comment="negative",
+            details_json={"pullback_negative_flags": ["下跌逐步上量"]},
+        ),
+    ])
+    db.add_all([
+        StockActivePoolRank(trade_date=previous_date, code="600001", top_m=2000, n_turnover_days=43, turnover_n=100000.0, active_pool_rank=25, in_active_pool=True),
+        StockActivePoolRank(trade_date=previous_date, code="600002", top_m=2000, n_turnover_days=43, turnover_n=90000.0, active_pool_rank=41, in_active_pool=True),
+        StockActivePoolRank(trade_date=previous_date, code="300001", top_m=2000, n_turnover_days=43, turnover_n=150000.0, active_pool_rank=8, in_active_pool=True),
+        StockActivePoolRank(trade_date=latest_date, code="600001", top_m=2000, n_turnover_days=43, turnover_n=130000.0, active_pool_rank=9, in_active_pool=True),
+        StockActivePoolRank(trade_date=latest_date, code="600002", top_m=2000, n_turnover_days=43, turnover_n=120000.0, active_pool_rank=17, in_active_pool=True),
+        StockActivePoolRank(trade_date=latest_date, code="300001", top_m=2000, n_turnover_days=43, turnover_n=180000.0, active_pool_rank=6, in_active_pool=True),
+    ])
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/current-hot/sectors?window_size=30&top_n=2")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["latest_date"] == "2026-05-08"
+    assert data["previous_date"] == "2026-05-07"
+    assert data["top_sector_keys"] == ["compute", "marine"]
+    assert [item["sector_key"] for item in data["sectors"]] == ["compute", "marine"]
+    assert data["sectors"][0]["rank"] == 1
+    assert data["sectors"][0]["previous_rank"] == 2
+    assert data["sectors"][0]["rank_change"] == 1
+    assert data["sectors"][0]["trend_start_count"] == 2
+    assert data["sectors"][0]["leaders"][0]["code"] == "600001"
+    assert data["sectors"][1]["rank"] == 2
+    assert data["sectors"][1]["previous_rank"] == 1
+    assert data["sectors"][1]["negative_flag_count"] == 1
+    assert len(data["history"]) == 2
+    compute_history = next(item for item in data["history"] if item["sector_key"] == "compute")
+    marine_history = next(item for item in data["history"] if item["sector_key"] == "marine")
+    assert [point["date"] for point in compute_history["points"]] == ["2026-05-07", "2026-05-08"]
+    assert compute_history["points"][0]["rank"] == 2
+    assert compute_history["points"][1]["rank"] == 1
+    assert marine_history["points"][1]["negative_flag_count"] == 1
 
 
 def test_current_hot_intraday_status_opens_during_midday_break(test_client_with_db: Any) -> None:

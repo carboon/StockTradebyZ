@@ -82,6 +82,16 @@ volume:
   thrust_window: 10
   pullback_dryup_strong: 0.65
   pullback_dryup_healthy: 0.85
+  # 最近 5 日回调质量：优先惩罚“下跌逐步上量”
+  pullback_review_window: 5
+  pullback_min_down_days: 2
+  pullback_strong_down_days: 3
+  # 最近连续回调若达到 3 连跌，且量能递增占比高、末根明显放大，视为强负面
+  pullback_volume_increase_ratio_strong: 0.67
+  pullback_volume_expand_strong: 1.25
+  # 比传统 distribution 更敏感，用于识别单根异常放量阴线
+  abnormal_bear_return: -0.015
+  abnormal_bear_volume_ratio: 1.25
 
 # ── 历史异动 / 建仓痕迹 ────────────────────────────────
 abnormal:

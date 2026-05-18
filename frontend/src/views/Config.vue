@@ -175,6 +175,83 @@
           </div>
         </el-tab-pane>
 
+        <el-tab-pane label="板块配置" name="sector-config">
+          <el-alert
+            title="板块配置说明"
+            description="sector_analysis_catalog 控制左侧板块分析菜单与说明，sector_analysis_pool 控制每个板块对应的股票池。保存后会直接写入数据库配置表。"
+            type="info"
+            show-icon
+            :closable="false"
+            class="status-alert"
+          />
+
+          <div class="sector-config-summary">
+            <div class="sector-summary-card">
+              <div class="sector-summary-card__label">目录板块数</div>
+              <div class="sector-summary-card__value">{{ sectorCatalogSummary.sectorCount }}</div>
+              <div class="sector-summary-card__meta">
+                {{ sectorCatalogSummary.error || `默认入口 ${sectorCatalogSummary.defaultSectorKey}` }}
+              </div>
+            </div>
+            <div class="sector-summary-card">
+              <div class="sector-summary-card__label">股票池分组数</div>
+              <div class="sector-summary-card__value">{{ sectorPoolSummary.groupCount }}</div>
+              <div class="sector-summary-card__meta">
+                {{ sectorPoolSummary.error || `股票总数 ${sectorPoolSummary.stockCount}` }}
+              </div>
+            </div>
+          </div>
+
+          <div class="sector-config-toolbar">
+            <el-button :loading="sectorConfigsLoading" @click="loadSectorConfigEditorsFromStore">
+              从数据库重载
+            </el-button>
+            <el-button @click="restoreSectorDefaults">
+              载入内置默认
+            </el-button>
+            <el-button type="primary" :loading="savingSectorConfigs" @click="saveSectorConfigs(false)">
+              保存板块配置
+            </el-button>
+            <el-button type="success" :loading="syncingSectorDefaults" @click="saveSectorConfigs(true)">
+              用内置默认覆盖数据库
+            </el-button>
+          </div>
+
+          <div class="sector-config-grid">
+            <div class="sector-config-panel">
+              <div class="sector-config-panel__header">
+                <div>
+                  <div class="sector-config-panel__title">sector_analysis_catalog</div>
+                  <div class="sector-config-panel__desc">控制菜单层级、板块名称、说明、排序与是否启用。</div>
+                </div>
+                <el-tag size="small" effect="plain">JSON</el-tag>
+              </div>
+              <el-input
+                v-model="sectorConfigEditors.catalog"
+                type="textarea"
+                :autosize="{ minRows: 18, maxRows: 28 }"
+                class="sector-json-editor"
+              />
+            </div>
+
+            <div class="sector-config-panel">
+              <div class="sector-config-panel__header">
+                <div>
+                  <div class="sector-config-panel__title">sector_analysis_pool</div>
+                  <div class="sector-config-panel__desc">控制每个板块对应的股票清单；优先级高于 current_hot_pool。</div>
+                </div>
+                <el-tag size="small" effect="plain">JSON</el-tag>
+              </div>
+              <el-input
+                v-model="sectorConfigEditors.pool"
+                type="textarea"
+                :autosize="{ minRows: 18, maxRows: 28 }"
+                class="sector-json-editor"
+              />
+            </div>
+          </div>
+        </el-tab-pane>
+
         <!-- Tab 2: 系统自检 -->
         <el-tab-pane label="系统自检" name="diagnostics">
           <div class="startup-panel">
@@ -279,6 +356,7 @@ import { apiTasks } from '@/api'
 import { saveInitTaskViewState } from '@/utils/initTaskViewState'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import type { TaskDiagnosticCheck, TaskDiagnosticsResponse } from '@/types'
+import { DEFAULT_SECTOR_ANALYSIS_CATALOG, DEFAULT_SECTOR_ANALYSIS_POOL } from '@/utils/sectorAnalysis'
 
 const configStore = useConfigStore()
 const noticeStore = useNoticeStore()
@@ -303,6 +381,72 @@ const saving = ref(false)
 const savingAndInitializing = ref(false)
 const diagnosticsLoading = ref(false)
 const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
+const savingSectorConfigs = ref(false)
+const syncingSectorDefaults = ref(false)
+const sectorConfigsLoading = ref(false)
+const sectorConfigEditors = ref({
+  catalog: JSON.stringify(DEFAULT_SECTOR_ANALYSIS_CATALOG, null, 2),
+  pool: JSON.stringify(DEFAULT_SECTOR_ANALYSIS_POOL, null, 2),
+})
+
+const DEFAULT_SECTOR_CATALOG_TEXT = JSON.stringify(DEFAULT_SECTOR_ANALYSIS_CATALOG, null, 2)
+const DEFAULT_SECTOR_POOL_TEXT = JSON.stringify(DEFAULT_SECTOR_ANALYSIS_POOL, null, 2)
+
+function safeParseJsonObject(text: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(text)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    return value as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+const sectorCatalogSummary = computed(() => {
+  const payload = safeParseJsonObject(sectorConfigEditors.value.catalog)
+  if (!payload) {
+    return {
+      sectorCount: '-',
+      defaultSectorKey: '-',
+      error: '目录 JSON 格式无效',
+    }
+  }
+  const sectors = Array.isArray(payload.sectors) ? payload.sectors.filter((item) => {
+    return item && typeof item === 'object' && (item as Record<string, unknown>).enabled !== false
+  }) : []
+  return {
+    sectorCount: sectors.length,
+    defaultSectorKey: String(payload.defaultSectorKey ?? 'overview'),
+    error: '',
+  }
+})
+
+const sectorPoolSummary = computed(() => {
+  const payload = safeParseJsonObject(sectorConfigEditors.value.pool)
+  if (!payload) {
+    return {
+      groupCount: '-',
+      stockCount: '-',
+      error: '股票池 JSON 格式无效',
+    }
+  }
+  const groups = Object.entries(payload)
+  let stockCount = 0
+  for (const [, value] of groups) {
+    if (Array.isArray(value)) {
+      stockCount += value.length
+      continue
+    }
+    if (value && typeof value === 'object') {
+      stockCount += Object.keys(value as Record<string, unknown>).length
+    }
+  }
+  return {
+    groupCount: groups.length,
+    stockCount,
+    error: '',
+  }
+})
 
 const statusSummary = computed(() => {
   if (!configStore.apiAvailable) return null
@@ -406,9 +550,14 @@ const nextStepCards = computed(() => {
   if (!configStore.dataInitialized) return []
   return [
     {
-      title: '明日之星',
+      title: '全盘分析',
       description: '先看最新交易日候选股和分析结果，确认系统已经给出的重点标的。',
       route: '/tomorrow-star',
+    },
+    {
+      title: '板块分析',
+      description: '按国家战略主题查看默认板块池与当前热盘快照的对应情况。',
+      route: '/sector-analysis/overview',
     },
     {
       title: '单股诊断',
@@ -442,9 +591,30 @@ async function loadConfigs() {
       register_validation_question: configStore.configs.register_validation_question || '系统管理员的微信名是什么',
       register_validation_answer: configStore.configs.register_validation_answer || '船长',
     }
+    loadSectorConfigEditorsFromStore()
   } catch (error) {
     console.error('Failed to load configs:', error)
   }
+}
+
+function loadSectorConfigEditorsFromStore() {
+  sectorConfigsLoading.value = true
+  try {
+    sectorConfigEditors.value = {
+      catalog: configStore.configs.sector_analysis_catalog?.trim() || DEFAULT_SECTOR_CATALOG_TEXT,
+      pool: configStore.configs.sector_analysis_pool?.trim() || DEFAULT_SECTOR_POOL_TEXT,
+    }
+  } finally {
+    sectorConfigsLoading.value = false
+  }
+}
+
+function restoreSectorDefaults() {
+  sectorConfigEditors.value = {
+    catalog: DEFAULT_SECTOR_CATALOG_TEXT,
+    pool: DEFAULT_SECTOR_POOL_TEXT,
+  }
+  ElMessage.success('已载入内置默认板块配置')
 }
 
 async function loadStatus() {
@@ -604,11 +774,57 @@ async function saveConfigs(startInitialization: boolean) {
     savingAndInitializing.value = false
   }
 }
+
+function parseSectorConfigPayload(text: string, label: string): string {
+  try {
+    const payload = JSON.parse(text)
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error(`${label} 顶层必须是 JSON 对象`)
+    }
+    return JSON.stringify(payload, null, 2)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : `${label} JSON 解析失败`
+    throw new Error(message)
+  }
+}
+
+async function saveSectorConfigs(overwriteWithDefaults: boolean) {
+  if (!configStore.apiAvailable) {
+    ElMessage.error(configStore.statusError || '后端服务暂不可用')
+    return
+  }
+
+  const nextCatalogText = overwriteWithDefaults ? DEFAULT_SECTOR_CATALOG_TEXT : sectorConfigEditors.value.catalog
+  const nextPoolText = overwriteWithDefaults ? DEFAULT_SECTOR_POOL_TEXT : sectorConfigEditors.value.pool
+
+  if (overwriteWithDefaults) {
+    syncingSectorDefaults.value = true
+  } else {
+    savingSectorConfigs.value = true
+  }
+
+  try {
+    const catalogValue = parseSectorConfigPayload(nextCatalogText, '板块目录配置')
+    const poolValue = parseSectorConfigPayload(nextPoolText, '板块股票池配置')
+
+    await configStore.updateConfig('sector_analysis_catalog', catalogValue)
+    await configStore.updateConfig('sector_analysis_pool', poolValue)
+    await configStore.loadConfigs()
+    loadSectorConfigEditorsFromStore()
+
+    ElMessage.success(overwriteWithDefaults ? '内置默认板块配置已同步到数据库' : '板块配置已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '板块配置保存失败')
+  } finally {
+    savingSectorConfigs.value = false
+    syncingSectorDefaults.value = false
+  }
+}
 </script>
 
 <style scoped lang="scss">
 .config-page {
-  max-width: 800px;
+  max-width: 1180px;
 
   :deep(.el-card__body) {
     position: relative;
@@ -747,8 +963,90 @@ async function saveConfigs(startInitialization: boolean) {
 
   .next-steps-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
+  }
+
+  .sector-config-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+
+  .sector-summary-card {
+    padding: 16px 18px;
+    border-radius: 12px;
+    border: 1px solid #dbeafe;
+    background: linear-gradient(135deg, #f8fbff 0%, #f8fafc 100%);
+  }
+
+  .sector-summary-card__label {
+    font-size: 13px;
+    color: #64748b;
+  }
+
+  .sector-summary-card__value {
+    margin-top: 6px;
+    font-size: 24px;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .sector-summary-card__meta {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #475569;
+    line-height: 1.6;
+  }
+
+  .sector-config-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .sector-config-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .sector-config-panel {
+    padding: 18px;
+    border-radius: 14px;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+  }
+
+  .sector-config-panel__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .sector-config-panel__title {
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .sector-config-panel__desc {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #475569;
+  }
+
+  .sector-json-editor {
+    :deep(textarea) {
+      min-height: 420px;
+      font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+    }
   }
 
   .next-step-card {
@@ -954,6 +1252,18 @@ async function saveConfigs(startInitialization: boolean) {
 
     .next-steps-grid {
       grid-template-columns: 1fr;
+    }
+
+    .sector-config-summary,
+    .sector-config-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .sector-config-toolbar {
+      .el-button {
+        flex: 1 1 160px;
+        margin-left: 0;
+      }
     }
 
     .config-form {

@@ -11,20 +11,41 @@
 
       <el-menu
         :default-active="activeMenu"
+        :default-openeds="defaultOpeneds"
         :collapse="isCollapsed"
         router
         class="sidebar-menu"
       >
-        <el-menu-item
-          v-for="route in menuRoutes"
-          :key="route.path"
-          :index="route.path"
-        >
-          <el-icon>
-            <component :is="route.icon" />
-          </el-icon>
-          <template #title>{{ route.meta.title }}</template>
-        </el-menu-item>
+        <template v-for="route in menuRoutes" :key="route.path">
+          <el-sub-menu
+            v-if="route.children?.length"
+            :index="route.path"
+            popper-class="sidebar-submenu-popper"
+          >
+            <template #title>
+              <el-icon>
+                <component :is="route.icon" />
+              </el-icon>
+              <span>{{ route.meta.title }}</span>
+            </template>
+            <el-menu-item
+              v-for="child in route.children"
+              :key="child.path"
+              :index="child.path"
+            >
+              <template #title>{{ child.meta.title }}</template>
+            </el-menu-item>
+          </el-sub-menu>
+          <el-menu-item
+            v-else
+            :index="route.path"
+          >
+            <el-icon>
+              <component :is="route.icon" />
+            </el-icon>
+            <template #title>{{ route.meta.title }}</template>
+          </el-menu-item>
+        </template>
         </el-menu>
       </el-aside>
 
@@ -45,20 +66,41 @@
 
         <el-menu
           :default-active="activeMenu"
+          :default-openeds="defaultOpeneds"
           router
           class="sidebar-menu"
           @select="handleMobileMenuSelect"
         >
-          <el-menu-item
-            v-for="route in menuRoutes"
-            :key="route.path"
-            :index="route.path"
-          >
-            <el-icon>
-              <component :is="route.icon" />
-            </el-icon>
-            <template #title>{{ route.meta.title }}</template>
-          </el-menu-item>
+          <template v-for="route in menuRoutes" :key="route.path">
+            <el-sub-menu
+              v-if="route.children?.length"
+              :index="route.path"
+              popper-class="sidebar-submenu-popper"
+            >
+              <template #title>
+                <el-icon>
+                  <component :is="route.icon" />
+                </el-icon>
+                <span>{{ route.meta.title }}</span>
+              </template>
+              <el-menu-item
+                v-for="child in route.children"
+                :key="child.path"
+                :index="child.path"
+              >
+                <template #title>{{ child.meta.title }}</template>
+              </el-menu-item>
+            </el-sub-menu>
+            <el-menu-item
+              v-else
+              :index="route.path"
+            >
+              <el-icon>
+                <component :is="route.icon" />
+              </el-icon>
+              <template #title>{{ route.meta.title }}</template>
+            </el-menu-item>
+          </template>
         </el-menu>
       </div>
     </el-drawer>
@@ -244,7 +286,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document,
+  TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document, Grid,
   User as UserIcon,
 } from '@element-plus/icons-vue'
 import { apiTasks } from '@/api'
@@ -253,7 +295,25 @@ import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
 import type { IncrementalUpdateStatus, Task } from '@/types'
 import { formatDuration } from '@/utils'
+import {
+  SECTOR_ANALYSIS_ROOT_PATH,
+  buildSectorMenuEntries,
+  getSectorRoutePath,
+  resolveSectorAnalysisCatalog,
+} from '@/utils/sectorAnalysis'
 import { useResponsive } from '@/composables/useResponsive'
+
+const SECTOR_ANALYSIS_MENU_GROUP_INDEX = 'sector-analysis-group'
+
+type MenuRouteItem = {
+  path: string
+  icon?: unknown
+  meta: {
+    title: string
+    icon?: string
+  }
+  children?: MenuRouteItem[]
+}
 
 const router = useRouter()
 const route = useRoute()
@@ -274,10 +334,39 @@ let progressPoller: ReturnType<typeof setInterval> | null = null
 let progressPollIntervalMs = 30000
 
 const sidebarWidth = computed(() => isCollapsed.value ? '64px' : '200px')
-const activeMenu = computed(() => route.path)
+const sectorCatalog = computed(() => resolveSectorAnalysisCatalog(configStore.configs.sector_analysis_catalog))
+const sectorMenuTitle = computed(() => {
+  const title = String(sectorCatalog.value.menuTitle || '').trim()
+  return title && title !== '全盘分析' ? title : '板块分析'
+})
+const sectorMenuChildren = computed<MenuRouteItem[]>(() => {
+  return buildSectorMenuEntries(sectorCatalog.value).map((item) => ({
+    path: item.path,
+    meta: { title: item.name },
+  }))
+})
+const defaultOpeneds = computed(() => route.path.startsWith(SECTOR_ANALYSIS_ROOT_PATH) ? [SECTOR_ANALYSIS_MENU_GROUP_INDEX] : [])
+const flatMenuRoutes = computed(() => {
+  const items: MenuRouteItem[] = []
+  for (const menuRoute of menuRoutes.value) {
+    if (menuRoute.children?.length) {
+      items.push(...menuRoute.children)
+      continue
+    }
+    items.push(menuRoute)
+  }
+  return items
+})
+const activeMenu = computed(() => {
+  if (route.path === SECTOR_ANALYSIS_ROOT_PATH) {
+    return getSectorRoutePath(sectorCatalog.value.defaultSectorKey)
+  }
+  return route.path
+})
 const isUpdateRoute = computed(() => route.path.startsWith('/update'))
 const currentPageTitle = computed(() => {
-  const matchedRoute = menuRoutes.value.find((menuRoute) => menuRoute.path === route.path)
+  const matchedRoute = flatMenuRoutes.value.find((menuRoute) => menuRoute.path === route.path)
+    || menuRoutes.value.find((menuRoute) => menuRoute.path === route.path)
   return matchedRoute?.meta.title || (route.meta.title as string) || 'StockTrader'
 })
 const headerToggleIcon = computed(() => {
@@ -444,9 +533,15 @@ const compactStatusItems = computed(() => {
 })
 const compactStatusSummary = computed(() => compactStatusItems.value[0]?.label || '')
 
-const menuRoutes = computed(() => {
-  const routes = [
-    { path: '/tomorrow-star', icon: Star, meta: { title: '明日之星', icon: 'Star' } },
+const menuRoutes = computed<MenuRouteItem[]>(() => {
+  const routes: MenuRouteItem[] = [
+    { path: '/tomorrow-star', icon: Star, meta: { title: '全盘分析', icon: 'Star' } },
+    {
+      path: SECTOR_ANALYSIS_MENU_GROUP_INDEX,
+      icon: Grid,
+      meta: { title: sectorMenuTitle.value, icon: 'Grid' },
+      children: sectorMenuChildren.value,
+    },
     { path: '/diagnosis', icon: Search, meta: { title: '单股诊断', icon: 'Search' } },
     { path: '/watchlist', icon: View, meta: { title: '重点观察', icon: 'View' } },
     { path: '/system-info', icon: Document, meta: { title: '系统说明', icon: 'Document' } },
@@ -594,6 +689,7 @@ function startPoller() {
 onMounted(() => {
   // 只在已登录时启动轮询
   if (authStore.isAuthenticated) {
+    void configStore.loadConfigs().catch(() => undefined)
     void refreshHeaderProgress()
     startPoller()
   }
@@ -607,6 +703,7 @@ onUnmounted(() => {
 watch(() => authStore.isAuthenticated, (isLoggedIn) => {
   if (isLoggedIn && !progressPoller) {
     // 用户刚登录，启动轮询
+    void configStore.loadConfigs().catch(() => undefined)
     void refreshHeaderProgress()
     startPoller()
   } else if (!isLoggedIn && progressPoller) {
@@ -682,17 +779,43 @@ $space-md: 24px;
   .sidebar-menu {
     border: none;
     background-color: transparent;
+    --el-menu-bg-color: #1e293b;
+    --el-menu-text-color: rgba(255, 255, 255, 0.74);
+    --el-menu-hover-bg-color: rgba(0, 180, 216, 0.18);
+    --el-menu-active-color: #00b4d8;
+    --el-bg-color-overlay: #1e293b;
 
+    :deep(.el-menu),
+    :deep(.el-menu--inline) {
+      background-color: #1e293b !important;
+    }
+
+    :deep(.el-sub-menu .el-menu) {
+      background-color: #1e293b !important;
+    }
+
+    :deep(.el-sub-menu__title),
     :deep(.el-menu-item) {
       height: 44px;
       line-height: 44px;
-      color: rgba(255, 255, 255, 0.7);
+      color: rgba(255, 255, 255, 0.74) !important;
 
       &:hover,
       &.is-active {
         background-color: rgba(0, 180, 216, 0.2);
         color: #00B4D8;
       }
+    }
+
+    :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
+      background-color: rgba(0, 180, 216, 0.16);
+      color: #00B4D8;
+    }
+
+    :deep(.el-menu--inline .el-menu-item) {
+      min-width: 0;
+      padding-left: 52px !important;
+      background-color: transparent;
     }
   }
 }
@@ -1081,5 +1204,37 @@ $space-md: 24px;
     padding: $space-sm 12px;
     overflow: visible;
   }
+}
+</style>
+
+<style lang="scss">
+.sidebar-submenu-popper.el-popper,
+.sidebar-submenu-popper {
+  --el-menu-bg-color: #1e293b;
+  --el-menu-text-color: rgba(255, 255, 255, 0.74);
+  --el-menu-hover-bg-color: rgba(0, 180, 216, 0.18);
+  --el-menu-active-color: #00b4d8;
+  --el-bg-color-overlay: #1e293b;
+  background-color: #1e293b !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.28) !important;
+}
+
+.sidebar-submenu-popper .el-menu {
+  background-color: transparent !important;
+  border-right: none !important;
+}
+
+.sidebar-submenu-popper .el-menu-item,
+.sidebar-submenu-popper .el-sub-menu__title {
+  color: rgba(255, 255, 255, 0.74) !important;
+}
+
+.sidebar-submenu-popper .el-menu-item:hover,
+.sidebar-submenu-popper .el-sub-menu__title:hover,
+.sidebar-submenu-popper .el-menu-item.is-active,
+.sidebar-submenu-popper .el-sub-menu.is-active > .el-sub-menu__title {
+  background-color: rgba(0, 180, 216, 0.18) !important;
+  color: #00b4d8 !important;
 }
 </style>

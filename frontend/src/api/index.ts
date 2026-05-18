@@ -11,6 +11,8 @@ import type {
   CurrentHotAnalysisResultsResponse,
   CurrentHotCandidatesResponse,
   CurrentHotDatesResponse,
+  CurrentHotSectorAnalysisResponse,
+  SectorAnalysisRowsResponse,
   CurrentHotIntradayAnalysisActionResponse,
   CurrentHotIntradayAnalysisPrefetchResponse,
   CurrentHotIntradayAnalysisResponse,
@@ -246,6 +248,25 @@ export const apiAnalysis = {
     api.get<never, CurrentHotAnalysisResultsResponse>('/v1/analysis/current-hot/results', {
       ...withRequestOptions(options, TIMEOUTS.standard),
       params: { date },
+    }),
+
+  // 获取当前热盘板块强弱与轮动历史
+  getCurrentHotSectorAnalysis: (windowSize: number = 120, topN: number = 5, options?: RequestOptions) =>
+    api.get<never, CurrentHotSectorAnalysisResponse>('/v1/analysis/current-hot/sectors', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { window_size: windowSize, top_n: topN },
+    }),
+
+  getSectorAnalysisOverview: (windowSize: number = 120, topN: number = 5, options?: RequestOptions) =>
+    api.get<never, CurrentHotSectorAnalysisResponse>('/v1/analysis/sector-analysis/overview', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { window_size: windowSize, top_n: topN },
+    }),
+
+  getSectorAnalysisRows: (sectorKey: string, date?: string, options?: RequestOptions) =>
+    api.get<never, SectorAnalysisRowsResponse>('/v1/analysis/sector-analysis/rows', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { sector_key: sectorKey, date },
     }),
 
   // 生成当前热盘

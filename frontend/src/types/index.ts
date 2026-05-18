@@ -44,6 +44,8 @@ export interface Candidate {
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
+  pullback_quality?: string | null
+  pullback_negative_flags?: string[] | null
 }
 
 export interface AnalysisResult {
@@ -63,6 +65,8 @@ export interface AnalysisResult {
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
+  pullback_quality?: string | null
+  pullback_negative_flags?: string[] | null
 }
 
 export interface CurrentHotCandidate {
@@ -88,6 +92,11 @@ export interface CurrentHotCandidate {
   total_score?: number | null
   signal_type?: string | null
   comment?: string | null
+  prefilter_passed?: boolean | null
+  prefilter_summary?: string | null
+  prefilter_blocked_by?: string[] | null
+  pullback_quality?: string | null
+  pullback_negative_flags?: string[] | null
 }
 
 export interface CurrentHotAnalysisResult {
@@ -109,6 +118,8 @@ export interface CurrentHotAnalysisResult {
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
+  pullback_quality?: string | null
+  pullback_negative_flags?: string[] | null
 }
 
 export interface ExitPlan {
@@ -607,6 +618,106 @@ export interface CurrentHotAnalysisResultsResponse {
   results: CurrentHotAnalysisResult[]
   total: number
   min_score_threshold: number
+}
+
+export interface SectorAnalysisRow {
+  id: number
+  pick_date: string
+  sector_key: string
+  code: string
+  name?: string
+  sector_names?: string[]
+  board_group?: string | null
+  open_price?: number
+  close_price?: number
+  change_pct?: number
+  turnover?: number
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  active_pool_rank?: number | null
+  b1_passed?: boolean | null
+  kdj_j?: number | null
+  verdict?: 'PASS' | 'WATCH' | 'FAIL'
+  total_score?: number | null
+  signal_type?: string | null
+  comment?: string | null
+  prefilter_passed?: boolean | null
+  prefilter_summary?: string | null
+  prefilter_blocked_by?: string[] | null
+  pullback_quality?: string | null
+  pullback_negative_flags?: string[] | null
+}
+
+export interface SectorAnalysisRowsResponse {
+  sector_key: string
+  pick_date?: string | null
+  rows: SectorAnalysisRow[]
+  total: number
+}
+
+export interface CurrentHotSectorLeaderItem {
+  code: string
+  name?: string | null
+  total_score?: number | null
+  signal_type?: string | null
+  verdict?: 'PASS' | 'WATCH' | 'FAIL' | string | null
+  active_pool_rank?: number | null
+}
+
+export interface CurrentHotSectorHistoryPoint {
+  date: string
+  rank: number
+  strength_score: number
+  tracked_count: number
+  b1_count: number
+  trend_start_count: number
+  pass_count: number
+  high_score_count: number
+  negative_flag_count: number
+  avg_score?: number | null
+  avg_change_pct?: number | null
+}
+
+export interface CurrentHotSectorSummaryItem {
+  sector_key: string
+  sector_name: string
+  description: string
+  policy_focus: string[]
+  focus_tracks: string[]
+  rank?: number | null
+  previous_rank?: number | null
+  rank_change?: number | null
+  pool_count: number
+  tracked_count: number
+  pool_hit_ratio: number
+  b1_count: number
+  trend_start_count: number
+  pass_count: number
+  high_score_count: number
+  negative_flag_count: number
+  active_top20_count: number
+  active_top50_count: number
+  avg_score?: number | null
+  avg_change_pct?: number | null
+  best_active_pool_rank?: number | null
+  strength_score: number
+  leaders: CurrentHotSectorLeaderItem[]
+}
+
+export interface CurrentHotSectorHistorySeries {
+  sector_key: string
+  sector_name: string
+  points: CurrentHotSectorHistoryPoint[]
+}
+
+export interface CurrentHotSectorAnalysisResponse {
+  latest_date?: string | null
+  previous_date?: string | null
+  window_size: number
+  dates: string[]
+  top_sector_keys: string[]
+  sectors: CurrentHotSectorSummaryItem[]
+  history: CurrentHotSectorHistorySeries[]
 }
 
 export interface IntradayAnalysisStatusResponse {

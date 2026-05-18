@@ -123,6 +123,7 @@ describe('api/index.ts', () => {
     await apiAnalysis.getResults('2024-01-15', { signal })
     await apiAnalysis.getCurrentHotCandidates('2024-01-15', { signal })
     await apiAnalysis.getCurrentHotResults('2024-01-15', { signal })
+    await apiAnalysis.getCurrentHotSectorAnalysis(60, 4, { signal })
     await apiAnalysis.getCurrentHotMiddayStatus({ signal })
     await apiAnalysis.getCurrentHotMiddayCurrent({ signal })
     await apiAnalysis.getDiagnosisHistory('600000', 20, 1, 10, false, { signal })
@@ -150,15 +151,20 @@ describe('api/index.ts', () => {
       timeout: 20000,
       params: { date: '2024-01-15' },
     })
-    expect(mockGet).toHaveBeenNthCalledWith(5, '/v1/analysis/current-hot/intraday/status', {
+    expect(mockGet).toHaveBeenNthCalledWith(5, '/v1/analysis/current-hot/sectors', {
+      signal,
+      timeout: 20000,
+      params: { window_size: 60, top_n: 4 },
+    })
+    expect(mockGet).toHaveBeenNthCalledWith(6, '/v1/analysis/current-hot/intraday/status', {
       signal,
       timeout: 10000,
     })
-    expect(mockGet).toHaveBeenNthCalledWith(6, '/v1/analysis/current-hot/intraday/data', {
+    expect(mockGet).toHaveBeenNthCalledWith(7, '/v1/analysis/current-hot/intraday/data', {
       signal,
       timeout: 20000,
     })
-    expect(mockGet).toHaveBeenNthCalledWith(7, '/v1/analysis/diagnosis/600000/history', {
+    expect(mockGet).toHaveBeenNthCalledWith(8, '/v1/analysis/diagnosis/600000/history', {
       signal,
       timeout: 45000,
       params: { days: 20, page: 1, page_size: 10, refresh: false },

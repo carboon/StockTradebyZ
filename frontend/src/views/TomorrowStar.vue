@@ -210,6 +210,25 @@
                     >
                       前置 {{ getAnalysisPrefilterLabel(getAnalysisPrefilterPassed(row)) }}
                     </el-tag>
+                    <div v-if="getRowPullbackQualityLabel(row) || getRowPullbackNegativeFlags(row).length > 0" class="analysis-pullback-tags">
+                      <el-tag
+                        v-if="getRowPullbackQualityLabel(row)"
+                        :type="getPullbackQualityTagType(getRowPullbackQuality(row))"
+                        size="small"
+                        effect="plain"
+                      >
+                        回调 {{ getRowPullbackQualityLabel(row) }}
+                      </el-tag>
+                      <el-tag
+                        v-for="flag in getRowPullbackNegativeFlags(row)"
+                        :key="`${row.code}-${flag}`"
+                        :type="getPullbackNegativeFlagTagType(flag)"
+                        size="small"
+                        effect="plain"
+                      >
+                        {{ getPullbackNegativeFlagLabel(flag) }}
+                      </el-tag>
+                    </div>
                     <span v-if="showAnalysisComment" class="mobile-analysis-item__comment">{{ getAnalysisResultComment(row) }}</span>
                   </div>
                 </button>
@@ -1242,7 +1261,7 @@ let candidatesRequestId = 0
 let currentHotLoadDataRequestId = 0
 let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v10'
+const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v11'
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 let incrementalPollTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
@@ -1497,6 +1516,8 @@ function mergeTomorrowStarCandidateAnalysis(candidate: Candidate): Candidate {
     prefilter_passed: candidate.prefilter_passed ?? analysis.prefilter_passed,
     prefilter_summary: candidate.prefilter_summary ?? analysis.prefilter_summary,
     prefilter_blocked_by: candidate.prefilter_blocked_by ?? analysis.prefilter_blocked_by,
+    pullback_quality: candidate.pullback_quality ?? analysis.pullback_quality,
+    pullback_negative_flags: candidate.pullback_negative_flags ?? analysis.pullback_negative_flags,
   }
 }
 
@@ -1515,6 +1536,11 @@ function mergeCurrentHotCandidateAnalysis(candidate: CurrentHotCandidate): Curre
     comment: candidate.comment ?? analysis.comment,
     sector_names: candidate.sector_names?.length ? candidate.sector_names : analysis.sector_names,
     board_group: candidate.board_group ?? analysis.board_group,
+    prefilter_passed: candidate.prefilter_passed ?? analysis.prefilter_passed,
+    prefilter_summary: candidate.prefilter_summary ?? analysis.prefilter_summary,
+    prefilter_blocked_by: candidate.prefilter_blocked_by ?? analysis.prefilter_blocked_by,
+    pullback_quality: candidate.pullback_quality ?? analysis.pullback_quality,
+    pullback_negative_flags: candidate.pullback_negative_flags ?? analysis.pullback_negative_flags,
   }
 }
 const activeCandidateSortLabel = computed(() => {
@@ -2990,15 +3016,127 @@ function getAnalysisResultComment(result: AnalysisDisplayRow): string {
   return '点击查看单股诊断'
 }
 
+type PullbackFieldLike = {
+  code: string
+  pullback_quality?: string | null
+  pullback_negative_flags?: string[] | null
+}
+
+function getMatchedAnalysisResult(code: string): AnalysisResult | CurrentHotAnalysisResult | undefined {
+  return isCurrentHotTab.value
+    ? currentHotAnalysisByCode.value.get(code)
+    : tomorrowStarAnalysisByCode.value.get(code)
+}
+
+function getPullbackFields(row: PullbackFieldLike): { quality?: string | null, flags: string[] } {
+  const matched = getMatchedAnalysisResult(row.code)
+  const quality = row.pullback_quality ?? matched?.pullback_quality
+  const flags = Array.isArray(row.pullback_negative_flags) && row.pullback_negative_flags.length > 0
+    ? row.pullback_negative_flags
+    : (Array.isArray(matched?.pullback_negative_flags) ? matched?.pullback_negative_flags : [])
+  return {
+    quality,
+    flags: flags
+      .map((item) => String(item || '').trim())
+      .filter((item) => item.length > 0),
+  }
+}
+
+function getPullbackQualityLabel(value?: string | null): string {
+  switch (value) {
+    case 'contracting':
+      return '缩量回调'
+    case 'neutral':
+      return '中性回调'
+    case 'abnormal_bear':
+      return '异常阴量'
+    case 'expanding_selloff':
+      return '下跌上量'
+    case 'insufficient_data':
+      return '样本不足'
+    case 'disabled':
+      return '未启用'
+    default:
+      return typeof value === 'string' ? value : ''
+  }
+}
+
+function getPullbackQualityTagType(value?: string | null): string {
+  switch (value) {
+    case 'contracting':
+      return 'success'
+    case 'abnormal_bear':
+      return 'warning'
+    case 'expanding_selloff':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+function getPullbackNegativeFlagLabel(value: string): string {
+  switch (value) {
+    case 'down_volume_increasing':
+      return '下跌逐步上量'
+    case 'abnormal_bear_bar':
+      return '异常放量阴线'
+    default:
+      return value
+  }
+}
+
+function getPullbackNegativeFlagTagType(value: string): string {
+  return value === 'down_volume_increasing' ? 'danger' : 'warning'
+}
+
+function getRowPullbackQuality(row: PullbackFieldLike): string | null {
+  return getPullbackFields(row).quality ?? null
+}
+
+function getRowPullbackQualityLabel(row: PullbackFieldLike): string {
+  return getPullbackQualityLabel(getRowPullbackQuality(row))
+}
+
+function getRowPullbackNegativeFlags(row: PullbackFieldLike): string[] {
+  return getPullbackFields(row).flags
+}
+
+function getRowPullbackSummary(row: PullbackFieldLike): string {
+  const qualityLabel = getRowPullbackQualityLabel(row)
+  const flags = getRowPullbackNegativeFlags(row).map(getPullbackNegativeFlagLabel)
+  const parts: string[] = []
+  if (qualityLabel) {
+    parts.push(`回调:${qualityLabel}`)
+  }
+  if (flags.length > 0) {
+    parts.push(`负面:${flags.join('/')}`)
+  }
+  return parts.join('；')
+}
+
+type CandidateNoteLike = (Candidate | CurrentHotCandidate) & AnalysisPrefilterLike
+
+function getCandidatePrefilterNote(row: CandidateNoteLike): string {
+  if (row.prefilter_passed !== false) {
+    return ''
+  }
+  const summary = getAnalysisPrefilterSummary(row)
+  return summary ? `前置:${summary}` : '前置:未通过'
+}
+
 function getCandidateInlineNote(row: Candidate | CurrentHotCandidate): string {
+  const pullbackSummary = getRowPullbackSummary(row)
+  const prefilterNote = getCandidatePrefilterNote(row as CandidateNoteLike)
   if (isCurrentHotTab.value) {
     const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
-    return comment || '点击查看单股诊断'
+    return [pullbackSummary, comment, prefilterNote]
+      .filter((item) => typeof item === 'string' && item.trim())
+      .join('；') || '点击查看单股诊断'
   }
-  const candidate = row as Candidate
-  const prefilterSummary = typeof candidate.prefilter_summary === 'string' ? candidate.prefilter_summary.trim() : ''
-  const comment = typeof candidate.comment === 'string' ? candidate.comment.trim() : ''
-  return comment || prefilterSummary || '点击查看单股诊断'
+  const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
+  return [pullbackSummary, comment, prefilterNote]
+    .filter((item) => typeof item === 'string' && item.trim())
+    .join('；') || '点击查看单股诊断'
 }
 
 function getAnalysisB1Passed(result: AnalysisDisplayRow): boolean | null | undefined {
@@ -3953,6 +4091,12 @@ $space-lg: 32px;
     line-height: 1.5;
     color: #374151;
     word-break: break-word;
+  }
+
+  .analysis-pullback-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
   .midday-layout {

@@ -266,6 +266,90 @@ class CurrentHotIntradaySnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class SectorAnalysisRun(Base):
+    """板块分析按交易日与板块的构建状态表"""
+    __tablename__ = "sector_analysis_runs"
+    __table_args__ = (
+        UniqueConstraint("pick_date", "sector_key", name="uq_sector_analysis_runs_pick_date_sector"),
+        Index("ix_sector_analysis_runs_status_pick_date", "status", "pick_date"),
+        Index("ix_sector_analysis_runs_pick_date_sector", "pick_date", "sector_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pick_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    sector_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    analysis_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    trend_start_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    b1_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reviewer: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class SectorAnalysisCandidate(Base):
+    """板块分析候选表"""
+    __tablename__ = "sector_analysis_candidates"
+    __table_args__ = (
+        UniqueConstraint("pick_date", "sector_key", "code", name="uq_sector_analysis_candidates_pick_date_sector_code"),
+        Index("ix_sector_analysis_candidates_pick_date_sector", "pick_date", "sector_key"),
+        Index("ix_sector_analysis_candidates_pick_date_code", "pick_date", "code"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pick_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    sector_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    sector_names_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    board_group: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    open_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    close_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    turnover_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    kdj_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SectorAnalysisResult(Base):
+    """板块分析评分结果表"""
+    __tablename__ = "sector_analysis_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "pick_date",
+            "sector_key",
+            "code",
+            "reviewer",
+            name="uq_sector_analysis_results_pick_date_sector_code_reviewer",
+        ),
+        Index("ix_sector_analysis_results_pick_date_sector", "pick_date", "sector_key"),
+        Index("ix_sector_analysis_results_pick_date_code", "pick_date", "code"),
+        Index("ix_sector_analysis_results_pick_date_signal_type", "pick_date", "signal_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pick_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    sector_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    reviewer: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    verdict: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    total_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    signal_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    turnover_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class DailyB1Check(Base):
     """每日B1检查表 (单股诊断历史)"""
     __tablename__ = "daily_b1_checks"

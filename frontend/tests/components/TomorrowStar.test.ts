@@ -387,6 +387,38 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.getAnalysisPrefilterLabel(wrapper.vm.latestAnalysisResults[1].prefilter_passed)).toBe('是')
   })
 
+  it('includes pullback and blocked prefilter reason in candidate inline note', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    const note = wrapper.vm.getCandidateInlineNote({
+      code: '600150',
+      comment: '个股形态很强',
+      prefilter_passed: false,
+      prefilter_summary: '申万一级行业强度不在前 30%',
+      pullback_quality: 'contracting',
+      pullback_negative_flags: ['down_volume_increasing', 'abnormal_bear_bar'],
+    } as any)
+
+    expect(note).toContain('回调:缩量回调')
+    expect(note).toContain('负面:下跌逐步上量/异常放量阴线')
+    expect(note).toContain('前置:申万一级行业强度不在前 30%')
+  })
+
+  it('does not append passed prefilter summary to candidate inline note', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    const note = wrapper.vm.getCandidateInlineNote({
+      code: '600151',
+      comment: '量价健康',
+      prefilter_passed: true,
+      prefilter_summary: '通过第 4 步预过滤',
+    } as any)
+
+    expect(note).toBe('量价健康')
+  })
+
   it('loads date-specific candidates and results when selecting a history row', async () => {
     vi.mocked(apiAnalysis.getCandidates)
       .mockResolvedValueOnce({ pick_date: '2024-01-15', candidates: latestCandidates } as any)

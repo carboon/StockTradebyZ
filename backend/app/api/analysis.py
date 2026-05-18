@@ -34,6 +34,7 @@ from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysis
 from app.services.current_hot_service import CurrentHotService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 from app.services.intraday_analysis_service import IntradayAnalysisService
+from app.services.sector_analysis_service import SectorAnalysisService
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
@@ -49,9 +50,12 @@ from app.schemas import (
     CurrentHotAnalysisResultResponse,
     CurrentHotDatesResponse,
     CurrentHotHistoryItem,
+    CurrentHotSectorAnalysisResponse,
     CurrentHotIntradayAnalysisGenerateResponse,
     CurrentHotIntradayAnalysisPrefetchResponse,
     CurrentHotIntradayAnalysisResponse,
+    SectorAnalysisRowsResponse,
+    SectorAnalysisRowItem,
     TomorrowStarDatesResponse,
     TomorrowStarHistoryItem,
     TomorrowStarWindowStatusResponse,
@@ -127,6 +131,23 @@ def _extract_prefilter_fields(details_json: Optional[dict[str, Any]]) -> tuple[O
     blocked_by_raw = prefilter.get("blocked_by")
     blocked_by = [str(item) for item in blocked_by_raw] if isinstance(blocked_by_raw, list) and blocked_by_raw else None
     return passed, summary, blocked_by
+
+
+def _extract_pullback_fields(details_json: Optional[dict[str, Any]]) -> tuple[Optional[str], list[str]]:
+    if not isinstance(details_json, dict):
+        return None, []
+
+    quality_raw = details_json.get("pullback_quality")
+    quality = str(quality_raw).strip() if isinstance(quality_raw, str) and quality_raw.strip() else None
+
+    flags_raw = details_json.get("pullback_negative_flags")
+    if isinstance(flags_raw, list):
+        flags = [str(item).strip() for item in flags_raw if str(item).strip()]
+    elif isinstance(flags_raw, str):
+        flags = [item.strip() for item in flags_raw.split("|") if item.strip()]
+    else:
+        flags = []
+    return quality, flags
 
 
 def _extract_tomorrow_star_pass(details_json: Optional[dict[str, Any]]) -> Optional[bool]:
@@ -652,6 +673,7 @@ async def get_analysis_results(
     items = []
     for row, stock_name, b1_turnover_rate, b1_volume_ratio, daily_turnover_rate, daily_volume_ratio, detail in rows:
         prefilter_passed, prefilter_summary, prefilter_blocked_by = _extract_prefilter_fields(row.details_json)
+        pullback_quality, pullback_negative_flags = _extract_pullback_fields(row.details_json)
         details_turnover_rate = row.details_json.get("turnover_rate") if isinstance(row.details_json, dict) else None
         details_volume_ratio = row.details_json.get("volume_ratio") if isinstance(row.details_json, dict) else None
         tomorrow_star_pass = _extract_tomorrow_star_pass(row.details_json)
@@ -688,6 +710,8 @@ async def get_analysis_results(
                 prefilter_passed=prefilter_passed,
                 prefilter_summary=prefilter_summary,
                 prefilter_blocked_by=prefilter_blocked_by,
+                pullback_quality=pullback_quality,
+                pullback_negative_flags=pullback_negative_flags,
             )
         )
     items.sort(
@@ -802,6 +826,11 @@ async def get_current_hot_results(
             turnover_rate=item.get("turnover_rate"),
             volume_ratio=item.get("volume_ratio"),
             active_pool_rank=item.get("active_pool_rank"),
+            prefilter_passed=item.get("prefilter_passed"),
+            prefilter_summary=item.get("prefilter_summary"),
+            prefilter_blocked_by=item.get("prefilter_blocked_by"),
+            pullback_quality=item.get("pullback_quality"),
+            pullback_negative_flags=item.get("pullback_negative_flags"),
         )
         for item in payload.get("results", [])
     ]
@@ -810,6 +839,73 @@ async def get_current_hot_results(
         results=items,
         total=int(payload.get("total", 0) or 0),
         min_score_threshold=float(payload.get("min_score_threshold", 4.0) or 4.0),
+    )
+
+
+@router.get("/current-hot/sectors", response_model=CurrentHotSectorAnalysisResponse)
+async def get_current_hot_sector_analysis(
+    window_size: int = Query(CurrentHotService.DEFAULT_WINDOW_SIZE, ge=20, le=240),
+    top_n: int = Query(5, ge=1, le=12),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotSectorAnalysisResponse:
+    payload = CurrentHotService(db).get_sector_analysis(window_size=window_size, top_n=top_n)
+    return CurrentHotSectorAnalysisResponse(**payload)
+
+
+@router.get("/sector-analysis/overview", response_model=CurrentHotSectorAnalysisResponse)
+async def get_sector_analysis_overview(
+    window_size: int = Query(SectorAnalysisService.DEFAULT_WINDOW_SIZE, ge=20, le=240),
+    top_n: int = Query(5, ge=1, le=12),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotSectorAnalysisResponse:
+    payload = SectorAnalysisService(db).get_sector_analysis(window_size=window_size, top_n=top_n)
+    return CurrentHotSectorAnalysisResponse(**payload)
+
+
+@router.get("/sector-analysis/rows", response_model=SectorAnalysisRowsResponse)
+async def get_sector_analysis_rows(
+    sector_key: str = Query(..., description="板块标识"),
+    date: Optional[str] = Query(default=None, description="交易日"),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> SectorAnalysisRowsResponse:
+    payload = SectorAnalysisService(db).get_sector_date_rows(sector_key=sector_key, pick_date=date)
+    return SectorAnalysisRowsResponse(
+        sector_key=str(payload.get("sector_key") or ""),
+        pick_date=payload.get("pick_date"),
+        rows=[
+            SectorAnalysisRowItem(
+                id=int(item.get("id") or 0),
+                pick_date=payload.get("pick_date"),
+                sector_key=str(payload.get("sector_key") or ""),
+                code=str(item.get("code") or ""),
+                name=item.get("name"),
+                sector_names=item.get("sector_names") or [],
+                board_group=item.get("board_group"),
+                open_price=item.get("open_price"),
+                close_price=item.get("close_price"),
+                change_pct=item.get("change_pct"),
+                turnover=item.get("turnover"),
+                turnover_rate=item.get("turnover_rate"),
+                volume_ratio=item.get("volume_ratio"),
+                active_pool_rank=item.get("active_pool_rank"),
+                b1_passed=item.get("b1_passed"),
+                kdj_j=item.get("kdj_j"),
+                verdict=item.get("verdict"),
+                total_score=item.get("total_score"),
+                signal_type=item.get("signal_type"),
+                comment=item.get("comment"),
+                prefilter_passed=item.get("prefilter_passed"),
+                prefilter_summary=item.get("prefilter_summary"),
+                prefilter_blocked_by=item.get("prefilter_blocked_by"),
+                pullback_quality=item.get("pullback_quality"),
+                pullback_negative_flags=item.get("pullback_negative_flags"),
+            )
+            for item in payload.get("rows", [])
+        ],
+        total=int(payload.get("total", 0) or 0),
     )
 
 

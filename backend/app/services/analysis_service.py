@@ -508,6 +508,8 @@ class AnalysisService:
                 "position_reasoning": score_result.get("position_reasoning"),
                 "volume_reasoning": score_result.get("volume_reasoning"),
                 "abnormal_move_reasoning": score_result.get("abnormal_move_reasoning"),
+                "pullback_quality": score_result.get("pullback_quality"),
+                "pullback_negative_flags": score_result.get("pullback_negative_flags") or [],
             },
             "rules_json": {
                 "in_active_pool": record.get("in_active_pool"),
@@ -529,6 +531,9 @@ class AnalysisService:
                 "volume_healthy": record.get("volume_healthy"),
                 "turnover_rate": record.get("turnover_rate"),
                 "volume_ratio": record.get("volume_ratio"),
+                "pullback_quality": score_result.get("pullback_quality"),
+                "pullback_negative_flags": score_result.get("pullback_negative_flags") or [],
+                "pullback_has_abnormal_bear_bar": score_result.get("pullback_has_abnormal_bear_bar"),
             },
         }
 
@@ -1256,6 +1261,9 @@ class AnalysisService:
                     "volume_reasoning": cached_result.get("volume_reasoning"),
                     "abnormal_move_reasoning": cached_result.get("abnormal_move_reasoning"),
                     "signal_reasoning": cached_result.get("signal_reasoning"),
+                    "pullback_quality": cached_result.get("pullback_quality"),
+                    "pullback_negative_flags": cached_result.get("pullback_negative_flags"),
+                    "pullback_has_abnormal_bear_bar": cached_result.get("pullback_has_abnormal_bear_bar"),
                     # 内部状态字段
                     "_cached": True,
                     "_cache_key": cache_key,
@@ -1971,6 +1979,9 @@ class AnalysisService:
                 "position_reasoning": result.get("position_reasoning"),
                 "volume_reasoning": result.get("volume_reasoning"),
                 "abnormal_move_reasoning": result.get("abnormal_move_reasoning"),
+                "pullback_quality": result.get("pullback_quality"),
+                "pullback_negative_flags": result.get("pullback_negative_flags") or [],
+                "pullback_has_abnormal_bear_bar": result.get("pullback_has_abnormal_bear_bar"),
             }
         except Exception as e:
             import traceback
@@ -1986,6 +1997,9 @@ class AnalysisService:
                 "position_reasoning": None,
                 "volume_reasoning": None,
                 "abnormal_move_reasoning": None,
+                "pullback_quality": None,
+                "pullback_negative_flags": [],
+                "pullback_has_abnormal_bear_bar": None,
             }
 
 

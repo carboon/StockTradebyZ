@@ -93,6 +93,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "thrust_window": 10,
         "pullback_dryup_strong": 0.65,
         "pullback_dryup_healthy": 0.85,
+        "pullback_review_window": 5,
+        "pullback_min_down_days": 2,
+        "pullback_strong_down_days": 3,
+        "pullback_volume_increase_ratio_strong": 0.67,
+        "pullback_volume_expand_strong": 1.25,
+        "abnormal_bear_return": -0.015,
+        "abnormal_bear_volume_ratio": 1.25,
     },
     "abnormal": {
         "window": 60,
@@ -268,6 +275,157 @@ def _days_since_true(mask: pd.Series) -> pd.Series:
     return pd.Series(out, index=mask.index)
 
 
+def _pullback_flag_list(value: Any) -> list[str]:
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return []
+    if isinstance(value, str):
+        return [item for item in value.split("|") if item]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)]
+    return []
+
+
+def _compute_pullback_quality(
+    close: pd.Series,
+    open_: pd.Series,
+    volume: pd.Series,
+    vol_ma: pd.Series,
+    cfg: dict[str, Any],
+) -> pd.DataFrame:
+    del open_
+    n = len(close)
+    idx = close.index
+    review_window = int(cfg.get("pullback_review_window", 5))
+    min_down_days = int(cfg.get("pullback_min_down_days", 2))
+    strong_down_days = int(cfg.get("pullback_strong_down_days", 3))
+    strong_increase_ratio = float(cfg.get("pullback_volume_increase_ratio_strong", 0.67))
+    strong_expand_ratio = float(cfg.get("pullback_volume_expand_strong", 1.25))
+    abnormal_bear_return = float(cfg.get("abnormal_bear_return", -0.015))
+    abnormal_bear_volume_ratio = float(cfg.get("abnormal_bear_volume_ratio", 1.25))
+
+    close_v = close.to_numpy(dtype=np.float64)
+    vol_v = volume.to_numpy(dtype=np.float64)
+    vol_ma_v = vol_ma.to_numpy(dtype=np.float64)
+    ret_v = close.pct_change().fillna(0.0).to_numpy(dtype=np.float64)
+
+    down_days = np.zeros(n, dtype=np.int32)
+    volume_increase_count = np.zeros(n, dtype=np.int32)
+    volume_increase_ratio = np.zeros(n, dtype=np.float64)
+    max_down_volume_ratio = np.zeros(n, dtype=np.float64)
+    last_down_vs_prev = np.full(n, np.nan, dtype=np.float64)
+    streak_len = np.zeros(n, dtype=np.int32)
+    streak_increase_count = np.zeros(n, dtype=np.int32)
+    streak_increase_ratio = np.zeros(n, dtype=np.float64)
+    streak_last_vs_first = np.full(n, np.nan, dtype=np.float64)
+    is_contracting = np.zeros(n, dtype=np.bool_)
+    has_abnormal_bear_bar = np.zeros(n, dtype=np.bool_)
+    quality = np.empty(n, dtype=object)
+    flag_strings = np.empty(n, dtype=object)
+
+    for i in range(n):
+        start = max(0, i - review_window + 1)
+        down_idxs = [j for j in range(start, i + 1) if ret_v[j] < 0.0]
+        down_vols = [vol_v[j] for j in down_idxs]
+        down_days[i] = len(down_idxs)
+
+        if len(down_vols) >= 2:
+            increase_count = sum(
+                1 for pos in range(1, len(down_vols))
+                if down_vols[pos] > down_vols[pos - 1]
+            )
+            volume_increase_count[i] = increase_count
+            volume_increase_ratio[i] = increase_count / float(len(down_vols) - 1)
+            prev_vol = down_vols[-2]
+            if prev_vol > 0:
+                last_down_vs_prev[i] = down_vols[-1] / prev_vol
+
+        down_volume_ratios = [
+            (vol_v[j] / vol_ma_v[j])
+            for j in down_idxs
+            if math.isfinite(vol_ma_v[j]) and vol_ma_v[j] > 0
+        ]
+        if down_volume_ratios:
+            max_down_volume_ratio[i] = max(down_volume_ratios)
+
+        streak_idxs: list[int] = []
+        j = i
+        while j >= start and ret_v[j] < 0.0:
+            streak_idxs.append(j)
+            j -= 1
+        streak_idxs.reverse()
+        streak_vols = [vol_v[j] for j in streak_idxs]
+        streak_len[i] = len(streak_idxs)
+        if len(streak_vols) >= 2:
+            streak_inc = sum(
+                1 for pos in range(1, len(streak_vols))
+                if streak_vols[pos] > streak_vols[pos - 1]
+            )
+            streak_increase_count[i] = streak_inc
+            streak_increase_ratio[i] = streak_inc / float(len(streak_vols) - 1)
+            first_vol = streak_vols[0]
+            if first_vol > 0:
+                streak_last_vs_first[i] = streak_vols[-1] / first_vol
+
+        abnormal = False
+        for j in down_idxs:
+            vol_ratio = 0.0
+            if math.isfinite(vol_ma_v[j]) and vol_ma_v[j] > 0:
+                vol_ratio = vol_v[j] / vol_ma_v[j]
+            if ret_v[j] <= abnormal_bear_return and vol_ratio >= abnormal_bear_volume_ratio:
+                abnormal = True
+                break
+        has_abnormal_bear_bar[i] = abnormal
+
+        contracting = (
+            len(down_vols) >= min_down_days
+            and volume_increase_count[i] == 0
+        )
+        is_contracting[i] = contracting
+
+        strong_expanding = (
+            streak_len[i] >= strong_down_days
+            and streak_increase_ratio[i] >= strong_increase_ratio
+            and math.isfinite(streak_last_vs_first[i])
+            and streak_last_vs_first[i] >= strong_expand_ratio
+        )
+
+        flags: list[str] = []
+        if strong_expanding:
+            flags.append("down_volume_increasing")
+        if abnormal:
+            flags.append("abnormal_bear_bar")
+
+        if strong_expanding:
+            quality[i] = "expanding_selloff"
+        elif abnormal:
+            quality[i] = "abnormal_bear"
+        elif contracting:
+            quality[i] = "contracting"
+        else:
+            quality[i] = "neutral"
+        flag_strings[i] = "|".join(flags)
+
+    return pd.DataFrame(
+        {
+            "pullback_window_days": np.full(n, review_window, dtype=np.int32),
+            "pullback_down_days": down_days,
+            "pullback_volume_increase_count": volume_increase_count,
+            "pullback_volume_increase_ratio": volume_increase_ratio,
+            "pullback_max_down_volume_ratio": max_down_volume_ratio,
+            "pullback_last_down_vs_prev": last_down_vs_prev,
+            "pullback_recent_streak_len": streak_len,
+            "pullback_recent_streak_increase_count": streak_increase_count,
+            "pullback_recent_streak_increase_ratio": streak_increase_ratio,
+            "pullback_recent_streak_last_vs_first": streak_last_vs_first,
+            "pullback_is_contracting": is_contracting,
+            "pullback_has_abnormal_bear_bar": has_abnormal_bear_bar,
+            "pullback_quality": quality,
+            "pullback_negative_flags": flag_strings,
+        },
+        index=idx,
+    )
+
+
 def _compute_weekly_context(close: pd.Series, cfg: dict[str, Any]) -> pd.DataFrame:
     idx = close.index
     iso = idx.isocalendar()
@@ -397,6 +555,8 @@ def prepare_review_frame(df: pd.DataFrame, config: dict[str, Any]) -> pd.DataFra
     )
     obv = _obv_series(close, volume)
     frame["obv_slope"] = obv.diff(int(vol_cfg["obv_lookback"]))
+    pullback_quality = _compute_pullback_quality(close, open_, volume, vol_ma, vol_cfg)
+    frame[pullback_quality.columns] = pullback_quality
 
     body_pct = ((close - open_) / open_.replace(0.0, np.nan)).fillna(0.0)
     abn_breakout = high.rolling(int(abn_cfg["breakout_lookback"]), min_periods=int(abn_cfg["breakout_lookback"])).max().shift(1)
@@ -566,30 +726,61 @@ def _score_volume(row: pd.Series, cfg: dict[str, Any]) -> tuple[int, str]:
     severe_count = int(round(_safe_float(row.get("severe_distribution_count"))))
     dryup = _safe_float(row.get("pullback_dryup"))
     obv_slope = _safe_float(row.get("obv_slope"))
+    pullback_quality = str(row.get("pullback_quality") or "neutral")
+    pullback_window_days = int(round(_safe_float(row.get("pullback_window_days"), default=0.0)))
+    streak_len = int(round(_safe_float(row.get("pullback_recent_streak_len"), default=0.0)))
+    streak_increase_ratio = _safe_float(row.get("pullback_recent_streak_increase_ratio"))
+    streak_last_vs_first = _safe_float(row.get("pullback_recent_streak_last_vs_first"), default=np.nan)
+    increase_count = int(round(_safe_float(row.get("pullback_volume_increase_count"), default=0.0)))
+    abnormal_bear = bool(row.get("pullback_has_abnormal_bear_bar", False))
+    contracting = bool(row.get("pullback_is_contracting", False))
 
     if severe_count >= 1 or dist_count >= 3:
         return 1, (
             f"最近 {int(cfg['window'])} 日出现 {dist_count} 次放量下跌，"
             "量价结构已明显恶化"
         )
+    if pullback_quality == "expanding_selloff":
+        return 2, (
+            f"最近 {pullback_window_days} 日回调中出现 {streak_len} 连跌且量能递增，"
+            f"末根量已放大到首根的 {streak_last_vs_first:.2f} 倍，回调承接偏弱"
+        )
+    if abnormal_bear and not contracting:
+        return 3, (
+            f"最近 {pullback_window_days} 日回调中出现异常放量阴线，"
+            "短线抛压偏重，量价质量一般"
+        )
     if (
         ratio >= float(cfg["up_down_ratio_strong"])
         and dryup <= float(cfg["pullback_dryup_strong"])
         and dist_count == 0
         and obv_slope > 0
+        and contracting
+        and not abnormal_bear
     ):
         return 5, (
             f"上涨/下跌量比 {ratio:.2f}，最近回调量能仅为强攻量的 {dryup:.2f}，"
-            "且未见放量阴线，量价配合极佳"
+            "回调持续缩量且未见放量阴线，量价配合极佳"
         )
     if (
         ratio >= float(cfg["up_down_ratio_healthy"])
         and dryup <= float(cfg["pullback_dryup_healthy"])
         and dist_count <= 1
+        and pullback_quality != "expanding_selloff"
     ):
+        if obv_slope <= 0 and not contracting:
+            return 3, (
+                f"上涨/下跌量比 {ratio:.2f}，回调量能比 {dryup:.2f}，"
+                "虽然未见极端放量阴线，但回调收缩不够流畅"
+            )
+        if abnormal_bear and contracting:
+            return 4, (
+                f"上涨/下跌量比 {ratio:.2f}，回调量能比 {dryup:.2f}，"
+                "前段虽有放量阴线，但随后回调持续缩量，量价整体仍健康"
+            )
         return 4, (
             f"上涨/下跌量比 {ratio:.2f}，回调量能比 {dryup:.2f}，"
-            f"仅 {dist_count} 次分歧阴量，量价整体健康"
+            f"仅 {dist_count} 次分歧阴量，最近回调未见递增量走弱，量价整体健康"
         )
     if ratio < float(cfg["up_down_ratio_weak"]) or dist_count == 2 or dryup > 1.05:
         return 2, (
@@ -598,7 +789,7 @@ def _score_volume(row: pd.Series, cfg: dict[str, Any]) -> tuple[int, str]:
         )
     return 3, (
         f"上涨/下跌量比 {ratio:.2f}，回调量能比 {dryup:.2f}，"
-        "量价中性，没有明显强化也未完全破坏"
+        f"最近回调出现 {increase_count} 次量能放大，量价中性偏谨慎"
     )
 
 
@@ -734,6 +925,11 @@ def review_prepared_row(
             "signal_type": "strategy_disabled",
             "verdict": "FAIL",
             "comment": f"{strategy} 来源已禁用，不纳入第 4 步推荐。",
+            "pullback_quality": "disabled",
+            "pullback_negative_flags": [],
+            "pullback_window_days": 0,
+            "pullback_volume_increase_count": 0,
+            "pullback_has_abnormal_bear_bar": False,
             "code": code,
             "strategy": strategy,
         }
@@ -755,6 +951,11 @@ def review_prepared_row(
             "signal_type": "distribution_risk",
             "verdict": "FAIL",
             "comment": "样本不足，无法完成第 4 步程序化复核。",
+            "pullback_quality": "insufficient_data",
+            "pullback_negative_flags": [],
+            "pullback_window_days": 0,
+            "pullback_volume_increase_count": 0,
+            "pullback_has_abnormal_bear_bar": False,
             "code": code,
             "strategy": strategy,
         }
@@ -793,6 +994,11 @@ def review_prepared_row(
         "signal_type": signal_type,
         "verdict": verdict,
         "comment": comment,
+        "pullback_quality": str(row.get("pullback_quality") or "neutral"),
+        "pullback_negative_flags": _pullback_flag_list(row.get("pullback_negative_flags")),
+        "pullback_window_days": int(round(_safe_float(row.get("pullback_window_days"), default=0.0))),
+        "pullback_volume_increase_count": int(round(_safe_float(row.get("pullback_volume_increase_count"), default=0.0))),
+        "pullback_has_abnormal_bear_bar": bool(row.get("pullback_has_abnormal_bear_bar", False)),
         "code": code,
         "strategy": strategy,
     }

@@ -46,7 +46,17 @@ const routes: RouteRecordRaw[] = [
     path: '/tomorrow-star',
     name: 'TomorrowStar',
     component: () => import('@/views/TomorrowStar.vue'),
-    meta: { title: '明日之星', icon: 'Star', keepAlive: true, requiresAuth: true },
+    meta: { title: '全盘分析', icon: 'Star', keepAlive: true, requiresAuth: true },
+  },
+  {
+    path: '/sector-analysis',
+    redirect: '/sector-analysis/overview',
+  },
+  {
+    path: '/sector-analysis/:sectorKey',
+    name: 'SectorAnalysis',
+    component: () => import('@/views/SectorAnalysis.vue'),
+    meta: { title: '板块分析', icon: 'Grid', keepAlive: true, requiresAuth: true },
   },
   {
     path: '/diagnosis',

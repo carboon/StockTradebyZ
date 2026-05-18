@@ -51,6 +51,9 @@ from app.models import (
     CurrentHotRun,
     DailyB1Check,
     DailyB1CheckDetail,
+    SectorAnalysisCandidate,
+    SectorAnalysisResult,
+    SectorAnalysisRun,
     Stock,
     StockActivePoolRank,
     StockDaily,
@@ -60,6 +63,7 @@ from app.services.active_pool_rank_service import active_pool_rank_service
 from app.services.analysis_service import analysis_service
 from app.services.current_hot_service import CurrentHotService
 from app.services.daily_batch_update_service import DailyBatchUpdateService
+from app.services.sector_analysis_service import SectorAnalysisService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
 from app.schema_migrations import apply_startup_sql_migrations
@@ -1023,6 +1027,15 @@ def clean_derived_data(trade_dates: list[str], *, clean_diagnosis: bool) -> dict
         counts["current_hot_runs"] = db.query(CurrentHotRun).filter(
             CurrentHotRun.pick_date.in_(dates)
         ).delete(synchronize_session=False)
+        counts["sector_analysis_results"] = db.query(SectorAnalysisResult).filter(
+            SectorAnalysisResult.pick_date.in_(dates)
+        ).delete(synchronize_session=False)
+        counts["sector_analysis_candidates"] = db.query(SectorAnalysisCandidate).filter(
+            SectorAnalysisCandidate.pick_date.in_(dates)
+        ).delete(synchronize_session=False)
+        counts["sector_analysis_runs"] = db.query(SectorAnalysisRun).filter(
+            SectorAnalysisRun.pick_date.in_(dates)
+        ).delete(synchronize_session=False)
         counts["stock_active_pool_ranks"] = db.query(StockActivePoolRank).filter(
             StockActivePoolRank.trade_date.in_(dates)
         ).delete(synchronize_session=False)
@@ -1081,6 +1094,23 @@ def rebuild_current_hot(*, reviewer: str, window_size: int) -> dict[str, Any]:
     return {
         "success": not failed_dates,
         "warning": config_warning,
+        **result,
+    }
+
+
+def rebuild_sector_analysis(*, reviewer: str, window_size: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        service = SectorAnalysisService(db)
+        result = service.ensure_window(
+            window_size=window_size,
+            reviewer=reviewer,
+            force=True,
+            backfill_missing_history=False,
+        )
+        db.commit()
+    failed_dates = result.get("failed_dates", [])
+    return {
+        "success": not failed_dates,
         **result,
     }
 
@@ -1391,6 +1421,15 @@ def main() -> int:
         if results["current_hot"].get("warning"):
             print(f"[warning] {results['current_hot']['warning']}")
         if not results["current_hot"].get("success"):
+            print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
+            return 1
+
+        print("[rebuild] sector-analysis")
+        results["sector_analysis"] = rebuild_sector_analysis(
+            reviewer=args.reviewer,
+            window_size=target_window,
+        )
+        if not results["sector_analysis"].get("success"):
             print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
             return 1
 

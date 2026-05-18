@@ -26,6 +26,10 @@ from app.models import (
 from app.services.analysis_service import analysis_service
 from app.services.current_hot_pool import DEFAULT_CURRENT_HOT_POOL
 from app.services.daily_data_service import DailyDataService
+from app.services.sector_analysis_config import (
+    resolve_sector_analysis_catalog,
+    resolve_sector_stock_pool,
+)
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
 
@@ -46,16 +50,20 @@ class CurrentHotService:
     """当前热盘服务。"""
 
     CONFIG_KEY = "current_hot_pool"
+    SECTOR_ANALYSIS_CATALOG_KEY = "sector_analysis_catalog"
+    SECTOR_ANALYSIS_POOL_KEY = "sector_analysis_pool"
     DEFAULT_REVIEWER = "quant"
     DEFAULT_SOURCE = "current_hot"
     DEFAULT_WINDOW_SIZE = 120
     MIN_HISTORY_DAYS = 60
     HISTORY_LOOKBACK_DAYS = 420
     ACTIVE_TASK_TYPES = ("full_update", "incremental_update", "tomorrow_star", "recent_120_rebuild")
+    NEGATIVE_STRENGTH_FLAGS = ("下跌逐步上量", "异常放量阴线")
 
     def __init__(self, db: Session):
         self.db = db
         self.tushare_service = TushareService()
+        self._prefilter = None
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
@@ -77,6 +85,40 @@ class CurrentHotService:
     @staticmethod
     def _sort_active_pool_rank(value: Optional[int]) -> int:
         return int(value) if value is not None else 999999
+
+    @staticmethod
+    def _normalize_pullback_negative_flags(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split("|") if item.strip()]
+        return []
+
+    @staticmethod
+    def _extract_prefilter_fields(details_json: Any) -> tuple[Optional[bool], Optional[str], list[str]]:
+        if not isinstance(details_json, dict):
+            return None, None, []
+
+        prefilter = details_json.get("prefilter")
+        if not isinstance(prefilter, dict):
+            return None, None, []
+
+        passed_raw = prefilter.get("passed")
+        passed = passed_raw if isinstance(passed_raw, bool) else None
+
+        summary_raw = prefilter.get("summary")
+        summary = str(summary_raw).strip() if isinstance(summary_raw, str) and summary_raw.strip() else None
+
+        blocked_by_raw = prefilter.get("blocked_by")
+        if isinstance(blocked_by_raw, list):
+            blocked_by = [str(item).strip() for item in blocked_by_raw if str(item).strip()]
+        elif blocked_by_raw:
+            blocked_text = str(blocked_by_raw).strip()
+            blocked_by = [blocked_text] if blocked_text else []
+        else:
+            blocked_by = []
+
+        return passed, summary, blocked_by
 
     @staticmethod
     def _is_generic_sector_name(value: Optional[str]) -> bool:
@@ -109,6 +151,32 @@ class CurrentHotService:
             return date.fromisoformat(text)
         except ValueError:
             return None
+
+    @staticmethod
+    def _normalize_sector_label(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        for token in (" ", "\t", "\n", "_", "-", "/"):
+            normalized = normalized.replace(token, "")
+        return normalized
+
+    def _get_prefilter(self):
+        if self._prefilter is None:
+            self._prefilter = analysis_service._build_prefilter()
+        return self._prefilter
+
+    def _load_text_config(self, key: str) -> Optional[str]:
+        value = self.db.query(Config.value).filter(Config.key == key).scalar()
+        text = str(value or "").strip()
+        return text or None
+
+    def _load_sector_analysis_catalog(self) -> dict[str, Any]:
+        return resolve_sector_analysis_catalog(self._load_text_config(self.SECTOR_ANALYSIS_CATALOG_KEY))
+
+    def _load_sector_analysis_pool(self) -> dict[str, list[dict[str, str]]]:
+        return resolve_sector_stock_pool(
+            self._load_text_config(self.SECTOR_ANALYSIS_POOL_KEY),
+            self._load_text_config(self.CONFIG_KEY),
+        )
 
     def _load_pool_config(self) -> dict[str, dict[str, str]]:
         def normalize_pool_config(payload: Any) -> dict[str, dict[str, str]]:
@@ -219,6 +287,140 @@ class CurrentHotService:
                 if sector_name not in entry.sector_names:
                     entry.sector_names.append(str(sector_name))
         return self._enrich_pool_entries_with_stock_industry(list(merged.values()))
+
+    def _build_sector_aliases(self, sector: dict[str, Any]) -> set[str]:
+        aliases = {
+            self._normalize_sector_label(sector.get("key")),
+            self._normalize_sector_label(sector.get("name")),
+        }
+        for field_name in ("policyFocus", "focusTracks", "industryHints"):
+            for value in sector.get(field_name) or []:
+                alias = self._normalize_sector_label(value)
+                if alias:
+                    aliases.add(alias)
+        return {value for value in aliases if value}
+
+    def _resolve_sector_keys_for_row(
+        self,
+        code: str,
+        sector_names: list[str],
+        *,
+        code_to_sector_keys: dict[str, set[str]],
+        sector_aliases: dict[str, set[str]],
+    ) -> list[str]:
+        mapped = code_to_sector_keys.get(code)
+        if mapped:
+            return sorted(mapped)
+
+        normalized_names = {
+            self._normalize_sector_label(name)
+            for name in sector_names
+            if self._normalize_sector_label(name)
+        }
+        if not normalized_names:
+            return []
+
+        matches = [
+            sector_key
+            for sector_key, aliases in sector_aliases.items()
+            if normalized_names & aliases
+        ]
+        return sorted(set(matches))
+
+    def _build_sector_metrics(
+        self,
+        *,
+        sector: dict[str, Any],
+        rows: list[dict[str, Any]],
+        pool_count: int,
+    ) -> dict[str, Any]:
+        tracked_count = len(rows)
+        b1_count = sum(1 for item in rows if item.get("b1_passed") is True)
+        trend_start_count = sum(1 for item in rows if item.get("signal_type") == "trend_start")
+        pass_count = sum(1 for item in rows if item.get("verdict") == "PASS")
+        high_score_count = sum(1 for item in rows if isinstance(item.get("total_score"), (int, float)) and float(item["total_score"]) >= 5.0)
+        negative_flag_count = sum(
+            1
+            for item in rows
+            if set(item.get("negative_flags") or []) & set(self.NEGATIVE_STRENGTH_FLAGS)
+        )
+        active_top20_count = sum(
+            1
+            for item in rows
+            if isinstance(item.get("active_pool_rank"), int) and item["active_pool_rank"] <= 20
+        )
+        active_top50_count = sum(
+            1
+            for item in rows
+            if isinstance(item.get("active_pool_rank"), int) and item["active_pool_rank"] <= 50
+        )
+
+        scores = [float(item["total_score"]) for item in rows if isinstance(item.get("total_score"), (int, float))]
+        changes = [float(item["change_pct"]) for item in rows if isinstance(item.get("change_pct"), (int, float))]
+        ranks = [int(item["active_pool_rank"]) for item in rows if isinstance(item.get("active_pool_rank"), int)]
+
+        avg_score = round(sum(scores) / len(scores), 4) if scores else None
+        avg_change_pct = round(sum(changes) / len(changes), 4) if changes else None
+        best_active_pool_rank = min(ranks) if ranks else None
+        pool_hit_ratio = round(tracked_count / pool_count, 4) if pool_count > 0 else 0.0
+
+        strength_score = round(
+            pool_hit_ratio * 3.0
+            + b1_count * 2.0
+            + trend_start_count * 4.0
+            + pass_count * 3.0
+            + high_score_count * 1.5
+            + (avg_score or 0.0) * 1.2
+            + active_top20_count * 1.2
+            + active_top50_count * 0.4
+            + max(avg_change_pct or 0.0, 0.0) * 0.3
+            - negative_flag_count * 2.0,
+            4,
+        )
+
+        leaders = sorted(
+            rows,
+            key=lambda item: (
+                self._signal_sort_priority(item.get("signal_type")),
+                0 if item.get("b1_passed") is True else 1,
+                self._sort_score_desc(item.get("total_score")),
+                self._sort_active_pool_rank(item.get("active_pool_rank")),
+                item.get("code") or "",
+            ),
+        )[:3]
+
+        return {
+            "sector_key": str(sector.get("key") or ""),
+            "sector_name": str(sector.get("name") or ""),
+            "description": str(sector.get("description") or ""),
+            "policy_focus": [str(item) for item in sector.get("policyFocus") or [] if str(item).strip()],
+            "focus_tracks": [str(item) for item in sector.get("focusTracks") or [] if str(item).strip()],
+            "pool_count": pool_count,
+            "tracked_count": tracked_count,
+            "pool_hit_ratio": pool_hit_ratio,
+            "b1_count": b1_count,
+            "trend_start_count": trend_start_count,
+            "pass_count": pass_count,
+            "high_score_count": high_score_count,
+            "negative_flag_count": negative_flag_count,
+            "active_top20_count": active_top20_count,
+            "active_top50_count": active_top50_count,
+            "avg_score": avg_score,
+            "avg_change_pct": avg_change_pct,
+            "best_active_pool_rank": best_active_pool_rank,
+            "strength_score": strength_score,
+            "leaders": [
+                {
+                    "code": str(item.get("code") or ""),
+                    "name": item.get("name"),
+                    "total_score": item.get("total_score"),
+                    "signal_type": item.get("signal_type"),
+                    "verdict": item.get("verdict"),
+                    "active_pool_rank": item.get("active_pool_rank"),
+                }
+                for item in leaders
+            ],
+        }
 
     def get_latest_trade_date(self) -> Optional[date]:
         return (
@@ -523,6 +725,15 @@ class CurrentHotService:
                 change_pct = (close_price - open_price) / open_price * 100
 
             score_result = analysis_service._quant_review_for_date(code, frame.copy(), trade_date.isoformat())
+            prefilter_state: dict[str, Any] | None = None
+            try:
+                prefilter_state = self._get_prefilter().evaluate(
+                    code=code,
+                    pick_date=trade_date.isoformat(),
+                    price_df=frame.copy(),
+                )
+            except Exception as exc:
+                logger.warning("[current-hot] prefilter evaluate failed for %s %s: %s", code, trade_date, exc)
             return {
                 "code": code,
                 "trade_date": trade_date,
@@ -549,6 +760,10 @@ class CurrentHotService:
                     "position_reasoning": score_result.get("position_reasoning"),
                     "volume_reasoning": score_result.get("volume_reasoning"),
                     "abnormal_move_reasoning": score_result.get("abnormal_move_reasoning"),
+                    "prefilter": prefilter_state,
+                    "pullback_quality": score_result.get("pullback_quality"),
+                    "pullback_negative_flags": score_result.get("pullback_negative_flags") or [],
+                    "pullback_has_abnormal_bear_bar": score_result.get("pullback_has_abnormal_bear_bar"),
                     "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
                     "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
                     "volume_healthy": analysis_service._calculate_volume_health(prepared),
@@ -1021,8 +1236,10 @@ class CurrentHotService:
             .filter(CurrentHotAnalysisResult.pick_date == target_date)
             .all()
         )
-        items = [
-            {
+        items = []
+        for result, candidate, stock_name, stock_industry, active_pool_rank in rows:
+            prefilter_passed, prefilter_summary, prefilter_blocked_by = self._extract_prefilter_fields(result.details_json)
+            items.append({
                 "id": result.id,
                 "pick_date": target_date,
                 "code": result.code,
@@ -1038,9 +1255,20 @@ class CurrentHotService:
                 "active_pool_rank": int(active_pool_rank) if active_pool_rank is not None else None,
                 "sector_names": self._resolve_sector_names(candidate.sector_names_json if candidate else [], industry=stock_industry),
                 "board_group": candidate.board_group if candidate else self.get_board_group(result.code),
-            }
-            for result, candidate, stock_name, stock_industry, active_pool_rank in rows
-        ]
+                "prefilter_passed": prefilter_passed,
+                "prefilter_summary": prefilter_summary,
+                "prefilter_blocked_by": prefilter_blocked_by,
+                "pullback_quality": (
+                    result.details_json.get("pullback_quality")
+                    if isinstance(result.details_json, dict)
+                    else None
+                ),
+                "pullback_negative_flags": self._normalize_pullback_negative_flags(
+                    result.details_json.get("pullback_negative_flags")
+                    if isinstance(result.details_json, dict)
+                    else None
+                ),
+            })
         items.sort(
             key=lambda item: (
                 self._signal_sort_priority(item.get("signal_type")),
@@ -1055,6 +1283,217 @@ class CurrentHotService:
             "results": items,
             "total": len(items),
             "min_score_threshold": 4.0,
+        }
+
+    def get_sector_analysis(self, window_size: int = DEFAULT_WINDOW_SIZE, top_n: int = 5) -> dict[str, Any]:
+        catalog = self._load_sector_analysis_catalog()
+        sector_pool = self._load_sector_analysis_pool()
+        sectors = list(catalog.get("sectors") or [])
+
+        pool_by_sector: dict[str, list[dict[str, str]]] = {
+            str(sector.get("key") or ""): list(sector_pool.get(str(sector.get("key") or ""), []))
+            for sector in sectors
+            if str(sector.get("key") or "").strip()
+        }
+        code_to_sector_keys: dict[str, set[str]] = {}
+        for sector_key, items in pool_by_sector.items():
+            for item in items:
+                code = str(item.get("code") or "").zfill(6)
+                if not code or code == "000000":
+                    continue
+                code_to_sector_keys.setdefault(code, set()).add(sector_key)
+
+        sector_aliases = {
+            str(sector.get("key") or ""): self._build_sector_aliases(sector)
+            for sector in sectors
+            if str(sector.get("key") or "").strip()
+        }
+
+        target_dates = self.get_recent_trade_dates(window_size)
+        chronological_dates = list(reversed(target_dates))
+        latest_date = target_dates[0] if target_dates else None
+        previous_date = target_dates[1] if len(target_dates) > 1 else None
+
+        date_sector_rows: dict[str, dict[str, list[dict[str, Any]]]] = {
+            trade_date.isoformat(): {str(sector.get("key") or ""): [] for sector in sectors}
+            for trade_date in target_dates
+        }
+
+        if target_dates:
+            active_rank_sq = (
+                self.db.query(
+                    StockActivePoolRank.trade_date.label("trade_date"),
+                    StockActivePoolRank.code.label("code"),
+                    func.min(StockActivePoolRank.active_pool_rank).label("active_pool_rank"),
+                )
+                .filter(StockActivePoolRank.trade_date.in_(target_dates))
+                .group_by(StockActivePoolRank.trade_date, StockActivePoolRank.code)
+                .subquery()
+            )
+            rows = (
+                self.db.query(
+                    CurrentHotCandidate,
+                    CurrentHotAnalysisResult,
+                    Stock.name,
+                    Stock.industry,
+                    active_rank_sq.c.active_pool_rank,
+                )
+                .outerjoin(
+                    CurrentHotAnalysisResult,
+                    (CurrentHotAnalysisResult.pick_date == CurrentHotCandidate.pick_date)
+                    & (CurrentHotAnalysisResult.code == CurrentHotCandidate.code)
+                    & (CurrentHotAnalysisResult.reviewer == self.DEFAULT_REVIEWER),
+                )
+                .outerjoin(Stock, CurrentHotCandidate.code == Stock.code)
+                .outerjoin(
+                    active_rank_sq,
+                    (active_rank_sq.c.trade_date == CurrentHotCandidate.pick_date)
+                    & (active_rank_sq.c.code == CurrentHotCandidate.code),
+                )
+                .filter(CurrentHotCandidate.pick_date.in_(target_dates))
+                .all()
+            )
+
+            for candidate, result, stock_name, stock_industry, active_pool_rank in rows:
+                sector_names = self._resolve_sector_names(candidate.sector_names_json, industry=stock_industry)
+                sector_keys = self._resolve_sector_keys_for_row(
+                    candidate.code,
+                    sector_names,
+                    code_to_sector_keys=code_to_sector_keys,
+                    sector_aliases=sector_aliases,
+                )
+                if not sector_keys:
+                    continue
+
+                details_json = result.details_json if result and isinstance(result.details_json, dict) else {}
+                row_payload = {
+                    "code": candidate.code,
+                    "name": stock_name,
+                    "change_pct": candidate.change_pct,
+                    "total_score": result.total_score if result else None,
+                    "signal_type": result.signal_type if result else None,
+                    "verdict": result.verdict if result else None,
+                    "b1_passed": candidate.b1_passed if candidate.b1_passed is not None else (result.b1_passed if result else None),
+                    "active_pool_rank": int(active_pool_rank) if active_pool_rank is not None else None,
+                    "negative_flags": self._normalize_pullback_negative_flags(details_json.get("pullback_negative_flags")),
+                }
+                pick_date_text = candidate.pick_date.isoformat()
+                if pick_date_text not in date_sector_rows:
+                    continue
+                for sector_key in sector_keys:
+                    if sector_key in date_sector_rows[pick_date_text]:
+                        date_sector_rows[pick_date_text][sector_key].append(row_payload)
+
+        ranked_by_date: dict[str, list[dict[str, Any]]] = {}
+        history_by_sector: dict[str, list[dict[str, Any]]] = {
+            str(sector.get("key") or ""): []
+            for sector in sectors
+            if str(sector.get("key") or "").strip()
+        }
+
+        for trade_date in chronological_dates:
+            trade_date_text = trade_date.isoformat()
+            metrics_for_date: list[dict[str, Any]] = []
+            for sector in sectors:
+                sector_key = str(sector.get("key") or "").strip()
+                if not sector_key:
+                    continue
+                metrics = self._build_sector_metrics(
+                    sector=sector,
+                    rows=date_sector_rows.get(trade_date_text, {}).get(sector_key, []),
+                    pool_count=len(pool_by_sector.get(sector_key, [])),
+                )
+                metrics["_sector_order"] = int(sector.get("order") or 9999)
+                metrics_for_date.append(metrics)
+
+            metrics_for_date.sort(
+                key=lambda item: (
+                    -float(item.get("strength_score") or 0.0),
+                    -int(item.get("trend_start_count") or 0),
+                    -int(item.get("pass_count") or 0),
+                    -float(item.get("avg_score") or -9999.0),
+                    int(item.get("_sector_order") or 9999),
+                    str(item.get("sector_key") or ""),
+                )
+            )
+            for index, item in enumerate(metrics_for_date, start=1):
+                item["rank"] = index
+                history_by_sector[str(item.get("sector_key") or "")].append(
+                    {
+                        "date": trade_date_text,
+                        "rank": index,
+                        "strength_score": item.get("strength_score"),
+                        "tracked_count": item.get("tracked_count"),
+                        "b1_count": item.get("b1_count"),
+                        "trend_start_count": item.get("trend_start_count"),
+                        "pass_count": item.get("pass_count"),
+                        "high_score_count": item.get("high_score_count"),
+                        "negative_flag_count": item.get("negative_flag_count"),
+                        "avg_score": item.get("avg_score"),
+                        "avg_change_pct": item.get("avg_change_pct"),
+                    }
+                )
+                item.pop("_sector_order", None)
+            ranked_by_date[trade_date_text] = metrics_for_date
+
+        latest_ranked = ranked_by_date.get(latest_date.isoformat(), []) if latest_date else []
+        previous_rank_map = {
+            str(item.get("sector_key") or ""): item
+            for item in (ranked_by_date.get(previous_date.isoformat(), []) if previous_date else [])
+        }
+
+        latest_sectors: list[dict[str, Any]] = []
+        if latest_ranked:
+            for item in latest_ranked:
+                previous_item = previous_rank_map.get(str(item.get("sector_key") or ""))
+                latest_sectors.append(
+                    {
+                        **item,
+                        "previous_rank": int(previous_item["rank"]) if previous_item and isinstance(previous_item.get("rank"), int) else None,
+                        "rank_change": (
+                            int(previous_item["rank"]) - int(item["rank"])
+                            if previous_item and isinstance(previous_item.get("rank"), int) and isinstance(item.get("rank"), int)
+                            else None
+                        ),
+                    }
+                )
+        else:
+            for sector in sectors:
+                sector_key = str(sector.get("key") or "").strip()
+                if not sector_key:
+                    continue
+                latest_sectors.append(
+                    {
+                        **self._build_sector_metrics(
+                            sector=sector,
+                            rows=[],
+                            pool_count=len(pool_by_sector.get(sector_key, [])),
+                        ),
+                        "rank": None,
+                        "previous_rank": None,
+                        "rank_change": None,
+                    }
+                )
+
+        top_count = max(1, min(int(top_n or 5), len(latest_sectors) or 1))
+        top_sector_keys = [str(item.get("sector_key") or "") for item in latest_sectors[:top_count] if str(item.get("sector_key") or "").strip()]
+
+        return {
+            "latest_date": latest_date,
+            "previous_date": previous_date,
+            "window_size": int(window_size),
+            "dates": [trade_date.isoformat() for trade_date in chronological_dates],
+            "top_sector_keys": top_sector_keys,
+            "sectors": latest_sectors,
+            "history": [
+                {
+                    "sector_key": str(sector.get("key") or ""),
+                    "sector_name": str(sector.get("name") or ""),
+                    "points": history_by_sector.get(str(sector.get("key") or ""), []),
+                }
+                for sector in sectors
+                if str(sector.get("key") or "").strip()
+            ],
         }
 
     def prune_window(self, window_size: int = DEFAULT_WINDOW_SIZE) -> dict[str, Any]:

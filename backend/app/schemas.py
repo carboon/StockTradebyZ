@@ -159,6 +159,8 @@ class AnalysisItem(BaseModel):
     prefilter_passed: Optional[bool] = None
     prefilter_summary: Optional[str] = None
     prefilter_blocked_by: Optional[List[str]] = None
+    pullback_quality: Optional[str] = None
+    pullback_negative_flags: Optional[List[str]] = None
 
 
 class AnalysisResultResponse(BaseModel):
@@ -193,6 +195,11 @@ class CurrentHotAnalysisItem(BaseModel):
     turnover_rate: Optional[float] = None
     volume_ratio: Optional[float] = None
     active_pool_rank: Optional[int] = None
+    prefilter_passed: Optional[bool] = None
+    prefilter_summary: Optional[str] = None
+    prefilter_blocked_by: Optional[List[str]] = None
+    pullback_quality: Optional[str] = None
+    pullback_negative_flags: Optional[List[str]] = None
 
 
 class CurrentHotAnalysisResultResponse(BaseModel):
@@ -435,6 +442,113 @@ class CurrentHotDatesResponse(BaseModel):
     dates: List[str]
     history: List[CurrentHotHistoryItem]
     latest_date: Optional[date_class] = None
+
+
+class CurrentHotSectorLeaderItem(BaseModel):
+    """板块强度排序中的领涨股摘要"""
+    code: str
+    name: Optional[str] = None
+    total_score: Optional[float] = None
+    signal_type: Optional[str] = None
+    verdict: Optional[str] = None
+    active_pool_rank: Optional[int] = None
+
+
+class CurrentHotSectorHistoryPoint(BaseModel):
+    """板块历史轮动点"""
+    date: str
+    rank: int
+    strength_score: float = 0.0
+    tracked_count: int = 0
+    b1_count: int = 0
+    trend_start_count: int = 0
+    pass_count: int = 0
+    high_score_count: int = 0
+    negative_flag_count: int = 0
+    avg_score: Optional[float] = None
+    avg_change_pct: Optional[float] = None
+
+
+class CurrentHotSectorSummaryItem(BaseModel):
+    """最新交易日的板块强弱摘要"""
+    sector_key: str
+    sector_name: str
+    description: str
+    policy_focus: List[str] = Field(default_factory=list)
+    focus_tracks: List[str] = Field(default_factory=list)
+    rank: Optional[int] = None
+    previous_rank: Optional[int] = None
+    rank_change: Optional[int] = None
+    pool_count: int = 0
+    tracked_count: int = 0
+    pool_hit_ratio: float = 0.0
+    b1_count: int = 0
+    trend_start_count: int = 0
+    pass_count: int = 0
+    high_score_count: int = 0
+    negative_flag_count: int = 0
+    active_top20_count: int = 0
+    active_top50_count: int = 0
+    avg_score: Optional[float] = None
+    avg_change_pct: Optional[float] = None
+    best_active_pool_rank: Optional[int] = None
+    strength_score: float = 0.0
+    leaders: List[CurrentHotSectorLeaderItem] = Field(default_factory=list)
+
+
+class CurrentHotSectorHistorySeries(BaseModel):
+    """单个板块的轮动历史序列"""
+    sector_key: str
+    sector_name: str
+    points: List[CurrentHotSectorHistoryPoint] = Field(default_factory=list)
+
+
+class CurrentHotSectorAnalysisResponse(BaseModel):
+    """当前热盘板块强弱与历史轮动响应"""
+    latest_date: Optional[date_class] = None
+    previous_date: Optional[date_class] = None
+    window_size: int = 0
+    dates: List[str] = Field(default_factory=list)
+    top_sector_keys: List[str] = Field(default_factory=list)
+    sectors: List[CurrentHotSectorSummaryItem] = Field(default_factory=list)
+    history: List[CurrentHotSectorHistorySeries] = Field(default_factory=list)
+
+
+class SectorAnalysisRowItem(BaseModel):
+    """板块分析单日个股行"""
+    id: int
+    pick_date: date_class
+    sector_key: str
+    code: str
+    name: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
+    board_group: Optional[str] = None
+    open_price: Optional[float] = None
+    close_price: Optional[float] = None
+    change_pct: Optional[float] = None
+    turnover: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    active_pool_rank: Optional[int] = None
+    b1_passed: Optional[bool] = None
+    kdj_j: Optional[float] = None
+    verdict: Optional[str] = None
+    total_score: Optional[float] = None
+    signal_type: Optional[str] = None
+    comment: Optional[str] = None
+    prefilter_passed: Optional[bool] = None
+    prefilter_summary: Optional[str] = None
+    prefilter_blocked_by: Optional[List[str]] = None
+    pullback_quality: Optional[str] = None
+    pullback_negative_flags: Optional[List[str]] = None
+
+
+class SectorAnalysisRowsResponse(BaseModel):
+    """板块分析单日个股列表响应"""
+    sector_key: str
+    pick_date: Optional[date_class] = None
+    rows: List[SectorAnalysisRowItem] = Field(default_factory=list)
+    total: int = 0
 
 
 # ==================== 单股诊断 ====================

@@ -36,6 +36,8 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 from app.config import settings
+from app.database import Base, engine
+from app.schema_migrations import apply_startup_sql_migrations
 from app.services.background_update_exceptions import RetryableBackgroundUpdateError
 from app.services.background_update_service import BackgroundLatestTradeDayUpdateService
 
@@ -116,6 +118,8 @@ def main() -> int:
     try:
         lock_fp = acquire_lock(lock_file)
         task_logger.info("后台更新任务启动 pid=%s", os.getpid())
+        Base.metadata.create_all(bind=engine)
+        apply_startup_sql_migrations(engine, BACKEND / "migrations")
 
         service = BackgroundLatestTradeDayUpdateService(log=task_logger)
         result = service.run(
