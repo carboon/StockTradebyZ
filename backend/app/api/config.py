@@ -21,6 +21,12 @@ from app.schemas import (
     TushareVerifyResponse,
 )
 from app.config import DEPLOY_ENV_FILE, PROJECT_ROOT, settings, get_settings
+from app.services.auto_update_service import (
+    AUTO_DAILY_UPDATE_ENABLED_KEY,
+    AUTO_DAILY_UPDATE_TIME_KEY,
+    get_config_default_value,
+    normalize_auto_update_config_value,
+)
 from app.services.tushare_service import TushareService
 
 router = APIRouter()
@@ -40,6 +46,19 @@ ENV_KEY_MAP = {
     "vite_api_base_url": "VITE_API_BASE_URL",
 }
 
+CONFIG_DEFAULT_KEYS = [
+    "tushare_token",
+    "zhipuai_api_key",
+    "dashscope_api_key",
+    "gemini_api_key",
+    "default_reviewer",
+    "min_score_threshold",
+    "register_validation_question",
+    "register_validation_answer",
+    AUTO_DAILY_UPDATE_ENABLED_KEY,
+    AUTO_DAILY_UPDATE_TIME_KEY,
+]
+
 
 def _to_env_key(key: str) -> str:
     return ENV_KEY_MAP.get(key.lower(), key.upper())
@@ -51,7 +70,9 @@ def _resolve_runtime_config_value(db: Session, key: str) -> str:
         return env_value
 
     db_config = db.query(Config).filter(Config.key == key).first()
-    return db_config.value if db_config else ""
+    if db_config:
+        return db_config.value
+    return get_config_default_value(key)
 
 
 @router.get("/", response_model=ConfigResponse)
@@ -59,16 +80,7 @@ async def get_configs(db: Session = Depends(get_db), user=Depends(require_user))
     """获取所有配置"""
     # 同时从数据库和环境变量读取
     configs = {}
-    env_keys = [
-        "tushare_token",
-        "zhipuai_api_key",
-        "dashscope_api_key",
-        "gemini_api_key",
-        "default_reviewer",
-        "min_score_threshold",
-        "register_validation_question",
-        "register_validation_answer",
-    ]
+    env_keys = CONFIG_DEFAULT_KEYS
 
     # 从环境变量读取
     for key in env_keys:
@@ -91,11 +103,15 @@ async def get_configs(db: Session = Depends(get_db), user=Depends(require_user))
 @router.put("/", response_model=ConfigItem)
 async def update_config(config: ConfigUpdate, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> ConfigItem:
     """更新配置"""
-    db_config = db.query(Config).filter(Config.key == config.key).first()
+    config_key = str(config.key).strip()
+    config_value = str(config.value)
+    normalized_value = normalize_auto_update_config_value(config_key, config_value)
+
+    db_config = db.query(Config).filter(Config.key == config_key).first()
     if db_config:
-        db_config.value = config.value
+        db_config.value = normalized_value
     else:
-        db_config = Config(key=config.key, value=config.value)
+        db_config = Config(key=config_key, value=normalized_value)
         db.add(db_config)
     db.commit()
     db.refresh(db_config)

@@ -25,7 +25,6 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models import StockDaily, TomorrowStarRun
 from app.services.analysis_service import analysis_service
-from app.services.background_update_exceptions import RetryableBackgroundUpdateError
 from app.services.daily_batch_update_service import DailyBatchUpdateService
 from app.services.market_service import MarketService
 from app.services.tomorrow_star_window_service import maintain_tomorrow_star_for_trade_date
@@ -185,8 +184,8 @@ class BackgroundLatestTradeDayUpdateService:
         if tushare_service.is_trade_date_data_ready(latest_trade_date):
             return
 
-        raise RetryableBackgroundUpdateError(
-            f"{latest_trade_date} 交易日数据在 Tushare 尚未就绪，将由 systemd 在 10 分钟后重试"
+        raise RuntimeError(
+            f"{latest_trade_date} 交易日数据在 Tushare 尚未就绪，请 10 分钟后重试"
         )
 
     @staticmethod
@@ -561,6 +560,13 @@ class BackgroundLatestTradeDayUpdateService:
             MarketService.finish_update(message)
             self._invalidate_runtime_caches()
             try:
+                from app.services.view_prewarm_service import prewarm_latest_analysis_views
+
+                view_prewarm_result = prewarm_latest_analysis_views(trade_date)
+            except Exception as exc:
+                view_prewarm_result = {"success": False, "error": str(exc)}
+                self.log.warning("视图预热失败: %s", exc)
+            try:
                 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 
                 diagnosis_cache_result = diagnosis_history_cache_service.prewarm()
@@ -580,6 +586,7 @@ class BackgroundLatestTradeDayUpdateService:
                 "sector_analysis_result": sector_analysis_result,
                 "active_pool_rank_result": active_rank_result,
                 "tomorrow_star_stats": tomorrow_stats,
+                "view_data_prewarm": view_prewarm_result,
                 "diagnosis_cache_prewarm": diagnosis_cache_result,
                 "timings": timings,
             }

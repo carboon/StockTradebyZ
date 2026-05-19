@@ -53,6 +53,7 @@ from sqlalchemy import text
 from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
 from app.schema_migrations import apply_startup_sql_migrations
+from app.services.auto_update_service import AutoDailyUpdateScheduler
 from app.services.tushare_service import TushareService
 
 # 测试环境检测：pytest 收集阶段尚未设置 PYTEST_CURRENT_TEST，
@@ -141,6 +142,7 @@ async def lifespan(app: FastAPI):
     """Manage FastAPI startup/shutdown lifecycle without deprecated hooks."""
     logger.info("StockTrader API v%s 启动成功", app.version)
     logger.info("API 文档: http://%s:%s/docs", settings.host, settings.port)
+    auto_update_scheduler: AutoDailyUpdateScheduler | None = None
 
     async def warm_stock_metadata_cache() -> None:
         try:
@@ -172,8 +174,13 @@ async def lifespan(app: FastAPI):
     if not _TEST_MODE and not DISABLE_STARTUP_PREWARM_FILE.exists():
         asyncio.create_task(warm_stock_metadata_cache())
         asyncio.create_task(warm_diagnosis_history_cache())
+    if not _TEST_MODE:
+        auto_update_scheduler = AutoDailyUpdateScheduler(manager=manager)
+        auto_update_scheduler.start()
 
     yield
+    if auto_update_scheduler is not None:
+        await auto_update_scheduler.stop()
     logger.info("StockTrader API 已关闭")
 
 # 创建 FastAPI 应用

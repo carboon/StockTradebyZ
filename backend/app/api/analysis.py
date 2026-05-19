@@ -34,6 +34,7 @@ from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysis
 from app.services.current_hot_service import CurrentHotService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 from app.services.intraday_analysis_service import IntradayAnalysisService
+from app.services.market_service import MarketService
 from app.services.sector_analysis_service import SectorAnalysisService
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
@@ -81,6 +82,12 @@ DIAGNOSIS_HISTORY_WINDOW_DAYS = analysis_service.HISTORY_WINDOW_DAYS
 SIGNAL_RETURN_BENCHMARK = {
     "name": "上证指数",
     "ts_code": "000001.SH",
+}
+BLOCKED_ANALYSIS_TASK_TYPES = {
+    TaskService.DAILY_BATCH_UPDATE_TASK_TYPE,
+    TaskService.INCREMENTAL_UPDATE_TASK_TYPE,
+    "full_update",
+    TaskService.RECENT_120_REBUILD_TASK_TYPE,
 }
 
 ROOT = Path(__file__).parent.parent.parent.parent
@@ -238,12 +245,38 @@ def ensure_tushare_ready_if_configured() -> None:
         logger.warning("Tushare 已配置但当前不可用，盘中分析将走降级链路: %s", message)
 
 
+def ensure_analysis_read_available(db: Session) -> None:
+    """分析类页面在关键数据更新期间进入只读拦截。"""
+    update_state = MarketService.get_update_state()
+    if update_state.get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"更新数据中，请稍后访问。当前阶段：{update_state.get('stage_label') or update_state.get('message') or '数据刷新中'}",
+        )
+
+    active_task = (
+        db.query(Task)
+        .filter(
+            Task.task_type.in_(list(BLOCKED_ANALYSIS_TASK_TYPES)),
+            Task.status.in_(["pending", "running"]),
+        )
+        .order_by(Task.created_at.desc(), Task.id.desc())
+        .first()
+    )
+    if active_task is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="更新数据中，请稍后访问。",
+        )
+
+
 @router.get("/tomorrow-star/dates", response_model=TomorrowStarDatesResponse)
 async def get_tomorrow_star_dates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> TomorrowStarDatesResponse:
     """获取明日之星历史日期列表"""
+    ensure_analysis_read_available(db)
     summary = TomorrowStarWindowService(db).get_window_status(window_size=TomorrowStarWindowService.DEFAULT_WINDOW_SIZE)
     history_items = [
         TomorrowStarHistoryItem(
@@ -329,6 +362,7 @@ async def get_tomorrow_star_freshness(
     user=Depends(require_user),
 ) -> dict:
     """获取明日之星数据新鲜度状态。"""
+    ensure_analysis_read_available(db)
     from app.services.market_service import market_service, MarketService
 
     _cleanup_stale_active_tasks(db)
@@ -451,6 +485,7 @@ async def get_candidates(
     user=Depends(require_user),
 ) -> CandidatesResponse:
     """获取候选股票列表（只读数据库持久化结果）"""
+    ensure_analysis_read_available(db)
     from app.services.candidate_service import CandidateService
     from app.models import TomorrowStarRun
     import pandas as pd
@@ -577,6 +612,7 @@ async def get_analysis_results(
     user=Depends(require_user),
 ) -> AnalysisResultResponse:
     """获取指定日期的分析结果"""
+    ensure_analysis_read_available(db)
     from app.models import TomorrowStarRun
 
     normalized_date = analysis_service._normalize_pick_date(date)
@@ -735,6 +771,7 @@ async def get_current_hot_dates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotDatesResponse:
+    ensure_analysis_read_available(db)
     payload = CurrentHotService(db).get_dates(window_size=CurrentHotService.DEFAULT_WINDOW_SIZE)
     history_items = [
         CurrentHotHistoryItem(
@@ -767,6 +804,7 @@ async def get_current_hot_candidates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotCandidatesResponse:
+    ensure_analysis_read_available(db)
     payload = CurrentHotService(db).load_candidates(date, limit=limit)
     pick_date = payload.get("pick_date")
     items = [
@@ -807,6 +845,7 @@ async def get_current_hot_results(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotAnalysisResultResponse:
+    ensure_analysis_read_available(db)
     payload = CurrentHotService(db).get_results(date)
     pick_date = payload.get("pick_date")
     items = [
@@ -849,6 +888,7 @@ async def get_current_hot_sector_analysis(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotSectorAnalysisResponse:
+    ensure_analysis_read_available(db)
     payload = CurrentHotService(db).get_sector_analysis(window_size=window_size, top_n=top_n)
     return CurrentHotSectorAnalysisResponse(**payload)
 
@@ -860,6 +900,7 @@ async def get_sector_analysis_overview(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotSectorAnalysisResponse:
+    ensure_analysis_read_available(db)
     payload = SectorAnalysisService(db).get_sector_analysis(window_size=window_size, top_n=top_n)
     return CurrentHotSectorAnalysisResponse(**payload)
 
@@ -871,6 +912,7 @@ async def get_sector_analysis_rows(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> SectorAnalysisRowsResponse:
+    ensure_analysis_read_available(db)
     payload = SectorAnalysisService(db).get_sector_date_rows(sector_key=sector_key, pick_date=date)
     return SectorAnalysisRowsResponse(
         sector_key=str(payload.get("sector_key") or ""),

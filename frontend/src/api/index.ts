@@ -136,6 +136,17 @@ api.interceptors.response.use(
       return Promise.reject(new AppRequestError(message, { status: 401 }))
     }
 
+    const message = error.response?.data?.detail || error.response?.data?.message || error.message || '请求失败'
+
+    if (error.response?.status === 409 && message.includes('更新数据中')) {
+      const currentPath = `${window.location.pathname}${window.location.search || ''}`
+      if (window.location.pathname !== '/updating' && window.location.pathname !== '/update') {
+        const redirect = encodeURIComponent(currentPath)
+        window.location.href = `/updating?redirect=${redirect}`
+      }
+      return Promise.reject(new AppRequestError(message, { status: 409, code: error.code }))
+    }
+
     // 401 未授权：清除 token 并跳转登录页
     if (error.response?.status === 401) {
       console.error('[401 Error]', {
@@ -151,7 +162,6 @@ api.interceptors.response.use(
       }
       return Promise.reject(new AppRequestError('登录已过期，请重新登录', { status: 401 }))
     }
-    const message = error.response?.data?.detail || error.response?.data?.message || error.message || '请求失败'
     return Promise.reject(new AppRequestError(message, { status: error.response?.status, code: error.code }))
   }
 )

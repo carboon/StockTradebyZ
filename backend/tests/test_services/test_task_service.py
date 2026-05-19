@@ -4,6 +4,7 @@ Task Service Tests
 任务服务测试用例
 """
 import asyncio
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -105,6 +106,22 @@ async def test_create_task(task_service, sample_task_params):
         assert task.progress == 0
         assert task.params_json == sample_task_params
         assert result["existing"] is False
+
+
+def test_make_json_safe_converts_dates_and_datetimes():
+    payload = {
+        "trade_date": date(2026, 5, 19),
+        "generated_at": datetime(2026, 5, 19, 16, 30, tzinfo=timezone.utc),
+        "items": [
+            {"pick_date": date(2026, 5, 18)},
+        ],
+    }
+
+    normalized = TaskService._make_json_safe(payload)
+
+    assert normalized["trade_date"] == "2026-05-19"
+    assert normalized["generated_at"] == "2026-05-19T16:30:00+00:00"
+    assert normalized["items"][0]["pick_date"] == "2026-05-18"
 
 
 @pytest.mark.service

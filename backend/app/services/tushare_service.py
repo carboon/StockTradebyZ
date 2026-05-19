@@ -7,7 +7,7 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Optional, List
 import subprocess
 import sys
 import time
@@ -25,7 +25,7 @@ class TushareService:
     """Tushare 数据服务"""
     _verify_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
     _stock_list_cache: dict[str, tuple[float, pd.DataFrame]] = {}
-    _latest_data_ready_cache: dict[str, tuple[float, bool]] = {}
+    _latest_data_ready_cache: dict[str, tuple[float, dict[str, Any]]] = {}
     # check_data_status 缓存（非实时系统，使用较长缓存时间）
     _data_status_cache: dict[str, tuple[float, dict]] = {}
     _data_status_cache_ttl = 300  # 5分钟缓存 - 数据只有在交易完成后才会更新
@@ -371,27 +371,131 @@ class TushareService:
         ts_code: str = "000001.SZ",
         ttl_seconds: int = 300,
     ) -> bool:
-        """探测指定交易日的数据是否已在 Tushare 可读。"""
-        normalized = str(trade_date or "").replace("-", "")
-        if len(normalized) != 8 or not normalized.isdigit():
-            return False
+        """探测指定交易日的数据是否已在 Tushare 完整可读。"""
+        return bool(
+            self.get_trade_date_data_readiness(
+                trade_date,
+                ts_code=ts_code,
+                ttl_seconds=ttl_seconds,
+            ).get("ready")
+        )
 
-        cache_key = f"{self.token or ''}:{ts_code}:{normalized}"
+    def get_trade_date_data_readiness(
+        self,
+        trade_date: str,
+        *,
+        ts_code: str = "000001.SZ",
+        ttl_seconds: int = 300,
+        require_complete_metrics: bool = True,
+        min_fill_ratio: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """探测指定交易日的数据是否已在 Tushare 完整可读。"""
+        normalized = str(trade_date or "").replace("-", "")
+        threshold = float(
+            self._latest_trade_date_completion_threshold
+            if min_fill_ratio is None
+            else min_fill_ratio
+        )
+        threshold = max(0.0, min(threshold, 1.0))
+
+        result: dict[str, Any] = {
+            "trade_date": trade_date,
+            "latest_data_date": None,
+            "ready": False,
+            "daily_row_count": 0,
+            "daily_basic_row_count": 0,
+            "turnover_rate_count": 0,
+            "volume_ratio_count": 0,
+            "metric_fill_ratio": 0.0,
+            "daily_basic_fill_ratio": 0.0,
+            "required_fill_ratio": round(threshold, 4),
+            "reason": "invalid_trade_date",
+        }
+        if len(normalized) != 8 or not normalized.isdigit():
+            return result
+
+        cache_key = (
+            f"{self.token or ''}:{normalized}:{ts_code}:"
+            f"{int(require_complete_metrics)}:{threshold:.4f}"
+        )
         cached = self._latest_data_ready_cache.get(cache_key)
         now = time.time()
         if cached and now - cached[0] < ttl_seconds:
             return cached[1]
 
-        ready = False
         try:
             acquire_tushare_slot("daily")
-            df = self.pro.daily(ts_code=ts_code, start_date=normalized, end_date=normalized)
-            ready = bool(df is not None and not df.empty)
-        except Exception:
-            ready = False
+            if require_complete_metrics:
+                df = self.pro.daily(trade_date=normalized)
+            else:
+                df = self.pro.daily(ts_code=ts_code, start_date=normalized, end_date=normalized)
 
-        self._latest_data_ready_cache[cache_key] = (now, ready)
-        return ready
+            if df is None or df.empty:
+                result["reason"] = "daily_missing"
+                self._latest_data_ready_cache[cache_key] = (now, result)
+                return result
+
+            result["daily_row_count"] = int(len(df.index))
+            trade_dates = df["trade_date"].astype(str) if "trade_date" in df.columns else pd.Series(dtype=str)
+            if not trade_dates.empty:
+                latest = str(trade_dates.max())
+                if len(latest) == 8 and latest.isdigit():
+                    result["latest_data_date"] = f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+
+            if not require_complete_metrics:
+                result["ready"] = True
+                result["reason"] = None
+                self._latest_data_ready_cache[cache_key] = (now, result)
+                return result
+
+            acquire_tushare_slot("daily_basic")
+            daily_basic = self.pro.daily_basic(
+                trade_date=normalized,
+                fields="ts_code,trade_date,turnover_rate,volume_ratio",
+            )
+            if daily_basic is None:
+                daily_basic = pd.DataFrame()
+
+            result["daily_basic_row_count"] = int(len(daily_basic.index))
+            if result["daily_row_count"] > 0:
+                result["daily_basic_fill_ratio"] = round(
+                    result["daily_basic_row_count"] / result["daily_row_count"],
+                    4,
+                )
+
+            if daily_basic.empty:
+                result["reason"] = "daily_basic_missing"
+                self._latest_data_ready_cache[cache_key] = (now, result)
+                return result
+
+            turnover_count = 0
+            volume_ratio_count = 0
+            if "turnover_rate" in daily_basic.columns:
+                turnover_count = int(daily_basic["turnover_rate"].notna().sum())
+            if "volume_ratio" in daily_basic.columns:
+                volume_ratio_count = int(daily_basic["volume_ratio"].notna().sum())
+            result["turnover_rate_count"] = turnover_count
+            result["volume_ratio_count"] = volume_ratio_count
+
+            metric_count = min(turnover_count, volume_ratio_count)
+            if result["daily_row_count"] > 0:
+                result["metric_fill_ratio"] = round(metric_count / result["daily_row_count"], 4)
+
+            result["ready"] = (
+                result["daily_basic_fill_ratio"] >= threshold
+                and result["metric_fill_ratio"] >= threshold
+            )
+            if result["ready"]:
+                result["reason"] = None
+            elif result["daily_basic_fill_ratio"] < threshold:
+                result["reason"] = "daily_basic_incomplete"
+            else:
+                result["reason"] = "daily_metrics_incomplete"
+        except Exception:
+            result["reason"] = "probe_failed"
+
+        self._latest_data_ready_cache[cache_key] = (now, result)
+        return result
 
     def get_effective_latest_trade_date(self, *, prefer_realtime: bool = False) -> Optional[str]:
         """获取用于判断“是否过期”的有效最新交易日。
@@ -453,15 +557,22 @@ class TushareService:
     def get_data_freshness(self) -> dict:
         """实时查询 Tushare 日线数据的最新时效信息。
 
-        通过查询参考股票（000001.SZ）近7天日线数据，
-        判断 Tushare 上最新可用的数据日期。
-        实时查询，不使用缓存。
+        通过查询最新交易日的全市场日线和 daily_basic，
+        判断 Tushare 上最新交易日是否已达到可更新的完整度要求。
         """
         result = {
             "query_time": utc_now().astimezone(ZoneInfo("Asia/Shanghai")).isoformat(),
             "latest_calendar_trade_date": None,
             "latest_data_date": None,
             "is_latest_data_ready": False,
+            "daily_row_count": 0,
+            "daily_basic_row_count": 0,
+            "turnover_rate_count": 0,
+            "volume_ratio_count": 0,
+            "metric_fill_ratio": 0.0,
+            "daily_basic_fill_ratio": 0.0,
+            "required_fill_ratio": round(self._latest_trade_date_completion_threshold, 4),
+            "reason": None,
         }
 
         try:
@@ -471,19 +582,21 @@ class TushareService:
             if not latest_cal or not self.token:
                 return result
 
-            now = utc_now()
-            today = now.strftime("%Y%m%d")
-            recent_start = (now - timedelta(days=7)).strftime("%Y%m%d")
-
-            acquire_tushare_slot("daily")
-            df = self.pro.daily(ts_code="000001.SZ", start_date=recent_start, end_date=today)
-
-            if df is not None and not df.empty:
-                latest = str(df["trade_date"].max())
-                result["latest_data_date"] = f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
-
-                normalized_cal = latest_cal.replace("-", "")
-                result["is_latest_data_ready"] = normalized_cal in df["trade_date"].values
+            readiness = self.get_trade_date_data_readiness(
+                latest_cal,
+                ttl_seconds=0,
+                require_complete_metrics=True,
+            )
+            result["latest_data_date"] = readiness.get("latest_data_date")
+            result["is_latest_data_ready"] = bool(readiness.get("ready"))
+            result["daily_row_count"] = int(readiness.get("daily_row_count") or 0)
+            result["daily_basic_row_count"] = int(readiness.get("daily_basic_row_count") or 0)
+            result["turnover_rate_count"] = int(readiness.get("turnover_rate_count") or 0)
+            result["volume_ratio_count"] = int(readiness.get("volume_ratio_count") or 0)
+            result["metric_fill_ratio"] = float(readiness.get("metric_fill_ratio") or 0.0)
+            result["daily_basic_fill_ratio"] = float(readiness.get("daily_basic_fill_ratio") or 0.0)
+            result["required_fill_ratio"] = float(readiness.get("required_fill_ratio") or result["required_fill_ratio"])
+            result["reason"] = readiness.get("reason")
         except Exception as e:
             result["error"] = str(e)
 
@@ -774,3 +887,4 @@ class TushareService:
     def clear_data_status_cache(cls) -> None:
         """清除数据状态缓存（在数据更新时调用）"""
         cls._data_status_cache.clear()
+        cls._latest_data_ready_cache.clear()

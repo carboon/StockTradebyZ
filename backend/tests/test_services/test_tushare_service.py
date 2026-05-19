@@ -458,3 +458,67 @@ def test_load_stock_data_columns_lowercased(tushare_service, tmp_path):
         for col in result.columns:
             assert col.islower()
         assert "date" in result.columns
+
+
+@pytest.mark.service
+def test_trade_date_data_readiness_requires_complete_metrics(tushare_service):
+    """
+    测试最新交易日就绪判定会校验关键指标完整性
+
+    当 daily_basic 存在但 volume_ratio 未填充时，应判定为未就绪。
+    """
+    TushareService.clear_data_status_cache()
+
+    mock_pro = MagicMock()
+    mock_pro.daily.return_value = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000002.SZ"],
+        "trade_date": ["20260519", "20260519"],
+    })
+    mock_pro.daily_basic.return_value = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000002.SZ"],
+        "trade_date": ["20260519", "20260519"],
+        "turnover_rate": [1.2, 2.3],
+        "volume_ratio": [None, None],
+    })
+    tushare_service._pro = mock_pro
+
+    with patch("app.services.tushare_service.acquire_tushare_slot"):
+        readiness = tushare_service.get_trade_date_data_readiness("2026-05-19", ttl_seconds=0)
+
+    assert readiness["ready"] is False
+    assert readiness["daily_row_count"] == 2
+    assert readiness["daily_basic_row_count"] == 2
+    assert readiness["turnover_rate_count"] == 2
+    assert readiness["volume_ratio_count"] == 0
+    assert readiness["metric_fill_ratio"] == 0.0
+    assert readiness["reason"] == "daily_metrics_incomplete"
+
+
+@pytest.mark.service
+def test_trade_date_data_readiness_accepts_complete_metrics(tushare_service):
+    """
+    测试最新交易日就绪判定在关键指标完整时返回就绪
+    """
+    TushareService.clear_data_status_cache()
+
+    mock_pro = MagicMock()
+    mock_pro.daily.return_value = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
+        "trade_date": ["20260519", "20260519", "20260519", "20260519"],
+    })
+    mock_pro.daily_basic.return_value = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
+        "trade_date": ["20260519", "20260519", "20260519", "20260519"],
+        "turnover_rate": [1.2, 2.3, 1.8, 0.9],
+        "volume_ratio": [0.8, 1.1, 1.3, 0.7],
+    })
+    tushare_service._pro = mock_pro
+
+    with patch("app.services.tushare_service.acquire_tushare_slot"):
+        readiness = tushare_service.get_trade_date_data_readiness("2026-05-19", ttl_seconds=0)
+        assert tushare_service.is_trade_date_data_ready("2026-05-19") is True
+
+    assert readiness["ready"] is True
+    assert readiness["metric_fill_ratio"] == 1.0
+    assert readiness["daily_basic_fill_ratio"] == 1.0
+    assert readiness["reason"] is None

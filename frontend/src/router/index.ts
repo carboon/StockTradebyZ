@@ -43,6 +43,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '运维管理', icon: 'Refresh', requiresAuth: true, requiresAdmin: true },
   },
   {
+    path: '/updating',
+    name: 'Updating',
+    component: () => import('@/views/Updating.vue'),
+    meta: { title: '更新数据中', requiresAuth: true },
+  },
+  {
     path: '/tomorrow-star',
     name: 'TomorrowStar',
     component: () => import('@/views/TomorrowStar.vue'),

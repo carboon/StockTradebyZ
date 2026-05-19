@@ -210,7 +210,7 @@ def test_run_fails_after_1630_when_latest_trade_date_data_not_ready(test_db, tmp
 
     try:
         service.run()
-        assert False, "expected run() to fail for systemd retry"
+        assert False, "expected run() to fail when latest trade date data is not ready"
     except RuntimeError as exc:
         assert "10 分钟后重试" in str(exc)
 

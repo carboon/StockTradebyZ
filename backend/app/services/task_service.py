@@ -27,6 +27,7 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.time_utils import utc_now
@@ -249,6 +250,7 @@ class TaskService:
         "history_window_star": {"label": "补齐历史窗口", "detail": "生成明日之星历史记录", "index": 6, "total": 6, "percent": 92},
         "history_window_hot": {"label": "补齐历史窗口", "detail": "生成当前热盘历史记录", "index": 6, "total": 6, "percent": 96},
         "recent_120_rebuild": {"label": "近120交易日重建", "detail": "检查数据、更新 CSV/DB 并重建派生结果", "index": 1, "total": 2, "percent": 5},
+        "view_cache_prewarm": {"label": "预热榜单缓存", "detail": "预热全盘分析 / 当前热盘 / 板块分析视图", "index": 2, "total": 2, "percent": 97},
         "diagnosis_cache_prewarm": {"label": "预热诊断缓存", "detail": "写入单股诊断历史缓存", "index": 2, "total": 2, "percent": 98},
 
         # 阶段6: 完成（100%）
@@ -828,7 +830,7 @@ class TaskService:
             raise Exception(f"板块分析历史窗口补齐失败: {failed_dates}")
 
         status = tushare_service.check_data_status()
-        task.result_json = {
+        task.result_json = self._make_json_safe({
             "data_status": status,
             "stock_basic_synced": synced_count,
             "candidate_synced": candidate_synced,
@@ -839,9 +841,11 @@ class TaskService:
             "stage_metrics": {
                 "durations_seconds": stage_durations,
             },
-        }
+        })
+        view_prewarm = await self._prewarm_view_data_async(task, db, preserve_stage=True)
+        task.result_json["view_data_prewarm"] = self._make_json_safe(view_prewarm)
         diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db, preserve_stage=True)
-        task.result_json["diagnosis_cache_prewarm"] = diagnosis_cache
+        task.result_json["diagnosis_cache_prewarm"] = self._make_json_safe(diagnosis_cache)
 
     async def _run_recent_120_rebuild(self, task: Any, db: Session, params_json: dict = None):
         """Run the recent-120 rebuild script used by the task center full rebuild button."""
@@ -921,13 +925,13 @@ class TaskService:
         except Exception:
             pass
 
-        task.result_json = {
+        task.result_json = self._make_json_safe({
             "success": True,
             "task_type": self.RECENT_120_REBUILD_TASK_TYPE,
             "window_size": window_size,
             "reviewer": reviewer,
             "output_tail": output_tail,
-        }
+        })
         task.progress = 100
         task.task_stage = "completed"
         task.progress_meta_json = self._build_stage_meta(
@@ -935,6 +939,7 @@ class TaskService:
             progress=100,
             message="最近120交易日数据重建完成",
         )
+        task.result_json["view_data_prewarm"] = self._make_json_safe(await self._prewarm_view_data_async(task, db))
         await self._prewarm_diagnosis_history_cache_async(task, db)
 
     @staticmethod
@@ -978,6 +983,8 @@ class TaskService:
             progress=task.progress,
             message="正在预热单股诊断历史缓存",
         )
+        if task.result_json is not None:
+            task.result_json = self._make_json_safe(task.result_json)
         db.commit()
         await self._publish_ops_task_event(task, "task_progress")
         try:
@@ -994,6 +1001,8 @@ class TaskService:
                 task.task_stage = previous_stage
                 task.progress = previous_progress
                 task.progress_meta_json = previous_meta
+                if task.result_json is not None:
+                    task.result_json = self._make_json_safe(task.result_json)
                 db.commit()
             return result
         except Exception as exc:
@@ -1007,6 +1016,64 @@ class TaskService:
                 task.task_stage = previous_stage
                 task.progress = previous_progress
                 task.progress_meta_json = previous_meta
+                if task.result_json is not None:
+                    task.result_json = self._make_json_safe(task.result_json)
+                db.commit()
+            return {"success": False, "error": str(exc)}
+
+    async def _prewarm_view_data_async(
+        self,
+        task: Any,
+        db: Session,
+        *,
+        preserve_stage: bool = False,
+    ) -> dict[str, Any]:
+        previous_stage = task.task_stage
+        previous_progress = task.progress
+        previous_meta = task.progress_meta_json
+        task.task_stage = "view_cache_prewarm"
+        task.progress = max(int(task.progress or 0), 97)
+        task.progress_meta_json = self._build_stage_meta(
+            "view_cache_prewarm",
+            progress=task.progress,
+            message="正在预热全盘分析 / 当前热盘 / 板块分析视图",
+        )
+        if task.result_json is not None:
+            task.result_json = self._make_json_safe(task.result_json)
+        db.commit()
+        await self._publish_ops_task_event(task, "task_progress")
+        try:
+            from app.services.view_prewarm_service import prewarm_latest_analysis_views
+
+            result = await asyncio.to_thread(prewarm_latest_analysis_views)
+            failed_count = len(result.get("failed") or [])
+            self._record_task_log(
+                task,
+                f"视图预热完成: success={result.get('success')} failed={failed_count}",
+                "info" if failed_count == 0 else "warning",
+                stage="view_cache_prewarm",
+            )
+            if preserve_stage:
+                task.task_stage = previous_stage
+                task.progress = previous_progress
+                task.progress_meta_json = previous_meta
+                if task.result_json is not None:
+                    task.result_json = self._make_json_safe(task.result_json)
+                db.commit()
+            return result
+        except Exception as exc:
+            self._record_task_log(
+                task,
+                f"视图预热失败: {exc}",
+                "warning",
+                stage="view_cache_prewarm",
+            )
+            if preserve_stage:
+                task.task_stage = previous_stage
+                task.progress = previous_progress
+                task.progress_meta_json = previous_meta
+                if task.result_json is not None:
+                    task.result_json = self._make_json_safe(task.result_json)
                 db.commit()
             return {"success": False, "error": str(exc)}
 
@@ -1050,7 +1117,7 @@ class TaskService:
         from app.services.analysis_service import analysis_service
 
         result = analysis_service.analyze_stock(code, params.get("reviewer", "quant"))
-        task.result_json = result
+        task.result_json = self._make_json_safe(result)
         task.task_stage = "analysis"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta("analysis", progress=100, message=f"单股分析完成: {code}")
@@ -1167,7 +1234,7 @@ class TaskService:
         except Exception:
             pass
 
-        task.result_json = {
+        task.result_json = self._make_json_safe({
             "ok": bool(result.get("ok")),
             "mode": "daily_batch",
             "trade_date": trade_date,
@@ -1177,9 +1244,10 @@ class TaskService:
             "current_hot_rebuild": current_hot_result,
             "sector_analysis_rebuild": sector_analysis_result,
             **result,
-        }
+        })
+        task.result_json["view_data_prewarm"] = self._make_json_safe(await self._prewarm_view_data_async(task, db))
         diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db)
-        task.result_json["diagnosis_cache_prewarm"] = diagnosis_cache
+        task.result_json["diagnosis_cache_prewarm"] = self._make_json_safe(diagnosis_cache)
         task.task_stage = "daily_batch_completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1335,7 +1403,7 @@ class TaskService:
 
         updated_count = int(result.get("stock_count") or result.get("db_stock_count") or 0)
         message = f"增量更新完成: {trade_date}，写入 {updated_count} 只股票"
-        task.result_json = {
+        task.result_json = self._make_json_safe({
             "ok": True,
             "success": True,
             "task_type": self.INCREMENTAL_UPDATE_TASK_TYPE,
@@ -1348,9 +1416,10 @@ class TaskService:
             "current_hot_rebuild": current_hot_result,
             "sector_analysis_rebuild": sector_analysis_result,
             **result,
-        }
+        })
+        task.result_json["view_data_prewarm"] = self._make_json_safe(await self._prewarm_view_data_async(task, db))
         diagnosis_cache = await self._prewarm_diagnosis_history_cache_async(task, db)
-        task.result_json["diagnosis_cache_prewarm"] = diagnosis_cache
+        task.result_json["diagnosis_cache_prewarm"] = self._make_json_safe(diagnosis_cache)
         task.task_stage = "daily_batch_completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1509,7 +1578,7 @@ class TaskService:
         if not result.get("success"):
             raise Exception(result.get("error", "历史数据生成失败"))
 
-        task.result_json = result
+        task.result_json = self._make_json_safe(result)
         task.task_stage = "completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1546,7 +1615,7 @@ class TaskService:
         if not result.get("success"):
             raise Exception(result.get("error", "诊断详情生成失败"))
 
-        task.result_json = result
+        task.result_json = self._make_json_safe(result)
         task.task_stage = "completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1599,7 +1668,7 @@ class TaskService:
             progress_callback=progress_callback,
         )
 
-        task.result_json = result.to_dict()
+        task.result_json = self._make_json_safe(result.to_dict())
         task.task_stage = "completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1648,7 +1717,7 @@ class TaskService:
         except Exception:
             pass  # 不影响主流程
 
-        task.result_json = result.to_dict()
+        task.result_json = self._make_json_safe(result.to_dict())
         task.task_stage = "completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -1713,7 +1782,7 @@ class TaskService:
         except Exception:
             pass  # 不影响主流程
 
-        task.result_json = result
+        task.result_json = self._make_json_safe(result)
         task.task_stage = "completed"
         task.progress = 100
         task.progress_meta_json = self._build_stage_meta(
@@ -2084,6 +2153,12 @@ class TaskService:
         )
 
     @staticmethod
+    def _make_json_safe(value: Any) -> Any:
+        if value is None:
+            return None
+        return jsonable_encoder(value, custom_encoder={Path: str})
+
+    @staticmethod
     def _append_runtime_metrics(result_json: Optional[dict[str, Any]], started_at_monotonic: float) -> dict[str, Any]:
         payload = dict(result_json or {})
         elapsed = time.perf_counter() - started_at_monotonic
@@ -2091,7 +2166,7 @@ class TaskService:
             payload["runtime_metrics"] = {
                 "total_seconds": round(elapsed, 3),
             }
-        return payload
+        return TaskService._make_json_safe(payload)
 
     def _mark_step_completed(self, task: Any, step_name: str, db: Session) -> None:
         """标记步骤为已完成。

@@ -152,65 +152,23 @@ docker compose -f deploy/docker-compose.yml --profile postgres --profile prod up
 - `intraday`：11:30 后生成中盘快照，默认只取 `09:30~11:30`
 - `repair`：专项修复历史日线或历史评分结果
 
-## 旧的在线更新入口
+## 任务中心自动更新
 
-历史在线更新入口：
+当前每日数据自动更新由应用内调度完成，不再依赖宿主机 `systemd timer`。
 
-```bash
-./deploy/scripts/start.sh update-latest
-```
+配置入口：
 
-默认已禁用，避免服务对外期间执行重负载更新导致整机失联。只有在明确接受风险时，才建议临时设置 `STOCKTRADE_ENABLE_LEGACY_ONLINE_UPDATE=1` 后继续使用。
+- 任务中心 -> 总览 -> 自动更新配置
 
-## 可选的宿主机后台限流方案
+当前行为：
 
-如仍需用 systemd 以受限资源方式在宿主机后台执行，可使用：
-
-```bash
-deploy/systemd/stocktrade-background-update.service
-deploy/systemd/stocktrade-background-update.timer
-```
-
-该 service 已内置以下限制：
-
-- `CPUQuota=100%`
-- `MemoryMax=1500M`
-- `Nice=10`
-- `IOSchedulingClass=idle`
-
-当前仓库中的 service 已按这台宿主机预设为：
-
-- `WorkingDirectory=/root/StockTradebyZ`
-- `User=root`
-- `Group=root`
-- `Restart=on-failure`
-- `RestartPreventExitStatus=1`
-- `RestartSec=10min`
-- Docker 服务已启动，且 `backend` 容器处于运行状态
-
-当前 timer 规则为：
-
-- `OnCalendar=Mon..Fri *-*-* 16:30:00 Asia/Shanghai`
-- `Persistent=true`
-
-当前行为约定为：
-
-- 由 systemd 在交易日北京时间 `16:30` 触发首次更新
-- 若当天交易数据在 Tushare 仍未就绪，脚本会以 `TEMPFAIL(75)` 退出，service 每 `10` 分钟自动重试一次
-- 一旦更新成功，自动重试终止
-- 普通脚本错误不会进入自动重试循环，需要人工处理
-
-启用方式示例：
-
-```bash
-sudo mkdir -p /root/StockTradebyZ/data/logs /root/StockTradebyZ/.docker
-sudo cp deploy/systemd/stocktrade-background-update.service /etc/systemd/system/
-sudo cp deploy/systemd/stocktrade-background-update.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now stocktrade-background-update.timer
-sudo systemctl start stocktrade-background-update.service
-sudo systemctl status stocktrade-background-update.timer
-```
+- 支持开关控制是否启用每日自动更新
+- 支持配置触发时间，默认交易日北京时间 `16:30`
+- 到点后会先确认远端 Tushare 当日数据是否已具备
+- 若数据未就绪，会延迟 `10` 分钟后再次确认
+- 更新完成后会自动预热 `当前热盘`、`全盘分析`、`板块分析` 的读路径
+- 若更新进行中，业务页会返回“更新数据中”提示页，避免读取半更新数据
+- 调度和异常会写入 `data/logs/auto-update/auto-update.log`
 
 ## 宿主机与容器的数据库地址差异
 

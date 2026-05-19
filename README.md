@@ -31,7 +31,7 @@
 - `backend/`：FastAPI API、任务编排、数据服务、缓存和持久化
 - `pipeline/`：候选构建、回测、批量重建等离线流程
 - `agent/`：量化复核、分析模板、研究辅助逻辑
-- `deploy/`：Docker Compose、镜像、启动脚本、systemd
+- `deploy/`：Docker Compose、镜像、启动脚本、生产自启动 service
 - `data/`：原始快照、缓存、导出、日志和运行期文件
 
 更完整的架构说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
@@ -139,10 +139,12 @@ cp .env.example deploy/.env
 - `repair daily`：修复 `stock_daily` 缺失或样本不足
 - `repair scores`：修复历史候选、评分和结果不一致
 
-如需保留宿主机后台定时更新，可参考：
+任务中心支持应用内“每日自动更新”配置：
 
-- [deploy/systemd/stocktrade-background-update.service](deploy/systemd/stocktrade-background-update.service)
-- [deploy/systemd/stocktrade-background-update.timer](deploy/systemd/stocktrade-background-update.timer)
+- 可配置启用/关闭
+- 可配置每日触发时间，默认交易日 `16:30`
+- 若 Tushare 当日数据尚未就绪，会自动间隔 `10` 分钟重试
+- 更新期间，`当前热盘`、`全盘分析`、`板块分析` 页面会显示“更新数据中”
 
 ## 配置说明
 
@@ -180,7 +182,7 @@ cp .env.example deploy/.env
 - `backend/scripts/`：抓数、补数、重建、导入脚本
 - `backend/tests/`：后端测试
 - `frontend/tests/`：前端测试
-- `deploy/`：Compose、Dockerfile、启动/发布/systemd
+- `deploy/`：Compose、Dockerfile、启动/发布脚本、生产 service
 - `docs/`：部署、修复工具、开发附加说明
 
 ## 文档导航

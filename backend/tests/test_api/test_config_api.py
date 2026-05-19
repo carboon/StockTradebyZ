@@ -68,6 +68,10 @@ def test_get_all_configs_empty(test_client: TestClient) -> None:
             "gemini_api_key",
             "default_reviewer",
             "min_score_threshold",
+            "register_validation_question",
+            "register_validation_answer",
+            "auto_daily_update_enabled",
+            "auto_daily_update_time",
         }
         assert config_keys == expected_keys
 
@@ -195,6 +199,23 @@ def test_update_config_multiple(test_client_with_db: Any) -> None:
     config_dict = {c.key: c.value for c in configs}
     assert config_dict["existing_key"] == "updated_value"
     assert config_dict["new_key"] == "new_value"
+
+
+@pytest.mark.api
+def test_update_auto_update_config_normalizes_value(test_client_with_db: Any) -> None:
+    response = test_client_with_db.put(
+        "/api/v1/config/",
+        json={"key": "auto_daily_update_enabled", "value": "YES"},
+    )
+    assert response.status_code == 200
+    assert response.json()["value"] == "true"
+
+    response = test_client_with_db.put(
+        "/api/v1/config/",
+        json={"key": "auto_daily_update_time", "value": "7:5"},
+    )
+    assert response.status_code == 200
+    assert response.json()["value"] == "07:05"
 
 
 @pytest.mark.api

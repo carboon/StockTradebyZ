@@ -50,7 +50,6 @@ StockTrader 统一运行脚本
   ps            查看服务状态
   restart       重启服务
   exec-backend  进入后端容器
-  update-latest 兼容命令，等价于仓库根目录 ./update-data.sh daily（默认禁用，不推荐）
 
 选项:
   --build       启动前构建镜像 (dev 默认启用，prod 需显式指定)
@@ -69,7 +68,6 @@ StockTrader 统一运行脚本
   $0 ps                     # 查看服务状态
   $0 restart                # 重启服务
   $0 exec-backend           # 进入后端容器
-  $0 update-latest          # 兼容命令；当前直接调用仓库根目录 update-data.sh daily
 
 访问地址:
   开发环境:
@@ -362,11 +360,6 @@ cmd_exec_backend() {
     exec "${DOCKER_COMPOSE[@]}" $(get_compose_args "$mode") exec backend bash
 }
 
-cmd_update_latest() {
-    log_warning "update-latest 为兼容入口，推荐直接使用仓库根目录 ./update-data.sh daily"
-    exec "$PROJECT_ROOT/update-data.sh" daily "${TARGETS[@]}"
-}
-
 # 默认值
 COMMAND=""
 BUILD="0"
@@ -377,7 +370,7 @@ TARGETS=()
 # 解析参数
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        dev|prod|down|logs|ps|restart|exec-backend|update-latest)
+        dev|prod|down|logs|ps|restart|exec-backend)
             COMMAND="$1"
             shift
             ;;
@@ -451,15 +444,12 @@ case "$COMMAND" in
     restart)
         cmd_restart
         ;;
-        exec-backend)
-            cmd_exec_backend
-            ;;
-        update-latest)
-            cmd_update_latest
-            ;;
-        *)
-            log_error "未知命令: $COMMAND"
-            show_help
+    exec-backend)
+        cmd_exec_backend
+        ;;
+    *)
+        log_error "未知命令: $COMMAND"
+        show_help
         exit 1
         ;;
 esac

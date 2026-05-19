@@ -36,6 +36,7 @@ vi.mock('@/api', () => ({
     getRunning: vi.fn(),
     getAll: vi.fn(),
     getStatus: vi.fn(),
+    getDataFreshness: vi.fn(),
     getAdminSummary: vi.fn(),
     getEnvironment: vi.fn(),
     getDiagnostics: vi.fn(),
@@ -234,6 +235,12 @@ describe('Update.vue', () => {
     vi.mocked(apiTasks.getIncrementalStatus).mockResolvedValue(buildIncrementalStatus() as any)
     vi.mocked(apiTasks.getLogs).mockResolvedValue({ logs: [] } as any)
     vi.mocked(apiTasks.getOverview).mockResolvedValue({} as any)
+    vi.mocked(apiConfig.getAll).mockResolvedValue({
+      configs: [
+        { key: 'auto_daily_update_enabled', value: 'false', description: '' },
+        { key: 'auto_daily_update_time', value: '16:30', description: '' },
+      ],
+    } as any)
     mockTaskStatus()
     mockConfigStatus()
   })

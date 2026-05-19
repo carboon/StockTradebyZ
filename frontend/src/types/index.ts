@@ -396,6 +396,14 @@ export interface DataFreshnessResponse {
   latest_calendar_trade_date: string | null
   latest_data_date: string | null
   is_latest_data_ready: boolean
+  daily_row_count?: number
+  daily_basic_row_count?: number
+  turnover_rate_count?: number
+  volume_ratio_count?: number
+  metric_fill_ratio?: number
+  daily_basic_fill_ratio?: number
+  required_fill_ratio?: number
+  reason?: string | null
   error?: string
 }
 

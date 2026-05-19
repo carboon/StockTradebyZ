@@ -55,6 +55,33 @@
               </div>
             </el-card>
 
+            <el-card class="auto-update-card">
+              <template #header>
+                <span>自动更新配置</span>
+              </template>
+              <div class="auto-update-grid">
+                <label class="auto-update-toggle">
+                  <el-checkbox v-model="autoUpdateEnabled">启用每日自动更新</el-checkbox>
+                  <span class="auto-update-hint">仅在交易日触发；若 Tushare 当日数据未就绪，会间隔 10 分钟自动重试。</span>
+                </label>
+                <label class="auto-update-time-field">
+                  <span class="auto-update-time-label">更新时间</span>
+                  <input
+                    v-model="autoUpdateTime"
+                    class="auto-update-time-input"
+                    type="time"
+                    step="60"
+                  >
+                </label>
+                <div class="auto-update-actions">
+                  <el-button type="primary" :loading="savingAutoUpdate" @click="saveAutoUpdateSettings">
+                    保存自动更新配置
+                  </el-button>
+                  <span class="auto-update-default">默认推荐：交易日 16:30</span>
+                </div>
+              </div>
+            </el-card>
+
             <el-card v-if="isMobile" class="mobile-summary-card">
               <template #header>
                 <span>移动端摘要</span>
@@ -950,6 +977,9 @@ const checkingIntegrity = ref(false)
 const revalidatingDate = ref(false)
 const diagnosticsLoading = ref(false)
 const diagnostics = ref<TaskDiagnosticsResponse | null>(null)
+const savingAutoUpdate = ref(false)
+const autoUpdateEnabled = ref(false)
+const autoUpdateTime = ref('16:30')
 
 // 管理员总览（阶段4新增）
 const adminSummary = ref<AdminSummaryResponse | null>(null)
@@ -1633,6 +1663,9 @@ onMounted(async () => {
 
   // 非阻塞加载数据 - 让页面先渲染，数据后台加载
   Promise.all([
+    configStore.loadConfigs().then(syncAutoUpdateSettingsFromStore).catch((error) => {
+      console.error('Failed to load configs:', error)
+    }),
     // 检查 Tushare 状态
     configStore.checkTushareStatus().catch((error) => {
       console.error('Failed to check tushare status:', error)
@@ -1862,6 +1895,44 @@ async function retryBootstrap() {
   await startBootstrap()
 }
 
+function normalizeAutoUpdateTimeInput(value: string) {
+  const match = String(value || '').match(/^(\d{1,2}):(\d{1,2})$/)
+  if (!match) return '16:30'
+  const hour = Number(match[1])
+  const minute = Number(match[2])
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return '16:30'
+  }
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+function parseBooleanConfig(value: string | undefined) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase())
+}
+
+function syncAutoUpdateSettingsFromStore() {
+  autoUpdateEnabled.value = parseBooleanConfig(configStore.configs.auto_daily_update_enabled)
+  autoUpdateTime.value = normalizeAutoUpdateTimeInput(configStore.configs.auto_daily_update_time || '16:30')
+}
+
+async function saveAutoUpdateSettings() {
+  savingAutoUpdate.value = true
+  const normalizedTime = normalizeAutoUpdateTimeInput(autoUpdateTime.value)
+  try {
+    await Promise.all([
+      configStore.updateConfig('auto_daily_update_enabled', autoUpdateEnabled.value ? 'true' : 'false'),
+      configStore.updateConfig('auto_daily_update_time', normalizedTime),
+    ])
+    autoUpdateTime.value = normalizedTime
+    ElMessage.success('自动更新配置已保存')
+  } catch (error: any) {
+    console.error('saveAutoUpdateSettings failed:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '自动更新配置保存失败'))
+  } finally {
+    savingAutoUpdate.value = false
+  }
+}
+
 async function startDataUpdate() {
   startingUpdate.value = true
   try {
@@ -1989,12 +2060,30 @@ async function checkDataFreshness() {
   checkingFreshness.value = true
   try {
     const res = await apiTasks.getDataFreshness()
+    const reasonMap: Record<string, string> = {
+      invalid_trade_date: '交易日格式无效',
+      daily_missing: '远端日线尚未产出',
+      daily_basic_missing: '远端 daily_basic 尚未产出',
+      daily_basic_incomplete: '远端 daily_basic 行覆盖不足',
+      daily_metrics_incomplete: '远端换手率或量比尚未补齐',
+      probe_failed: '远端探测失败',
+    }
     const lines = [
       `<strong>查询时间：</strong>${formatDateTime(res.query_time)}`,
       `<strong>最新交易日（日历）：</strong>${res.latest_calendar_trade_date || '-'}`,
       `<strong>最新日线数据日期：</strong>${res.latest_data_date || '-'}`,
       `<strong>当日数据已就绪：</strong>${res.is_latest_data_ready ? '是' : '否'}`,
+      `<strong>日线记录数：</strong>${res.daily_row_count ?? '-'}`,
+      `<strong>daily_basic 记录数：</strong>${res.daily_basic_row_count ?? '-'}`,
+      `<strong>换手率记录数：</strong>${res.turnover_rate_count ?? '-'}`,
+      `<strong>量比记录数：</strong>${res.volume_ratio_count ?? '-'}`,
+      `<strong>daily_basic 覆盖率：</strong>${typeof res.daily_basic_fill_ratio === 'number' ? `${(res.daily_basic_fill_ratio * 100).toFixed(2)}%` : '-'}`,
+      `<strong>关键指标填充率：</strong>${typeof res.metric_fill_ratio === 'number' ? `${(res.metric_fill_ratio * 100).toFixed(2)}%` : '-'}`,
+      `<strong>要求阈值：</strong>${typeof res.required_fill_ratio === 'number' ? `${(res.required_fill_ratio * 100).toFixed(2)}%` : '-'}`,
     ]
+    if (res.reason) {
+      lines.push(`<strong>未就绪原因：</strong>${reasonMap[res.reason] || res.reason}`)
+    }
     if (res.error) {
       lines.push(`<strong>错误：</strong>${res.error}`)
     }
@@ -3517,6 +3606,58 @@ function buildWebSocketUrl(path: string) {
         color: var(--color-text-secondary);
       }
     }
+  }
+}
+
+.auto-update-card {
+  .auto-update-grid {
+    display: grid;
+    gap: 16px;
+  }
+
+  .auto-update-toggle {
+    display: grid;
+    gap: 8px;
+  }
+
+  .auto-update-hint {
+    color: #6b7280;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .auto-update-time-field {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .auto-update-time-label {
+    color: #374151;
+    font-weight: 600;
+  }
+
+  .auto-update-time-input {
+    min-width: 180px;
+    padding: 10px 12px;
+    border: 1px solid #d0d7e2;
+    border-radius: 10px;
+    font: inherit;
+    color: #1f2937;
+    background: #fff;
+  }
+
+  .auto-update-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .auto-update-default {
+    color: #6b7280;
+    font-size: 13px;
   }
 }
 
