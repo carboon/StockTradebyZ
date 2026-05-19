@@ -386,8 +386,21 @@ class CurrentHotIntradayAnalysisService:
         pool_turnover_rate = self._to_float(pool_item.get("turnover_rate")) if pool_item else None
         pool_volume_ratio = self._to_float(pool_item.get("volume_ratio")) if pool_item else None
         pool_active_pool_rank = pool_item.get("active_pool_rank") if pool_item else None
-        turnover_rate = pool_turnover_rate if pool_turnover_rate is not None else previous_analysis.get("turnover_rate")
-        volume_ratio = pool_volume_ratio if pool_volume_ratio is not None else previous_analysis.get("volume_ratio")
+        intraday_metrics = IntradayAnalysisService(self.db)._compute_intraday_market_metrics(
+            code=code,
+            trade_date=trade_date,
+            minute_df=minute_df,
+        )
+        turnover_rate = (
+            intraday_metrics.get("turnover_rate")
+            if intraday_metrics.get("turnover_rate") is not None
+            else (pool_turnover_rate if pool_turnover_rate is not None else previous_analysis.get("turnover_rate"))
+        )
+        volume_ratio = (
+            intraday_metrics.get("volume_ratio")
+            if intraday_metrics.get("volume_ratio") is not None
+            else (pool_volume_ratio if pool_volume_ratio is not None else previous_analysis.get("volume_ratio"))
+        )
         active_pool_rank = pool_active_pool_rank if pool_active_pool_rank is not None else previous_analysis.get("active_pool_rank")
 
         return {
@@ -434,6 +447,7 @@ class CurrentHotIntradayAnalysisService:
                 "turnover_rate": turnover_rate,
                 "volume_ratio": volume_ratio,
                 "active_pool_rank": active_pool_rank,
+                "intraday_metrics": intraday_metrics,
                 "benchmark_name": market_overview.get("benchmark_name"),
                 "benchmark_change_pct": benchmark_change_pct,
                 "relative_market_status": relative_market_status,

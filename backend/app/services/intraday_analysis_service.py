@@ -711,6 +711,148 @@ class IntradayAnalysisService:
         target_row = exact.iloc[-1] if not exact.empty else subset.iloc[-1]
         return self._to_float(target_row.get(price_column)), target_row.get("_normalized_time")
 
+    @classmethod
+    def _elapsed_ratio_from_time_text(cls, value: Any) -> Optional[float]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if " " in text:
+            text = text.split(" ")[-1]
+        try:
+            current = datetime.strptime(text, "%H:%M:%S").time()
+        except ValueError:
+            return None
+
+        morning_open = time(9, 30)
+        morning_close = time(11, 30)
+        afternoon_open = time(13, 0)
+        afternoon_close = time(15, 0)
+
+        def minutes_between(start: time, end: time) -> int:
+            return (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
+
+        if current < morning_open:
+            elapsed_minutes = 0
+        elif current <= morning_close:
+            elapsed_minutes = minutes_between(morning_open, current)
+        elif current < afternoon_open:
+            elapsed_minutes = minutes_between(morning_open, morning_close)
+        elif current <= afternoon_close:
+            elapsed_minutes = (
+                minutes_between(morning_open, morning_close)
+                + minutes_between(afternoon_open, current)
+            )
+        else:
+            elapsed_minutes = cls.MARKET_MINUTES_PER_DAY
+
+        if elapsed_minutes <= 0:
+            return None
+        return min(max(elapsed_minutes / float(cls.MARKET_MINUTES_PER_DAY), 0.0), 1.0)
+
+    def _compute_intraday_market_metrics(
+        self,
+        *,
+        code: str,
+        trade_date: date,
+        minute_df: pd.DataFrame,
+    ) -> dict[str, Optional[float]]:
+        if minute_df is None or minute_df.empty:
+            return {
+                "turnover_rate": None,
+                "volume_ratio": None,
+                "projected_volume": None,
+                "intraday_volume": None,
+                "elapsed_ratio": None,
+                "metrics_trade_time": None,
+            }
+
+        normalized_code = str(code).zfill(6)
+        subset = minute_df[minute_df["code"].astype(str).str.zfill(6) == normalized_code].copy()
+        if subset.empty:
+            return {
+                "turnover_rate": None,
+                "volume_ratio": None,
+                "projected_volume": None,
+                "intraday_volume": None,
+                "elapsed_ratio": None,
+                "metrics_trade_time": None,
+            }
+
+        time_column = next((col for col in ("trade_time", "time") if col in subset.columns), None)
+        volume_column = "vol" if "vol" in subset.columns else ("volume" if "volume" in subset.columns else None)
+        if time_column is None or volume_column is None:
+            return {
+                "turnover_rate": None,
+                "volume_ratio": None,
+                "projected_volume": None,
+                "intraday_volume": None,
+                "elapsed_ratio": None,
+                "metrics_trade_time": None,
+            }
+
+        subset["_sort_time"] = pd.to_datetime(subset[time_column], errors="coerce")
+        subset = subset.sort_values("_sort_time")
+        intraday_volume = self._to_float(pd.to_numeric(subset[volume_column], errors="coerce").sum())
+        if intraday_volume in (None, 0):
+            return {
+                "turnover_rate": None,
+                "volume_ratio": None,
+                "projected_volume": None,
+                "intraday_volume": intraday_volume,
+                "elapsed_ratio": None,
+                "metrics_trade_time": None,
+            }
+
+        last_row = subset.iloc[-1]
+        metrics_trade_time = self._normalize_time_text(last_row.get(time_column))
+        elapsed_ratio = self._elapsed_ratio_from_time_text(metrics_trade_time)
+
+        recent_rows = (
+            self.db.query(
+                StockDaily.trade_date,
+                StockDaily.volume,
+                StockDaily.free_share,
+                StockDaily.turnover_rate,
+                StockDaily.turnover_rate_f,
+            )
+            .filter(
+                StockDaily.code == normalized_code,
+                StockDaily.trade_date < trade_date,
+            )
+            .order_by(StockDaily.trade_date.desc(), StockDaily.id.desc())
+            .limit(20)
+            .all()
+        )
+
+        turnover_divisor = None
+        historical_volumes: list[float] = []
+        for row in recent_rows:
+            if row.volume is not None:
+                historical_volumes.append(float(row.volume))
+            if turnover_divisor is None and row.free_share not in (None, 0):
+                turnover_divisor = float(row.free_share)
+
+        turnover_rate = None
+        if turnover_divisor not in (None, 0):
+            turnover_rate = intraday_volume / turnover_divisor
+
+        avg5_volume = pd.Series(historical_volumes[:5], dtype="float64").dropna().mean() if historical_volumes else None
+        projected_volume = None
+        volume_ratio = None
+        if elapsed_ratio not in (None, 0):
+            projected_volume = intraday_volume / max(elapsed_ratio, 0.01)
+        if projected_volume not in (None,) and pd.notna(avg5_volume) and float(avg5_volume) > 0:
+            volume_ratio = projected_volume / float(avg5_volume)
+
+        return {
+            "turnover_rate": round(turnover_rate, 4) if turnover_rate is not None else None,
+            "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
+            "projected_volume": round(projected_volume, 4) if projected_volume is not None else None,
+            "intraday_volume": round(intraday_volume, 4) if intraday_volume is not None else None,
+            "elapsed_ratio": round(elapsed_ratio, 6) if elapsed_ratio is not None else None,
+            "metrics_trade_time": metrics_trade_time or None,
+        }
+
     def _filter_minute_df_by_cutoff(
         self,
         minute_df: pd.DataFrame,
@@ -1136,8 +1278,21 @@ class IntradayAnalysisService:
             relative_market_status=relative_market_status,
             market_bias=market_overview.get("market_bias"),
         )
-        turnover_rate = previous_analysis.get("turnover_rate")
-        volume_ratio = previous_analysis.get("volume_ratio")
+        intraday_metrics = self._compute_intraday_market_metrics(
+            code=code,
+            trade_date=trade_date,
+            minute_df=minute_df,
+        )
+        turnover_rate = (
+            intraday_metrics.get("turnover_rate")
+            if intraday_metrics.get("turnover_rate") is not None
+            else previous_analysis.get("turnover_rate")
+        )
+        volume_ratio = (
+            intraday_metrics.get("volume_ratio")
+            if intraday_metrics.get("volume_ratio") is not None
+            else previous_analysis.get("volume_ratio")
+        )
         active_pool_rank = previous_analysis.get("active_pool_rank")
 
         return {
@@ -1182,6 +1337,7 @@ class IntradayAnalysisService:
                 "turnover_rate": turnover_rate,
                 "volume_ratio": volume_ratio,
                 "active_pool_rank": active_pool_rank,
+                "intraday_metrics": intraday_metrics,
                 "benchmark_name": market_overview.get("benchmark_name"),
                 "benchmark_change_pct": benchmark_change_pct,
                 "relative_market_status": relative_market_status,

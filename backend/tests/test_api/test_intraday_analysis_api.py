@@ -197,6 +197,16 @@ def test_intraday_generate_creates_snapshot_for_admin(test_client_with_db: Any) 
     if source_daily is not None:
         source_daily.turnover_rate = 5.6
         source_daily.volume_ratio = 1.8
+        source_daily.free_share = 100000.0
+    recent_rows = (
+        db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(recent_rows, [108500.0, 108400.0, 108300.0, 108200.0, 108100.0]):
+        row.volume = volume
     db.add(
         StockActivePoolRank(
             trade_date=source_pick_date,
@@ -293,8 +303,9 @@ def test_intraday_generate_creates_snapshot_for_admin(test_client_with_db: Any) 
     assert row.source_pick_date == source_pick_date
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
-    assert row.details_json["turnover_rate"] == 5.6
-    assert row.details_json["volume_ratio"] == 1.8
+    assert row.details_json["turnover_rate"] == 2.5
+    assert row.details_json["volume_ratio"] == 4.6168
+    assert row.details_json["intraday_metrics"]["elapsed_ratio"] == 0.5
     assert row.details_json["active_pool_rank"] == 21
 
 
@@ -311,6 +322,19 @@ def test_intraday_generate_rebuilds_from_local_raw_cache(
     db.add(Stock(code="600000", name="浦发银行", market="SH"))
     db.add(Candidate(pick_date=source_pick_date, code="600000", strategy="b1"))
     _seed_stock_history(test_client_with_db, "600000", source_pick_date, days=90)
+    source_daily = db.query(StockDaily).filter(StockDaily.code == "600000", StockDaily.trade_date == source_pick_date).first()
+    if source_daily is not None:
+        source_daily.free_share = 100000.0
+    recent_rows = (
+        db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(recent_rows, [108500.0, 108400.0, 108300.0, 108200.0, 108100.0]):
+        row.volume = volume
+    db.commit()
 
     fake_now = datetime(2026, 5, 8, 12, 30, tzinfo=ASIA_SHANGHAI)
     fake_index_daily = pd.DataFrame(
@@ -396,6 +420,8 @@ def test_intraday_generate_rebuilds_from_local_raw_cache(
     row = db.query(IntradayAnalysisSnapshot).filter(IntradayAnalysisSnapshot.trade_date == trade_date).one()
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert row.details_json["turnover_rate"] == 2.5
+    assert row.details_json["volume_ratio"] == 4.6168
 
 
 def test_intraday_prefetch_downloads_raw_data_for_candidates_and_benchmarks(
@@ -472,6 +498,19 @@ def test_intraday_generate_falls_back_to_tencent_minute_data(
     db.add(Stock(code="600000", name="浦发银行", market="SH"))
     db.add(Candidate(pick_date=source_pick_date, code="600000", strategy="b1"))
     _seed_stock_history(test_client_with_db, "600000", source_pick_date, days=90)
+    source_daily = db.query(StockDaily).filter(StockDaily.code == "600000", StockDaily.trade_date == source_pick_date).first()
+    if source_daily is not None:
+        source_daily.free_share = 100000.0
+    recent_rows = (
+        db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(recent_rows, [108500.0, 108400.0, 108300.0, 108200.0, 108100.0]):
+        row.volume = volume
+    db.commit()
 
     fake_now = datetime(2026, 5, 8, 12, 30, tzinfo=ASIA_SHANGHAI)
     fake_index_daily = pd.DataFrame(
@@ -529,4 +568,103 @@ def test_intraday_generate_falls_back_to_tencent_minute_data(
     row = db.query(IntradayAnalysisSnapshot).filter(IntradayAnalysisSnapshot.trade_date == trade_date).one()
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert row.details_json["turnover_rate"] == 2.5
+    assert row.details_json["volume_ratio"] == 4.6168
     assert (tmp_path / "raw_intraday" / "2026-05-08" / "tencent" / "600000.SH.json").exists()
+
+
+def test_intraday_metrics_use_intraday_values_instead_of_previous_daily_metrics(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    trade_date = date(2026, 5, 19)
+    source_pick_date = date(2026, 5, 18)
+    db.add(Stock(code="000977", name="浪潮信息", market="SZ"))
+    db.add(Candidate(pick_date=source_pick_date, code="000977", strategy="b1"))
+    _seed_stock_history(test_client_with_db, "000977", source_pick_date, days=90)
+    recent_rows = (
+        db.query(StockDaily)
+        .filter(StockDaily.code == "000977", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(
+        recent_rows,
+        [652868.99, 788277.61, 1444686.97, 997416.79, 765758.06],
+    ):
+        row.volume = volume
+        row.free_share = 98938.8739
+    db.add(
+        DailyB1Check(
+            code="000977",
+            check_date=source_pick_date,
+            b1_passed=True,
+            active_pool_rank=8,
+            turnover_rate=4.4509,
+            volume_ratio=0.66,
+            score=4.8,
+        )
+    )
+    db.add(
+        StockActivePoolRank(
+            trade_date=source_pick_date,
+            code="000977",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=100000.0,
+            active_pool_rank=8,
+            in_active_pool=True,
+        )
+    )
+    db.commit()
+
+    fake_now = datetime(2026, 5, 19, 12, 30, tzinfo=ASIA_SHANGHAI)
+    fake_index_daily = pd.DataFrame([{"ts_code": "000905.SH", "trade_date": "20260519", "close": 5020, "vol": 1050000}])
+    minute_rows = pd.DataFrame([
+        {"ts_code": "000977.SZ", "normalized_ts_code": "000977.SZ", "code": "000977", "trade_time": "2026-05-19 09:30:00", "time": "2026-05-19 09:30:00", "open": 70.0, "close": 70.0, "high": 70.0, "low": 70.0, "vol": 1819.0, "amount": 12733000.0, "pre_close": 70.61},
+        {"ts_code": "000977.SZ", "normalized_ts_code": "000977.SZ", "code": "000977", "trade_time": "2026-05-19 11:30:00", "time": "2026-05-19 11:30:00", "open": 68.94, "close": 68.93, "high": 68.96, "low": 68.92, "vol": 386711.0, "amount": 11969119.0, "pre_close": 70.61},
+    ])
+
+    class FakeSelector:
+        def prepare_df(self, df: pd.DataFrame) -> pd.DataFrame:
+            prepared = df.copy()
+            prepared["_vec_pick"] = [False] * (len(prepared) - 1) + [True]
+            prepared["J"] = [10.0] * len(prepared)
+            prepared["zxdq"] = [2.0] * len(prepared)
+            prepared["zxdkx"] = [1.0] * len(prepared)
+            prepared["wma_bull"] = [True] * len(prepared)
+            return prepared
+
+    with patch("app.api.analysis.ensure_tushare_ready_if_configured", return_value=None), \
+         patch("app.services.intraday_analysis_service.IntradayAnalysisService.now_shanghai", return_value=fake_now), \
+         patch("app.services.intraday_analysis_service.TushareService") as mock_tushare_cls, \
+         patch("app.services.intraday_analysis_service.IntradayAnalysisService._fetch_eastmoney_trends", return_value=minute_rows), \
+         patch("app.services.intraday_analysis_service.IntradayAnalysisService._fetch_tencent_minute_trends", return_value=pd.DataFrame()), \
+         patch("app.services.intraday_analysis_service.analysis_service.load_stock_data") as mock_load_stock_data, \
+         patch("app.services.intraday_analysis_service.analysis_service._build_b1_selector", return_value=FakeSelector()), \
+         patch("app.services.intraday_analysis_service.analysis_service._quant_review_for_date", return_value={"score": 5.8, "verdict": "PASS", "signal_type": "trend_start", "comment": "ok", "signal_reasoning": None, "scores": {}, "trend_reasoning": None, "position_reasoning": None, "volume_reasoning": None, "abnormal_move_reasoning": None}):
+        mock_service = MagicMock()
+        mock_service.pro.index_daily.return_value = fake_index_daily
+        mock_service.pro.rt_k.return_value = pd.DataFrame()
+        mock_tushare_cls.return_value = mock_service
+        mock_load_stock_data.return_value = pd.DataFrame(
+            [
+                {
+                    "date": row.trade_date,
+                    "open": row.open,
+                    "close": row.close,
+                    "high": row.high,
+                    "low": row.low,
+                    "volume": row.volume,
+                }
+                for row in db.query(StockDaily).filter(StockDaily.code == "000977").order_by(StockDaily.trade_date.asc()).all()
+            ]
+        )
+
+        response = test_client_with_db.post("/api/v1/analysis/intraday/generate?date=2026-05-19")
+
+    assert response.status_code == 200
+    row = db.query(IntradayAnalysisSnapshot).filter(IntradayAnalysisSnapshot.trade_date == trade_date).one()
+    assert row.details_json["turnover_rate"] == 3.927
+    assert row.details_json["volume_ratio"] == 0.8357
+    assert row.details_json["turnover_rate"] != 4.4509
+    assert row.details_json["volume_ratio"] != 0.66

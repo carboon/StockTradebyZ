@@ -519,14 +519,23 @@ def test_generate_current_hot_creates_daily_rows(test_client_with_db: Any) -> No
 def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any) -> None:
     trade_date = date(2026, 5, 8)
     _seed_stock_history(test_client_with_db, "600000", trade_date, days=90, base=10.0)
-    latest_daily = (
+    previous_daily = (
         test_client_with_db.db.query(StockDaily)
-        .filter(StockDaily.code == "600000", StockDaily.trade_date == trade_date)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
         .first()
     )
-    if latest_daily is not None:
-        latest_daily.turnover_rate = 8.2
-        latest_daily.volume_ratio = 2.4
+    if previous_daily is not None:
+        previous_daily.free_share = 100000.0
+    recent_rows = (
+        test_client_with_db.db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(recent_rows, [108500.0, 108400.0, 108300.0, 108200.0, 108100.0]):
+        row.volume = volume
     test_client_with_db.db.add(
         CurrentHotAnalysisResult(
             pick_date=trade_date,
@@ -638,8 +647,9 @@ def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any
     assert row.code == "600000"
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
-    assert row.details_json["turnover_rate"] == 8.2
-    assert row.details_json["volume_ratio"] == 2.4
+    assert row.details_json["turnover_rate"] == 2.5
+    assert row.details_json["volume_ratio"] == 4.6168
+    assert row.details_json["intraday_metrics"]["elapsed_ratio"] == 0.5
     assert row.details_json["active_pool_rank"] == 12
 
 
@@ -696,6 +706,23 @@ def test_generate_current_hot_intraday_rebuilds_from_local_raw_cache(
     trade_date = date(2026, 5, 8)
     monkeypatch.setattr(settings, "intraday_raw_data_dir", tmp_path / "raw_intraday")
     _seed_stock_history(test_client_with_db, "600000", trade_date, days=90, base=10.0)
+    previous_daily = (
+        test_client_with_db.db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .first()
+    )
+    if previous_daily is not None:
+        previous_daily.free_share = 100000.0
+    recent_rows = (
+        test_client_with_db.db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(recent_rows, [108500.0, 108400.0, 108300.0, 108200.0, 108100.0]):
+        row.volume = volume
     test_client_with_db.db.add(
         CurrentHotAnalysisResult(
             pick_date=trade_date,
@@ -826,6 +853,8 @@ def test_generate_current_hot_intraday_rebuilds_from_local_raw_cache(
     )
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert row.details_json["turnover_rate"] == 2.5
+    assert row.details_json["volume_ratio"] == 4.6168
 
 
 def test_prefetch_current_hot_intraday_downloads_raw_data_for_pool_and_benchmarks(
@@ -894,6 +923,23 @@ def test_generate_current_hot_intraday_falls_back_to_tencent_minute_data(
     trade_date = date(2026, 5, 8)
     monkeypatch.setattr(settings, "intraday_raw_data_dir", tmp_path / "raw_intraday")
     _seed_stock_history(test_client_with_db, "600000", trade_date, days=90, base=10.0)
+    previous_daily = (
+        test_client_with_db.db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .first()
+    )
+    if previous_daily is not None:
+        previous_daily.free_share = 100000.0
+    recent_rows = (
+        test_client_with_db.db.query(StockDaily)
+        .filter(StockDaily.code == "600000", StockDaily.trade_date < trade_date)
+        .order_by(StockDaily.trade_date.desc())
+        .limit(5)
+        .all()
+    )
+    for row, volume in zip(recent_rows, [108500.0, 108400.0, 108300.0, 108200.0, 108100.0]):
+        row.volume = volume
     test_client_with_db.db.add(
         CurrentHotAnalysisResult(
             pick_date=trade_date,
@@ -984,4 +1030,6 @@ def test_generate_current_hot_intraday_falls_back_to_tencent_minute_data(
     )
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert row.details_json["turnover_rate"] == 2.5
+    assert row.details_json["volume_ratio"] == 4.6168
     assert (tmp_path / "raw_intraday" / "2026-05-08" / "tencent" / "600000.SH.json").exists()
