@@ -360,33 +360,6 @@
                       </el-tag>
                     </div>
                     <div class="header-actions">
-                      <div
-                        v-if="showTomorrowStarIndustryFilter"
-                        class="industry-filter-bar"
-                        role="group"
-                        aria-label="板块过滤"
-                      >
-                        <button
-                          type="button"
-                          class="industry-filter-chip"
-                          :class="{ active: selectedTomorrowStarIndustries.length === 0 }"
-                          :aria-pressed="selectedTomorrowStarIndustries.length === 0"
-                          @click="clearTomorrowStarIndustryFilter"
-                        >
-                          全部:{{ tomorrowStarMergedCandidates.length }}
-                        </button>
-                        <button
-                          v-for="option in tomorrowStarIndustryOptions"
-                          :key="option.name"
-                          type="button"
-                          class="industry-filter-chip"
-                          :class="{ active: selectedTomorrowStarIndustries.includes(option.name) }"
-                          :aria-pressed="selectedTomorrowStarIndustries.includes(option.name)"
-                          @click="toggleTomorrowStarIndustry(option.name)"
-                        >
-                          {{ option.name }}:{{ option.count }}
-                        </button>
-                      </div>
                       <el-tag v-if="activeShowCachedHint" type="info" size="small" effect="plain">
                         已展示缓存结果
                       </el-tag>
@@ -412,6 +385,34 @@
                     </div>
                   </div>
                 </template>
+
+                <div
+                  v-if="showTomorrowStarIndustryFilter"
+                  class="industry-filter-panel"
+                  role="group"
+                  aria-label="板块过滤"
+                >
+                  <button
+                    type="button"
+                    class="industry-filter-chip"
+                    :class="{ active: selectedTomorrowStarIndustries.length === 0 }"
+                    :aria-pressed="selectedTomorrowStarIndustries.length === 0"
+                    @click="clearTomorrowStarIndustryFilter"
+                  >
+                    全部:{{ tomorrowStarMergedCandidates.length }}
+                  </button>
+                  <button
+                    v-for="option in tomorrowStarIndustryOptions"
+                    :key="option.name"
+                    type="button"
+                    class="industry-filter-chip"
+                    :class="{ active: selectedTomorrowStarIndustries.includes(option.name) }"
+                    :aria-pressed="selectedTomorrowStarIndustries.includes(option.name)"
+                    @click="toggleTomorrowStarIndustry(option.name)"
+                  >
+                    {{ option.name }}:{{ option.count }}
+                  </button>
+                </div>
 
                 <div v-if="activeCandidateSortLabel" class="sort-hint">
                   当前排序：{{ activeCandidateSortLabel }}
@@ -4074,17 +4075,16 @@ $space-lg: 32px;
     }
   }
 
-  .industry-filter-bar {
-    flex: 1 1 420px;
-    min-width: 260px;
-    max-width: 100%;
+  .industry-filter-panel {
     display: flex;
     align-items: center;
-    justify-content: flex-start;
+    flex-wrap: wrap;
     gap: 6px;
-    overflow-x: auto;
-    padding: 1px 2px 3px;
-    scrollbar-width: thin;
+    margin-bottom: $space-xs;
+    padding: 8px;
+    border: 1px solid #ebeef5;
+    border-radius: 6px;
+    background: #fafafa;
   }
 
   .industry-filter-chip {
