@@ -83,8 +83,9 @@ function mockStatus({ initialized = true } = {}) {
 }
 
 const latestCandidates = [
-  { code: '600000', name: '浦发银行', kdj_j: 25, close_price: 10.5, turnover_rate: 1.2, volume_ratio: 1.1 },
-  { code: '000001', name: '平安银行', kdj_j: 12, close_price: 12.2, turnover_rate: 0.8, volume_ratio: 0.9 },
+  { code: '600000', name: '浦发银行', industry: '银行', kdj_j: 25, close_price: 10.5, turnover_rate: 1.2, volume_ratio: 1.1 },
+  { code: '000001', name: '平安银行', industry: '银行', kdj_j: 12, close_price: 12.2, turnover_rate: 0.8, volume_ratio: 0.9 },
+  { code: '002222', name: '福晶科技', industry: '元器件', kdj_j: 18, close_price: 22.2, turnover_rate: 2.3, volume_ratio: 1.4 },
 ]
 
 const latestResults = [
@@ -314,11 +315,32 @@ describe('TomorrowStar.vue', () => {
     await flushPromises()
 
     expect(wrapper.vm.historyData).toHaveLength(2)
-    expect(wrapper.vm.latestCandidates).toHaveLength(2)
+    expect(wrapper.vm.latestCandidates).toHaveLength(3)
     expect(wrapper.vm.latestAnalysisResults).toHaveLength(4)
     expect(wrapper.vm.latestDate).toBe('2024-01-15')
     expect(apiAnalysis.getCandidates).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiAnalysis.getResults).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  })
+
+  it('builds tomorrow-star industry chips and filters candidates by selected industries', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.vm.tomorrowStarIndustryOptions).toEqual([
+      { name: '银行', count: 2 },
+      { name: '元器件', count: 1 },
+    ])
+
+    wrapper.vm.toggleTomorrowStarIndustry('元器件')
+    await flushPromises()
+
+    expect(wrapper.vm.activeTotalLatestCandidates).toBe(1)
+    expect(wrapper.vm.activeDisplayLatestCandidates.map((item: { code: string }) => item.code)).toEqual(['002222'])
+
+    wrapper.vm.clearTomorrowStarIndustryFilter()
+    await flushPromises()
+
+    expect(wrapper.vm.activeTotalLatestCandidates).toBe(3)
   })
 
   it('shows market regime explanation when tomorrow-star candidates are blocked by market conditions', async () => {
@@ -816,7 +838,7 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.getMiddayRelativeMarketBrief(row)).toContain('强于大盘')
     expect(wrapper.vm.getMiddayPreviousAnalysisBrief(row)).toContain('昨日 通过')
     expect(wrapper.vm.getMiddayRowComment(row)).toContain('持仓建议：')
-    expect(wrapper.vm.getMiddayRowComment(row)).toContain('下午可继续持有')
+    expect(wrapper.vm.getMiddayRowComment(row)).toContain('可继续持有')
     expect(wrapper.vm.formatActivePoolRank(row.active_pool_rank)).toBe('16')
     expect(wrapper.vm.formatTurnoverRate(row.turnover_rate)).toBe('5.60%')
     expect(wrapper.vm.formatVolumeRatio(row.volume_ratio)).toBe('1.80')

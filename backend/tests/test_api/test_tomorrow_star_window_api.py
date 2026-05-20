@@ -53,6 +53,21 @@ def test_get_tomorrow_star_dates_exposes_market_regime_block_reason(test_client_
     assert data["window_status"]["history"][0]["market_regime_info"]["details"] == ["中证 500 趋势偏弱", "创业板指量价配合不足"]
 
 
+def test_get_tomorrow_star_candidates_exposes_stock_industry(test_client_with_db):
+    db = test_client_with_db.db
+    pick_date = date(2024, 1, 3)
+    db.add(Stock(code="000001", name="PingAn", industry="银行"))
+    db.add(StockDaily(code="000001", trade_date=pick_date, open=10, close=11, high=11, low=9, volume=100))
+    db.add(Candidate(pick_date=pick_date, code="000001", strategy="b1", close_price=11))
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/tomorrow-star/candidates?date=2024-01-03")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["candidates"][0]["code"] == "000001"
+    assert data["candidates"][0]["industry"] == "银行"
+
+
 def test_get_tomorrow_star_results_reads_db(test_client_with_db):
     db = test_client_with_db.db
     db.add(Stock(code="000001", name="PingAn"))

@@ -25,6 +25,7 @@ export interface Candidate {
   pick_date: string
   code: string
   name?: string
+  industry?: string | null
   strategy?: string
   open_price?: number
   close_price?: number

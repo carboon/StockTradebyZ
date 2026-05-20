@@ -316,6 +316,7 @@ class CandidateService:
                 Candidate.kdj_j,
                 Candidate.consecutive_days,
                 Stock.name,
+                Stock.industry,
                 StockDaily.open.label("open_price"),
                 StockDaily.close.label("daily_close_price"),
                 StockDaily.turnover_rate,
@@ -369,6 +370,7 @@ class CandidateService:
             candidates.append({
                 "code": row.code,
                 "name": row.name,
+                "industry": row.industry,
                 "strategy": row.strategy,
                 "open": open_price,
                 "close": close_price,

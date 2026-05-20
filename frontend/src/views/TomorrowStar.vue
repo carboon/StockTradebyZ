@@ -99,7 +99,7 @@
                   </div>
                   <div class="mobile-history-item__meta">
                     <span v-if="!isCurrentHotTab">候选数 {{ row.count === '-' ? '-' : row.count }}</span>
-                    <span>趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
+                    <span v-if="isCurrentHotTab">趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
                     <span v-if="isCurrentHotTab">B1通过数 {{ row.b1PassCount === '-' ? '-' : row.b1PassCount }}</span>
                     <span v-if="!isCurrentHotTab">明日之星 {{ row.tomorrowStarCount === '-' ? '-' : row.tomorrowStarCount }}</span>
                   </div>
@@ -286,13 +286,13 @@
                   :current-row-key="activeSelectedDate"
                   row-key="rawDate"
                 >
-                  <el-table-column prop="date" label="时间" :min-width="isCurrentHotTab ? 150 : 118" />
-                  <el-table-column v-if="!isCurrentHotTab" prop="count" label="候选" width="64" align="center">
+                  <el-table-column prop="date" label="时间" :min-width="isCurrentHotTab ? 150 : 108" />
+                  <el-table-column v-if="!isCurrentHotTab" prop="count" label="候选" width="54" align="center">
                     <template #default="{ row }">
                       {{ row.count === '-' ? '-' : row.count }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="pass" label="启动" :min-width="isCurrentHotTab ? 82 : 64" align="center">
+                  <el-table-column v-if="isCurrentHotTab" prop="pass" label="启动" min-width="82" align="center">
                     <template #default="{ row }">
                       <el-button
                         v-if="row.pass !== '-' && row.pass > 0"
@@ -314,7 +314,7 @@
                       <span v-else>-</span>
                     </template>
                   </el-table-column>
-                  <el-table-column v-if="!isCurrentHotTab" prop="tomorrowStarCount" label="星" width="58" align="center">
+                  <el-table-column v-if="!isCurrentHotTab" prop="tomorrowStarCount" label="星" width="46" align="center">
                     <template #default="{ row }">
                       <el-button
                         v-if="row.tomorrowStarCount !== '-' && row.tomorrowStarCount > 0"
@@ -360,6 +360,33 @@
                       </el-tag>
                     </div>
                     <div class="header-actions">
+                      <div
+                        v-if="showTomorrowStarIndustryFilter"
+                        class="industry-filter-bar"
+                        role="group"
+                        aria-label="板块过滤"
+                      >
+                        <button
+                          type="button"
+                          class="industry-filter-chip"
+                          :class="{ active: selectedTomorrowStarIndustries.length === 0 }"
+                          :aria-pressed="selectedTomorrowStarIndustries.length === 0"
+                          @click="clearTomorrowStarIndustryFilter"
+                        >
+                          全部:{{ tomorrowStarMergedCandidates.length }}
+                        </button>
+                        <button
+                          v-for="option in tomorrowStarIndustryOptions"
+                          :key="option.name"
+                          type="button"
+                          class="industry-filter-chip"
+                          :class="{ active: selectedTomorrowStarIndustries.includes(option.name) }"
+                          :aria-pressed="selectedTomorrowStarIndustries.includes(option.name)"
+                          @click="toggleTomorrowStarIndustry(option.name)"
+                        >
+                          {{ option.name }}:{{ option.count }}
+                        </button>
+                      </div>
                       <el-tag v-if="activeShowCachedHint" type="info" size="small" effect="plain">
                         已展示缓存结果
                       </el-tag>
@@ -410,7 +437,7 @@
                   size="small"
                   @sort-change="handleCandidateSortChange"
                 >
-                  <el-table-column prop="code" label="代码" width="72" sortable="custom" :sort-orders="candidateSortOrders" />
+                  <el-table-column prop="code" label="代码" width="68" sortable="custom" :sort-orders="candidateSortOrders" />
                   <el-table-column prop="name" label="名称" width="76" sortable="custom" :sort-orders="candidateSortOrders" show-overflow-tooltip>
                     <template #default="{ row }">
                       <span class="stock-name-cell">{{ row.name || row.code }}</span>
@@ -437,14 +464,19 @@
                       </el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column v-if="!isCurrentHotTab" prop="signal_type" label="信号" width="88" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column v-if="!isCurrentHotTab" prop="industry" label="板块" width="92" sortable="custom" :sort-orders="candidateSortOrders" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ getCandidateIndustryLabel(row) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="!isCurrentHotTab" prop="signal_type" label="信号" width="78" align="center" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                         {{ getSignalTypeLabel(row.signal_type) }}
                       </el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column v-if="!isCurrentHotTab" prop="total_score" label="评分" width="62" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column v-if="!isCurrentHotTab" prop="total_score" label="评分" width="58" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       <el-tag :type="getScoreType(row.total_score)" size="small">
                         {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
@@ -463,39 +495,39 @@
                       {{ formatActivePoolRank(row.active_pool_rank) }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="open_price" label="开盘" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column prop="open_price" label="开盘" width="60" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ typeof row.open_price === 'number' ? row.open_price.toFixed(2) : '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="close_price" label="收盘" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column prop="close_price" label="收盘" width="60" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ typeof row.close_price === 'number' ? row.close_price.toFixed(2) : '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="change_pct" label="涨跌" width="68" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column prop="change_pct" label="涨跌" width="62" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
                         {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
                       </span>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="turnover_rate" label="换手" width="64" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column prop="turnover_rate" label="换手" width="60" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ formatTurnoverRate(row.turnover_rate) }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="volume_ratio" label="量比" width="56" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column prop="volume_ratio" label="量比" width="50" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ formatVolumeRatio(row.volume_ratio) }}
                     </template>
                   </el-table-column>
-                  <el-table-column v-if="!isCurrentHotTab" prop="active_pool_rank" label="活跃" width="60" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column v-if="!isCurrentHotTab" prop="active_pool_rank" label="活跃" width="54" align="center" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ formatActivePoolRank(row.active_pool_rank) }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="kdj_j" label="KDJ" width="58" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column prop="kdj_j" label="KDJ" width="52" align="right" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #default="{ row }">
                       {{ typeof row.kdj_j === 'number' ? row.kdj_j.toFixed(1) : '-' }}
                     </template>
@@ -505,7 +537,7 @@
                       {{ getCurrentHotBoardLabel(row) }}
                     </template>
                   </el-table-column>
-                  <el-table-column v-else prop="consecutive_days" width="58" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                  <el-table-column v-else prop="consecutive_days" width="50" align="center" sortable="custom" :sort-orders="candidateSortOrders">
                     <template #header>
                       <el-tooltip content="连续通过B1规则筛选的天数" placement="top">
                         <span class="table-header-help">连续</span>
@@ -1214,6 +1246,7 @@ type CandidateSortProp =
   | 'volume_ratio'
   | 'active_pool_rank'
   | 'kdj_j'
+  | 'industry'
   | 'b1_passed'
   | 'signal_type'
   | 'total_score'
@@ -1261,7 +1294,11 @@ let candidatesRequestId = 0
 let currentHotLoadDataRequestId = 0
 let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v11'
+const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v12'
+const TOMORROW_STAR_LEGACY_CACHE_KEYS = [
+  'stocktrade:tomorrow-star:cache:v11',
+  'stocktrade:tomorrow-star:cache:v10',
+]
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
 let incrementalPollTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
@@ -1276,6 +1313,7 @@ const loadingMiddayAction = ref(false)
 const currentHotLoaded = ref(false)
 const currentHotHydratedFromCache = ref(false)
 const currentHotBoardFilter = ref<BoardFilter>('all')
+const selectedTomorrowStarIndustries = ref<string[]>([])
 const middaySource = ref<MiddaySourceKey>('tomorrow-star')
 
 const middayStatus = ref<IntradayAnalysisStatusResponse>({
@@ -1556,6 +1594,7 @@ const activeCandidateSortLabel = computed(() => {
     volume_ratio: '量比',
     active_pool_rank: '活跃排名',
     kdj_j: 'KDJ',
+    industry: '板块',
     b1_passed: 'B1',
     signal_type: '信号',
     total_score: '评分',
@@ -1590,10 +1629,33 @@ const displayCurrentHotHistoryData = computed(() => {
   return currentHotHistoryData.value.slice(start, start + historyPageSize.value)
 })
 
-const totalLatestCandidates = computed(() => latestCandidates.value.length)
+const tomorrowStarMergedCandidates = computed(() => latestCandidates.value.map(mergeTomorrowStarCandidateAnalysis))
+const tomorrowStarIndustryOptions = computed(() => {
+  const counts = new Map<string, number>()
+  tomorrowStarMergedCandidates.value.forEach((candidate) => {
+    const industry = getCandidateIndustryLabel(candidate)
+    if (!industry || industry === '-') return
+    counts.set(industry, (counts.get(industry) || 0) + 1)
+  })
+
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name, 'zh-Hans-CN'))
+})
+const showTomorrowStarIndustryFilter = computed(() => !isCurrentHotTab.value && tomorrowStarIndustryOptions.value.length > 0)
+const tomorrowStarFilteredCandidates = computed(() => {
+  const selected = new Set(selectedTomorrowStarIndustries.value)
+  if (selected.size === 0) return tomorrowStarMergedCandidates.value
+  return tomorrowStarMergedCandidates.value.filter((candidate) => selected.has(getCandidateIndustryLabel(candidate)))
+})
+const totalLatestCandidates = computed(() => tomorrowStarFilteredCandidates.value.length)
 const displayLatestCandidates = computed(() => {
+  const pageCount = Math.max(1, Math.ceil(totalLatestCandidates.value / candidatePageSize))
+  if (latestCandidatePage.value > pageCount) {
+    latestCandidatePage.value = pageCount
+  }
   const start = (latestCandidatePage.value - 1) * candidatePageSize
-  const sorted = sortTomorrowStarCandidates(latestCandidates.value.map(mergeTomorrowStarCandidateAnalysis))
+  const sorted = sortTomorrowStarCandidates(tomorrowStarFilteredCandidates.value)
   return sorted.slice(start, start + candidatePageSize)
 })
 
@@ -1657,6 +1719,7 @@ function getCandidateSortState(): CandidateSortState {
 function getCandidateSortableValue(row: Candidate | CurrentHotCandidate, prop: CandidateSortProp): number | string | boolean | null {
   if (prop === 'code') return row.code
   if (prop === 'name') return row.name || ''
+  if (prop === 'industry') return 'industry' in row ? getCandidateIndustryLabel(row as Candidate) : ''
   if (prop === 'b1_passed') return row.b1_passed ?? null
   if (prop === 'signal_type' && 'signal_type' in row) return getSignalSortableValue(row.signal_type)
   if (prop === 'total_score' && 'total_score' in row) return toFiniteNumber(row.total_score)
@@ -1723,6 +1786,28 @@ function sortTomorrowStarCandidates(rows: Candidate[]): Candidate[] {
   })
 }
 
+function getCandidateIndustryLabel(candidate: Pick<Candidate, 'industry'>): string {
+  const industry = typeof candidate.industry === 'string' ? candidate.industry.trim() : ''
+  return industry || '-'
+}
+
+function toggleTomorrowStarIndustry(industry: string) {
+  const value = industry.trim()
+  if (!value) return
+  const current = selectedTomorrowStarIndustries.value
+  selectedTomorrowStarIndustries.value = current.includes(value)
+    ? current.filter((item) => item !== value)
+    : [...current, value]
+  latestCandidatePage.value = 1
+  persistTomorrowStarCache()
+}
+
+function clearTomorrowStarIndustryFilter() {
+  selectedTomorrowStarIndustries.value = []
+  latestCandidatePage.value = 1
+  persistTomorrowStarCache()
+}
+
 function compareCurrentHotCandidates(a: CurrentHotCandidate, b: CurrentHotCandidate): number {
   return compareByCandidateSort(a, b, () => getCurrentHotDefaultSort(a, b))
 }
@@ -1754,6 +1839,7 @@ function normalizeCandidateSortState(value: unknown): CandidateSortState {
     'volume_ratio',
     'active_pool_rank',
     'kdj_j',
+    'industry',
     'b1_passed',
     'signal_type',
     'total_score',
@@ -3626,6 +3712,7 @@ function persistTomorrowStarCache() {
     historyPage: historyPage.value,
     latestCandidatePage: latestCandidatePage.value,
     candidateSort: candidateSort.value,
+    selectedTomorrowStarIndustries: selectedTomorrowStarIndustries.value,
     lastHistorySignature: lastHistorySignature.value,
     freshnessVersion: freshnessVersion.value,
     currentHotHistoryData: currentHotHistoryData.value,
@@ -3650,7 +3737,9 @@ function persistTomorrowStarCache() {
 function hydrateTomorrowStarCache() {
   if (typeof window === 'undefined') return
 
-  const raw = sessionStorage.getItem(TOMORROW_STAR_CACHE_KEY)
+  const cacheKey = [TOMORROW_STAR_CACHE_KEY, ...TOMORROW_STAR_LEGACY_CACHE_KEYS]
+    .find((key) => sessionStorage.getItem(key))
+  const raw = cacheKey ? sessionStorage.getItem(cacheKey) : null
   if (!raw) return
 
   try {
@@ -3679,6 +3768,11 @@ function hydrateTomorrowStarCache() {
     historyPage.value = Math.max(1, Number(payload.historyPage) || 1)
     latestCandidatePage.value = Math.max(1, Number(payload.latestCandidatePage) || 1)
     candidateSort.value = normalizeCandidateSortState(payload.candidateSort)
+    selectedTomorrowStarIndustries.value = Array.isArray(payload.selectedTomorrowStarIndustries)
+      ? payload.selectedTomorrowStarIndustries
+        .map((item: unknown) => String(item || '').trim())
+        .filter((item: string) => item.length > 0)
+      : []
     lastHistorySignature.value = payload.lastHistorySignature || ''
     freshnessVersion.value = payload.freshnessVersion || ''
     currentHotHistoryData.value = (payload.currentHotHistoryData || []).map((item: any) => ({
@@ -3735,7 +3829,9 @@ function hydrateTomorrowStarCache() {
     currentHotHydratedFromCache.value = currentHotHistoryData.value.length > 0 || currentHotLatestCandidates.value.length > 0
     currentHotLoaded.value = currentHotHydratedFromCache.value
   } catch {
-    sessionStorage.removeItem(TOMORROW_STAR_CACHE_KEY)
+    if (cacheKey) {
+      sessionStorage.removeItem(cacheKey)
+    }
   }
 }
 
@@ -3813,6 +3909,15 @@ watch(canUseMiddayAnalysis, (allowed) => {
 watch(currentHotBoardFilter, () => {
   currentHotCandidatePage.value = 1
   currentHotAnalysisPage.value = 1
+})
+
+watch(tomorrowStarIndustryOptions, (options) => {
+  const available = new Set(options.map((option) => option.name))
+  const nextSelected = selectedTomorrowStarIndustries.value.filter((item) => available.has(item))
+  if (nextSelected.length !== selectedTomorrowStarIndustries.value.length) {
+    selectedTomorrowStarIndustries.value = nextSelected
+  }
+  latestCandidatePage.value = 1
 })
 
 watch(signalReturnDialogVisible, (visible) => {
@@ -3939,12 +4044,13 @@ $space-lg: 32px;
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: $space-xs;
+      min-width: 0;
     }
   }
 
   .top-grid {
     display: grid;
-    grid-template-columns: clamp(400px, 25vw, 460px) minmax(0, 1fr);
+    grid-template-columns: clamp(208px, 13vw, 240px) minmax(0, 1fr);
     gap: 16px;
     align-items: stretch;
     min-height: calc(100vh - 174px);
@@ -3965,6 +4071,46 @@ $space-lg: 32px;
     :deep(.el-radio-group__item),
     :deep(.el-radio-button__inner) {
       border-radius: 4px;
+    }
+  }
+
+  .industry-filter-bar {
+    flex: 1 1 420px;
+    min-width: 260px;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 1px 2px 3px;
+    scrollbar-width: thin;
+  }
+
+  .industry-filter-chip {
+    flex: 0 0 auto;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    background: #fff;
+    color: #606266;
+    font-size: 12px;
+    line-height: 20px;
+    padding: 0 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+
+    &:hover {
+      color: #409eff;
+      border-color: #a0cfff;
+      background: #ecf5ff;
+    }
+
+    &.active {
+      color: #1d4ed8;
+      border-color: #409eff;
+      background: #ecf5ff;
+      font-weight: 600;
     }
   }
 

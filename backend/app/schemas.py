@@ -78,6 +78,7 @@ class CandidateItem(BaseModel):
     pick_date: date_class
     code: str
     name: Optional[str] = None
+    industry: Optional[str] = None
     strategy: Optional[str] = None
     open_price: Optional[float] = None
     close_price: Optional[float] = None

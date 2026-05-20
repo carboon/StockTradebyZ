@@ -496,7 +496,7 @@ async def get_candidates(
     import pandas as pd
 
     requested_date = analysis_service._normalize_pick_date(date)
-    cache_key = f"{build_candidates_cache_key(requested_date, limit)}:market-metrics-v3"
+    cache_key = f"{build_candidates_cache_key(requested_date, limit)}:market-metrics-v4"
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         return CandidatesResponse(**cached_result)
@@ -536,6 +536,7 @@ async def get_candidates(
                         pick_date=response_pick_date,
                         code=c["code"],
                         name=c.get("name"),
+                        industry=c.get("industry"),
                         strategy=c.get("strategy") or "b1",
                         open_price=c.get("open"),
                         close_price=c.get("close"),
