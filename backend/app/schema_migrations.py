@@ -162,6 +162,13 @@ def _watchlist_entry_date_migration_satisfied(inspector: Any) -> bool:
     return _has_column(inspector, "watchlist", "entry_date")
 
 
+def _daily_b1_signal_type_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_column(inspector, "daily_b1_checks", "b1_signal_type")
+        and _has_index(inspector, "daily_b1_checks", "ix_daily_b1_checks_signal_type")
+    )
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
@@ -175,6 +182,7 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_daily_b1_check_market_metrics.sql": _daily_b1_check_market_metrics_migration_satisfied,
     "add_stock_active_pool_ranks.sql": _active_pool_rank_migration_satisfied,
     "add_watchlist_entry_date.sql": _watchlist_entry_date_migration_satisfied,
+    "add_b1_signal_type.sql": _daily_b1_signal_type_migration_satisfied,
 }
 
 

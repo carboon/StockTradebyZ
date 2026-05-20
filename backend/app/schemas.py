@@ -570,6 +570,7 @@ class B1CheckItem(BaseModel):
     volume_ratio: Optional[float] = None
     in_active_pool: Optional[bool] = None
     b1_passed: Optional[bool] = None
+    b1_signal_type: Optional[str] = None
     prefilter_passed: Optional[bool] = None
     prefilter_blocked_by: Optional[List[str]] = None
     score: Optional[float] = None
@@ -1197,3 +1198,39 @@ class SignalReturnAnalysisResponse(BaseModel):
     avg_day10_return: Optional[float] = None
     avg_day15_return: Optional[float] = None
     avg_current_return: Optional[float] = None
+
+
+# ==================== 概念板块相关 ====================
+class ConceptInfo(BaseModel):
+    """概念板块信息"""
+    concept_code: str
+    concept_name: str
+    concept_type: Optional[str] = None
+    start_date: Optional[str] = None
+
+
+class ConceptsResponse(BaseModel):
+    """概念板块列表响应"""
+    concepts: List[ConceptInfo]
+    total: int
+
+
+class StockConceptItem(BaseModel):
+    """股票概念板块项"""
+    ts_code: str
+    code: str
+    concepts: List[str] = Field(default_factory=list)
+
+
+class StockConceptsResponse(BaseModel):
+    """股票概念板块响应"""
+    stocks: Dict[str, List[str]]  # code -> concepts
+    total: int
+
+
+class ConceptMembersResponse(BaseModel):
+    """概念板块成分股响应"""
+    concept_code: str
+    concept_name: Optional[str] = None
+    members: List[Dict[str, Any]]
+    total: int

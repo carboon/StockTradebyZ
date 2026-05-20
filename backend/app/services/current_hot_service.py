@@ -681,9 +681,11 @@ class CurrentHotService:
             "score": None,
             "verdict": "FAIL" if frame is not None and not frame.empty else None,
             "signal_type": None,
+            "b1_signal_type": None,
             "comment": reason,
             "details_json": {
                 "comment": reason,
+                "b1_signal_type": None,
                 "scores": {},
                 "signal_reasoning": None,
                 "trend_reasoning": None,
@@ -706,7 +708,7 @@ class CurrentHotService:
             )
 
         try:
-            selector = analysis_service._build_b1_selector()
+            selector = analysis_service._build_hybrid_b1_selector()
             prepared = selector.prepare_df(frame.copy())
             if prepared.empty:
                 return self._build_fallback_snapshot(
@@ -724,6 +726,9 @@ class CurrentHotService:
             if open_price not in (None, 0) and close_price is not None:
                 change_pct = (close_price - open_price) / open_price * 100
 
+            b1_result = selector.check_b1(prepared, code)
+            b1_passed = bool(b1_result.get("b1_passed", False))
+            b1_signal_type = b1_result.get("b1_signal_type")
             score_result = analysis_service._quant_review_for_date(code, frame.copy(), trade_date.isoformat())
             prefilter_state: dict[str, Any] | None = None
             try:
@@ -743,7 +748,7 @@ class CurrentHotService:
                 "turnover": None,
                 "turnover_rate": self._safe_float(last_price_row.get("turnover_rate")),
                 "volume_ratio": self._safe_float(last_price_row.get("volume_ratio")),
-                "b1_passed": bool(last_row.get("_vec_pick", False)) if pd.notna(last_row.get("_vec_pick")) else False,
+                "b1_passed": b1_passed,
                 "kdj_j": self._safe_float(last_row.get("J")),
                 "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
                 "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
@@ -751,9 +756,11 @@ class CurrentHotService:
                 "score": score_result.get("score"),
                 "verdict": score_result.get("verdict"),
                 "signal_type": score_result.get("signal_type"),
+                "b1_signal_type": b1_signal_type,
                 "comment": score_result.get("comment"),
                 "details_json": {
                     "comment": score_result.get("comment"),
+                    "b1_signal_type": b1_signal_type,
                     "scores": score_result.get("scores") or {},
                     "signal_reasoning": score_result.get("signal_reasoning"),
                     "trend_reasoning": score_result.get("trend_reasoning"),

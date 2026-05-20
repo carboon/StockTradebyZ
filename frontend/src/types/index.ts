@@ -252,6 +252,7 @@ export interface B1Check {
   volume_ratio?: number | null
   in_active_pool?: boolean | null
   b1_passed?: boolean
+  b1_signal_type?: string | null
   prefilter_passed?: boolean | null
   prefilter_blocked_by?: string[] | null
   score?: number
@@ -635,6 +636,7 @@ export interface SectorAnalysisRow {
   code: string
   name?: string
   sector_names?: string[]
+  concepts?: string[]
   board_group?: string | null
   open_price?: number
   close_price?: number
@@ -819,6 +821,7 @@ interface DiagnosisAnalysisDetails {
   turnover_rate?: number | null
   volume_ratio?: number | null
   in_active_pool?: boolean | null
+  b1_signal_type?: string | null
   scores?: Record<string, number>
   trend_reasoning?: string
   position_reasoning?: string
@@ -1179,4 +1182,37 @@ export interface SignalReturnAnalysisResponse {
   avg_day10_return?: number | null
   avg_day15_return?: number | null
   avg_current_return?: number | null
+}
+
+// =====================
+// 概念板块相关类型
+// =====================
+
+export interface ConceptInfo {
+  concept_code: string
+  concept_name: string
+  concept_type?: string | null
+  start_date?: string | null
+}
+
+export interface ConceptsResponse {
+  concepts: ConceptInfo[]
+  total: number
+}
+
+export interface StockConceptsResponse {
+  stocks: Record<string, string[]>  // code -> concepts
+  total: number
+}
+
+export interface ConceptMembersResponse {
+  concept_code: string
+  concept_name?: string | null
+  members: Array<{
+    ts_code: string
+    name?: string
+    in_date?: string
+    out_date?: string
+  }>
+  total: number
 }

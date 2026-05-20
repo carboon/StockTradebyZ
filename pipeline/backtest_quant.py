@@ -29,8 +29,10 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pipeline"))
 sys.path.insert(0, str(ROOT / "agent"))
+sys.path.insert(0, str(ROOT / "backend"))
 
 from Selector import B1Selector, BrickChartSelector  # noqa: E402
+from app.services.hybrid_b1_selector import HybridB1Selector, HybridB1Config  # noqa: E402
 from pipeline_core import TopTurnoverPoolBuilder  # noqa: E402
 from select_stock import load_config as load_preselect_config, load_raw_data  # noqa: E402
 from quant_reviewer import (  # noqa: E402
@@ -47,6 +49,12 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("backtest_quant")
+
+
+def _attach_code_column(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    frame = df.copy()
+    frame["code"] = code
+    return frame
 
 
 def _calc_backtest_warmup(cfg: dict[str, Any]) -> int:
@@ -88,16 +96,17 @@ def _prepare_base_frames(
     return prepared
 
 
-def _build_b1_selector(cfg: dict[str, Any]) -> B1Selector:
-    b1 = cfg["b1"]
-    return B1Selector(
-        j_threshold=float(b1["j_threshold"]),
-        j_q_threshold=float(b1["j_q_threshold"]),
-        zx_m1=int(b1["zx_m1"]),
-        zx_m2=int(b1["zx_m2"]),
-        zx_m3=int(b1["zx_m3"]),
-        zx_m4=int(b1["zx_m4"]),
+def _build_b1_selector(cfg: dict[str, Any]) -> HybridB1Selector:
+    b1_cfg = cfg.get("b1", {})
+    config = HybridB1Config(
+        j_threshold=float(b1_cfg.get("j_threshold", 15.0)),
+        j_q_threshold=float(b1_cfg.get("j_q_threshold", 0.10)),
+        zx_m1=int(b1_cfg.get("zx_m1", 14)),
+        zx_m2=int(b1_cfg.get("zx_m2", 28)),
+        zx_m3=int(b1_cfg.get("zx_m3", 57)),
+        zx_m4=int(b1_cfg.get("zx_m4", 114)),
     )
+    return HybridB1Selector(config)
 
 
 def _build_brick_selector(cfg: dict[str, Any]) -> BrickChartSelector:
@@ -354,7 +363,7 @@ def run_backtest(
     events: list[dict[str, Any]] = []
 
     for code, base_df in tqdm(base_frames.items(), desc="滚动回测", ncols=90):
-        b1_frame = b1_selector.prepare_df(base_df)
+        b1_frame = b1_selector.prepare_df(_attach_code_column(base_df, code))
         brick_frame = brick_selector.prepare_df(base_df) if brick_selector is not None else None
 
         picked: dict[pd.Timestamp, str] = {}

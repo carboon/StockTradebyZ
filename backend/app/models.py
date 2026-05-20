@@ -357,6 +357,7 @@ class DailyB1Check(Base):
         UniqueConstraint("code", "check_date", name="uq_daily_b1_checks_code_check_date"),
         Index("ix_daily_b1_checks_code_check_date", "code", "check_date"),
         Index("ix_daily_b1_checks_check_date_code", "check_date", "code"),
+        Index("ix_daily_b1_checks_signal_type", "b1_signal_type"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -370,6 +371,7 @@ class DailyB1Check(Base):
     weekly_ma_aligned: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     volume_healthy: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     b1_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    b1_signal_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # old_b1/原始B1/回踩黄线B/回踩超级B
     active_pool_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     turnover_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

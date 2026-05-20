@@ -30,6 +30,9 @@ class TushareService:
     _data_status_cache: dict[str, tuple[float, dict]] = {}
     _data_status_cache_ttl = 300  # 5分钟缓存 - 数据只有在交易完成后才会更新
     _latest_trade_date_completion_threshold = 0.95
+    # 概念板块缓存（概念板块数据变化较慢，使用较长缓存时间）
+    _concept_list_cache: dict[str, tuple[float, List[dict]]] = {}
+    _stock_concepts_cache: dict[str, tuple[float, dict[str, List[str]]]] = {}
 
     def __init__(self, token: Optional[str] = None):
         if token is not None:
@@ -888,3 +891,112 @@ class TushareService:
         """清除数据状态缓存（在数据更新时调用）"""
         cls._data_status_cache.clear()
         cls._latest_data_ready_cache.clear()
+
+    def get_concept_list(self) -> List[dict]:
+        """获取概念板块列表
+
+        Returns:
+            概念板块列表，每个元素包含概念代码、概念名称等
+        """
+        cache_key = self.token or ""
+        if self._pro is None:
+            self._concept_list_cache.pop(cache_key, None)
+        cached = self._concept_list_cache.get(cache_key)
+        now = time.time()
+        if cached and now - cached[0] < 86400:  # 24小时缓存
+            return cached[1]
+
+        if not self.token:
+            return []
+
+        try:
+            acquire_tushare_slot("concept")
+            # 获取最近的概念板块
+            df = self.pro.concept(fields="ts_code,name,concept_type,start_date")
+            if df is None or df.empty:
+                self._concept_list_cache[cache_key] = (now, [])
+                return []
+
+            concepts = []
+            for _, row in df.iterrows():
+                concepts.append({
+                    "concept_code": row.get("ts_code", ""),
+                    "concept_name": row.get("name", ""),
+                    "concept_type": row.get("concept_type", ""),
+                    "start_date": row.get("start_date", ""),
+                })
+            self._concept_list_cache[cache_key] = (now, concepts)
+            return concepts
+        except Exception as e:
+            import logging
+            logging.getLogger("tushare_service").warning(f"获取概念板块列表失败: {e}")
+            return []
+
+    def get_stock_concepts(self, ts_code: str) -> List[str]:
+        """获取股票所属的概念板块列表
+
+        由于 tushare 没有直接接口，此方法返回空列表。
+        概念板块数据应通过 SectorAnalysisCandidate.sector_names_json 字段获取。
+
+        Args:
+            ts_code: 股票代码，格式如 000001.SZ
+
+        Returns:
+            概念板块名称列表
+        """
+        # tushare 没有直接获取股票所属概念的接口
+        # 需要通过 SectorAnalysisCandidate.sector_names_json 字段获取
+        return []
+
+    def get_stocks_concepts_batch(self, ts_codes: List[str]) -> dict[str, List[str]]:
+        """批量获取股票所属的概念板块
+
+        由于 tushare 没有直接接口，此方法返回空映射。
+        概念板块数据应通过 SectorAnalysisCandidate.sector_names_json 字段获取。
+
+        Args:
+            ts_codes: 股票代码列表
+
+        Returns:
+            股票代码到概念板块名称列表的映射
+        """
+        return {}
+
+    def get_stock_concept_members(self, concept_code: str) -> List[dict]:
+        """获取概念板块的成分股
+
+        Args:
+            concept_code: 概念板块代码
+
+        Returns:
+            成分股列表
+        """
+        if not self.token or not concept_code:
+            return []
+
+        try:
+            acquire_tushare_slot("concept")
+            # 使用 concept_list 接口获取概念成分股
+            df = self.pro.concept_list(ts_code=concept_code, fields="ts_code,name,in_date,out_date")
+            if df is None or df.empty:
+                return []
+
+            members = []
+            for _, row in df.iterrows():
+                members.append({
+                    "ts_code": row.get("ts_code", ""),
+                    "name": row.get("name", ""),
+                    "in_date": row.get("in_date", ""),
+                    "out_date": row.get("out_date", ""),
+                })
+            return members
+        except Exception as e:
+            import logging
+            logging.getLogger("tushare_service").warning(f"获取概念板块 {concept_code} 成分股失败: {e}")
+            return []
+
+    @classmethod
+    def clear_concept_cache(cls) -> None:
+        """清除概念板块缓存"""
+        cls._concept_list_cache.clear()
+        cls._stock_concepts_cache.clear()

@@ -131,6 +131,12 @@
                   </el-tag>
                 </div>
                 <div class="summary-tile">
+                  <span class="summary-label">B1信号</span>
+                  <el-tag :type="getB1SignalTagType(analysisResult.b1_signal_type)" size="small">
+                    {{ getB1SignalLabel(analysisResult.b1_signal_type) }}
+                  </el-tag>
+                </div>
+                <div class="summary-tile">
                   <span class="summary-label">活跃度排名</span>
                   <span class="value">{{ formatRank(analysisResult.active_pool_rank) }}</span>
                 </div>
@@ -168,6 +174,12 @@
                     </el-tag>
                   </div>
                   <div class="metric-card">
+                    <span class="metric-label">B1信号类型</span>
+                    <el-tag :type="getB1SignalTagType(analysisResult.b1_signal_type)" size="small">
+                      {{ getB1SignalLabel(analysisResult.b1_signal_type) }}
+                    </el-tag>
+                  </div>
+                  <div class="metric-card">
                     <span class="metric-label">活跃池状态</span>
                     <el-tag :type="getGateTagType(analysisResult.in_active_pool)" size="small">
                       {{ getGateLabel(analysisResult.in_active_pool) }}
@@ -198,6 +210,13 @@
                   <span class="label">B1检查</span>
                   <el-tag :type="analysisResult.b1_passed ? 'success' : 'danger'">
                     {{ analysisResult.b1_passed ? '通过' : '未通过' }}
+                  </el-tag>
+                </div>
+
+                <div class="analysis-item">
+                  <span class="label">B1信号类型</span>
+                  <el-tag :type="getB1SignalTagType(analysisResult.b1_signal_type)" size="small">
+                    {{ getB1SignalLabel(analysisResult.b1_signal_type) }}
                   </el-tag>
                 </div>
 
@@ -424,6 +443,7 @@
                 <el-tag type="info" size="small">排名 {{ formatRank(row.active_pool_rank) }}</el-tag>
                 <el-tag :type="getGateTagType(row.in_active_pool)" size="small">活跃池 {{ getGateLabel(row.in_active_pool) }}</el-tag>
                 <el-tag :type="getGateTagType(row.b1_passed)" size="small">B1 {{ getGateLabel(row.b1_passed) }}</el-tag>
+                <el-tag :type="getB1SignalTagType(row.b1_signal_type)" size="small">B1信号 {{ getB1SignalLabel(row.b1_signal_type) }}</el-tag>
                 <el-tag :type="getPrefilterTagType(row.prefilter_passed)" size="small">前置过滤 {{ getGateLabel(row.prefilter_passed) }}</el-tag>
                 <el-tag v-if="row.verdict" :type="getVerdictType(row.verdict)" size="small">{{ row.verdict }}</el-tag>
                 <el-tag v-if="row.signal_type" :type="getSignalTagType(row.signal_type)" size="small">
@@ -520,6 +540,13 @@
             <template #default="{ row }">
               <el-tag :type="getGateTagType(row.b1_passed)" size="small">
                 {{ getGateLabel(row.b1_passed) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="b1_signal_type" label="B1信号类型" width="120" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getB1SignalTagType(row.b1_signal_type)" size="small">
+                {{ getB1SignalLabel(row.b1_signal_type) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -680,6 +707,7 @@ const isInWatchlist = ref(false)
 type DiagnosisViewResult = {
   score?: number
   b1_passed?: boolean
+  b1_signal_type?: string | null
   verdict?: string
   signal_type?: string
   signal_reasoning?: string
@@ -949,6 +977,7 @@ function buildAnalysisResultFromHistory(row: B1Check): DiagnosisViewResult {
   return {
     score: row.score,
     b1_passed: row.b1_passed,
+    b1_signal_type: row.b1_signal_type || undefined,
     verdict: row.verdict,
     signal_type: row.signal_type || undefined,
     signal_reasoning: row.signal_reasoning,
@@ -1392,6 +1421,7 @@ async function checkAnalysisResult() {
       analysisResult.value = {
         score: data.score,
         b1_passed: data.b1_passed,
+        b1_signal_type: analysis.b1_signal_type,
         verdict: data.verdict,
         // 从 analysis 对象中获取所有字段
         signal_type: analysis.signal_type,
@@ -1571,6 +1601,28 @@ function getSignalTagType(signalType: string): string {
     'distribution_risk': 'danger',
     'prefilter_blocked': 'info',
   }
+  return types[signalType] || 'info'
+}
+
+function getB1SignalLabel(signalType?: string | null): string {
+  const labels: Record<string, string> = {
+    old_b1: '经典B1',
+    '原始B1': '原始B1',
+    '回踩黄线B': '回踩黄线B',
+    '回踩超级B': '回踩超级B',
+  }
+  if (!signalType) return '-'
+  return labels[signalType] || signalType
+}
+
+function getB1SignalTagType(signalType?: string | null): string {
+  const types: Record<string, string> = {
+    old_b1: 'success',
+    '原始B1': 'warning',
+    '回踩黄线B': 'info',
+    '回踩超级B': 'danger',
+  }
+  if (!signalType) return 'info'
   return types[signalType] || 'info'
 }
 

@@ -73,6 +73,10 @@ from app.schemas import (
     SignalReturnEventPoint,
     SignalReturnItem,
     SignalReturnTimelinePoint,
+    ConceptsResponse,
+    ConceptInfo,
+    StockConceptsResponse,
+    ConceptMembersResponse,
 )
 from pipeline.review_prefilter import TushareMetadataStore
 
@@ -215,6 +219,7 @@ def _get_latest_history_summary(db: Session, code: str) -> dict | None:
         "check_date": item.check_date.isoformat() if item.check_date else None,
         "close_price": item.close_price,
         "b1_passed": item.b1_passed,
+        "b1_signal_type": item.b1_signal_type,
         "score": item.score,
         "verdict": score_details.get("verdict"),
         "kdj_j": item.kdj_j,
@@ -1408,6 +1413,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
             "volume_ratio": latest_history.get("volume_ratio"),
             "in_active_pool": latest_history.get("in_active_pool"),
             "signal_type": latest_history.get("signal_type"),
+            "b1_signal_type": latest_history.get("b1_signal_type"),
         }
 
     return {
@@ -1428,6 +1434,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
             "turnover_rate": result_json.get("turnover_rate"),
             "volume_ratio": result_json.get("volume_ratio"),
             "in_active_pool": result_json.get("in_active_pool"),
+            "b1_signal_type": result_json.get("b1_signal_type"),
             "scores": result_json.get("scores"),
             "trend_reasoning": result_json.get("trend_reasoning"),
             "position_reasoning": result_json.get("position_reasoning"),
@@ -2063,4 +2070,100 @@ async def get_signal_returns(
         avg_day10_return=avg_day10_return,
         avg_day15_return=avg_day15_return,
         avg_current_return=avg_current_return,
+    )
+
+
+# ==================== 概念板块相关 API ====================
+
+@router.get("/concepts/list", response_model=ConceptsResponse)
+async def get_concepts_list(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ConceptsResponse:
+    """获取概念板块列表"""
+    ensure_tushare_ready()
+    service = TushareService()
+    concepts = service.get_concept_list()
+    return ConceptsResponse(
+        concepts=[ConceptInfo(**c) for c in concepts],
+        total=len(concepts),
+    )
+
+
+@router.get("/concepts/stock/{code}", response_model=StockConceptsResponse)
+async def get_stock_concepts(
+    code: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> StockConceptsResponse:
+    """获取股票所属的概念板块"""
+    ensure_tushare_ready()
+    code = code.zfill(6)
+
+    # 获取股票的 ts_code
+    stock = db.query(Stock).filter(Stock.code == code).first()
+    if not stock:
+        raise HTTPException(status_code=404, detail="股票不存在")
+
+    # 构建 ts_code
+    ts_code = f"{code}.{stock.market}" if stock.market else f"{code}.SZ"
+
+    service = TushareService()
+    concepts = service.get_stock_concepts(ts_code)
+
+    return StockConceptsResponse(
+        stocks={code: concepts},
+        total=len(concepts),
+    )
+
+
+@router.get("/concepts/batch", response_model=StockConceptsResponse)
+async def get_stocks_concepts_batch(
+    codes: str = Query(..., description="股票代码列表，逗号分隔"),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> StockConceptsResponse:
+    """批量获取股票所属的概念板块"""
+    ensure_tushare_ready()
+
+    code_list = [c.zfill(6) for c in codes.split(",") if c.strip()]
+    if not code_list:
+        return StockConceptsResponse(stocks={}, total=0)
+
+    # 获取股票的 ts_code 列表
+    stocks = db.query(Stock).filter(Stock.code.in_(code_list)).all()
+    stock_map = {s.code: s for s in stocks}
+
+    service = TushareService()
+    result: dict[str, List[str]] = {}
+
+    for code in code_list:
+        stock = stock_map.get(code)
+        if stock:
+            ts_code = f"{code}.{stock.market}" if stock.market else f"{code}.SZ"
+            concepts = service.get_stock_concepts(ts_code)
+            result[code] = concepts
+        else:
+            result[code] = []
+
+    total_concepts = sum(len(concepts) for concepts in result.values())
+    return StockConceptsResponse(stocks=result, total=total_concepts)
+
+
+@router.get("/concepts/{concept_code}/members", response_model=ConceptMembersResponse)
+async def get_concept_members(
+    concept_code: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ConceptMembersResponse:
+    """获取概念板块的成分股"""
+    ensure_tushare_ready()
+    service = TushareService()
+    members = service.get_stock_concept_members(concept_code)
+
+    return ConceptMembersResponse(
+        concept_code=concept_code,
+        concept_name=None,
+        members=members,
+        total=len(members),
     )

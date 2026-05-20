@@ -59,6 +59,9 @@ import type {
   WatchlistChartResponse,
   WatchlistItem,
   WatchlistResponse,
+  ConceptsResponse,
+  StockConceptsResponse,
+  ConceptMembersResponse,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
@@ -404,6 +407,22 @@ export const apiAnalysis = {
       `/v1/analysis/signal-returns/${source}/${signalType}/${pickDate}`,
       withRequestOptions(options, TIMEOUTS.standard)
     ),
+
+  // ==================== 概念板块相关 API ====================
+  getConceptsList: (options?: RequestOptions) =>
+    api.get<never, ConceptsResponse>('/v1/analysis/concepts/list', withRequestOptions(options, TIMEOUTS.standard)),
+
+  getStockConcepts: (code: string, options?: RequestOptions) =>
+    api.get<never, StockConceptsResponse>(`/v1/analysis/concepts/stock/${code}`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  getStocksConceptsBatch: (codes: string[], options?: RequestOptions) =>
+    api.get<never, StockConceptsResponse>('/v1/analysis/concepts/batch', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params: { codes: codes.join(',') },
+    }),
+
+  getConceptMembers: (conceptCode: string, options?: RequestOptions) =>
+    api.get<never, ConceptMembersResponse>(`/v1/analysis/concepts/${conceptCode}/members`, withRequestOptions(options, TIMEOUTS.standard)),
 }
 
 export const apiWatchlist = {

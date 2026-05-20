@@ -170,17 +170,13 @@ class AnalysisService:
 
         return df.sort_values("date").reset_index(drop=True)
 
-    def _build_b1_selector(self):
-        """构建与明日之星一致的 B1Selector 配置。"""
-        pipeline_dir = ROOT / "pipeline"
-        if str(pipeline_dir) not in sys.path:
-            sys.path.insert(0, str(pipeline_dir))
-
-        from Selector import B1Selector
+    def _build_hybrid_b1_selector(self):
+        """构建高质量B1组合选择器（oldB1 + 原始B1 + 回踩黄线B + 回踩超级B）。"""
+        from app.services.hybrid_b1_selector import HybridB1Selector, HybridB1Config
 
         cfg = self._load_preselect_config()
         b1_cfg = cfg.get("b1", {})
-        return B1Selector(
+        config = HybridB1Config(
             j_threshold=float(b1_cfg.get("j_threshold", 15.0)),
             j_q_threshold=float(b1_cfg.get("j_q_threshold", 0.10)),
             zx_m1=int(b1_cfg.get("zx_m1", 14)),
@@ -188,6 +184,7 @@ class AnalysisService:
             zx_m3=int(b1_cfg.get("zx_m3", 57)),
             zx_m4=int(b1_cfg.get("zx_m4", 114)),
         )
+        return HybridB1Selector(config=config)
 
     def _load_preselect_config(self) -> dict[str, Any]:
         """加载初选配置。"""
@@ -228,6 +225,7 @@ class AnalysisService:
         normalized.setdefault("active_pool_rank", None)
         normalized.setdefault("turnover_rate", None)
         normalized.setdefault("volume_ratio", None)
+        normalized.setdefault("b1_signal_type", None)
         normalized.setdefault("prefilter_passed", None)
         normalized.setdefault("tomorrow_star_pass", None)
 
@@ -682,7 +680,7 @@ class AnalysisService:
                 "generated_dates": [],
             }
 
-        selector = self._build_b1_selector()
+        selector = self._build_hybrid_b1_selector()
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config)
         preselect_cfg = self._load_preselect_config()
@@ -724,6 +722,7 @@ class AnalysisService:
                 try:
                     df_prepared = selector.prepare_df(df_before)
                     last_row = df_prepared.iloc[-1]
+                    b1_result = selector.check_b1(df_prepared, code)
                     change_pct = row.get("change_pct")
                     if pd.isna(change_pct):
                         change_pct = None
@@ -732,8 +731,11 @@ class AnalysisService:
                     else:
                         change_pct = None
 
-                    b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
-                    kdj_j = float(last_row["J"]) if pd.notna(last_row.get("J")) else None
+                    b1_passed = bool(b1_result.get("b1_passed", False))
+                    b1_signal_type = b1_result.get("b1_signal_type")
+                    kdj_j = b1_result.get("j")
+                    if kdj_j is None and pd.notna(last_row.get("J")):
+                        kdj_j = float(last_row["J"])
                     zx_long_pos = bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None
                     weekly_ma_aligned = bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None
                     active_pool_rank = active_pool_rankings.get(code, {}).get(row_ts)
@@ -783,6 +785,7 @@ class AnalysisService:
                         "turnover_rate": turnover_rate,
                         "volume_ratio": volume_ratio,
                         "b1_passed": b1_passed,
+                        "b1_signal_type": b1_signal_type,
                         "prefilter_passed": prefilter_passed,
                         "prefilter_blocked_by": prefilter_blocked_by,
                         "score": score_result.get("score"),
@@ -809,6 +812,7 @@ class AnalysisService:
                     existing_check.weekly_ma_aligned = record["weekly_ma_aligned"]
                     existing_check.volume_healthy = record["volume_healthy"]
                     existing_check.b1_passed = record["b1_passed"]
+                    existing_check.b1_signal_type = record.get("b1_signal_type")
                     existing_check.active_pool_rank = record["active_pool_rank"]
                     existing_check.turnover_rate = record["turnover_rate"]
                     existing_check.volume_ratio = record["volume_ratio"]
@@ -1110,12 +1114,13 @@ class AnalysisService:
             return normalized_date, []
 
     def check_b1_strategy(self, code: str) -> Dict[str, Any]:
-        """执行 B1 策略检查"""
+        """执行高质量B1组合策略检查（oldB1 + 原始B1 + 回踩黄线B + 回踩超级B）"""
         df = self.load_stock_data(code)
         if df is None or df.empty:
             return {
                 "code": code,
                 "b1_passed": False,
+                "b1_signal_type": None,
                 "kdj_j": None,
                 "zx_long_pos": None,
                 "weekly_ma_aligned": None,
@@ -1123,20 +1128,20 @@ class AnalysisService:
                 "error": "数据不存在"
             }
 
-        selector = self._build_b1_selector()
+        selector = self._build_hybrid_b1_selector()
         try:
             # 使用 prepare_df 预计算所有指标
             df_prepared = selector.prepare_df(df)
 
+            # 使用新的 check_b1 方法获取结果
+            b1_result = selector.check_b1(df_prepared, code)
+
             # 获取最后一行的数据
             last_row = df_prepared.iloc[-1]
 
-            # 从 _vec_pick 列判断是否通过 B1 策略
-            b1_passed = bool(last_row.get("_vec_pick", False))
-
             # 获取各项指标值
-            kdj_j = None
-            if "J" in last_row and pd.notna(last_row["J"]):
+            kdj_j = b1_result.get("j")
+            if kdj_j is None and "J" in last_row and pd.notna(last_row["J"]):
                 kdj_j = float(last_row["J"])
 
             zx_long_pos = None
@@ -1167,7 +1172,8 @@ class AnalysisService:
 
             return {
                 "code": code,
-                "b1_passed": b1_passed,
+                "b1_passed": b1_result["b1_passed"],
+                "b1_signal_type": b1_result.get("b1_signal_type"),
                 "kdj_j": kdj_j,
                 "kdj_low_rank": None,
                 "zx_long_pos": zx_long_pos,
@@ -1242,6 +1248,7 @@ class AnalysisService:
                     "comment": cached_result.get("comment"),
                     "signal_type": cached_result.get("signal_type"),
                     "b1_passed": cached_result.get("b1_passed", b1_result.get("b1_passed")),
+                    "b1_signal_type": cached_result.get("b1_signal_type", b1_result.get("b1_signal_type")),
                     "kdj_j": cached_result.get("kdj_j", b1_result.get("kdj_j")),
                     "zx_long_pos": cached_result.get("zx_long_pos", b1_result.get("zx_long_pos")),
                     "weekly_ma_aligned": cached_result.get("weekly_ma_aligned", b1_result.get("weekly_ma_aligned")),
@@ -1276,6 +1283,7 @@ class AnalysisService:
                 return {
                     "code": code,
                     "b1_passed": b1_result.get("b1_passed", False),
+                    "b1_signal_type": b1_result.get("b1_signal_type"),
                     "check_date": analysis_date,
                     "_status": "analyzing",
                     "_cache_key": cache_key,
@@ -1288,6 +1296,7 @@ class AnalysisService:
                 return {
                     "code": code,
                     "b1_passed": b1_result.get("b1_passed", False),
+                    "b1_signal_type": b1_result.get("b1_signal_type"),
                     "check_date": analysis_date,
                     "_status": "waiting",
                     "_cache_key": cache_key,
@@ -1363,6 +1372,7 @@ class AnalysisService:
                         "abnormal_move_reasoning": result.get("abnormal_move_reasoning"),
                         "scores": result.get("scores"),
                         "b1_passed": result.get("b1_passed"),
+                        "b1_signal_type": result.get("b1_signal_type"),
                         "kdj_j": result.get("kdj_j"),
                         "zx_long_pos": result.get("zx_long_pos"),
                         "weekly_ma_aligned": result.get("weekly_ma_aligned"),
@@ -1687,6 +1697,7 @@ class AnalysisService:
                 "volume_ratio": item.volume_ratio,
                 "in_active_pool": rules.get("in_active_pool"),
                 "b1_passed": item.b1_passed,
+                "b1_signal_type": item.b1_signal_type,
                 "prefilter_passed": rules.get("prefilter_passed"),
                 "prefilter_blocked_by": rules.get("prefilter_blocked_by"),
                 "score": item.score,
@@ -1824,7 +1835,7 @@ class AnalysisService:
         if len(df_before) < 60:
             return {"success": False, "error": "历史数据不足，无法生成详情"}
 
-        selector = self._build_b1_selector()
+        selector = self._build_hybrid_b1_selector()
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config)
         preselect_cfg = self._load_preselect_config()
@@ -1843,6 +1854,7 @@ class AnalysisService:
 
         df_prepared = selector.prepare_df(df_before)
         last_row = df_prepared.iloc[-1]
+        b1_result = selector.check_b1(df_prepared, code)
         score_result = self._quant_review_for_date(code, df_before, check_date_obj.isoformat(), config=quant_config)
         prefilter_result = prefilter.evaluate(code=code, pick_date=check_date_obj.isoformat(), price_df=df_before)
         prefilter_passed = bool(prefilter_result.get("passed", True))
@@ -1851,12 +1863,12 @@ class AnalysisService:
         in_active_pool = active_pool_rank is not None and active_pool_rank <= top_m
         if active_pool_rank is None and target_ts.date() not in active_pool_factor_dates:
             in_active_pool = None
-        b1_passed = bool(last_row["_vec_pick"]) if pd.notna(last_row.get("_vec_pick")) else False
+        b1_passed = bool(b1_result.get("b1_passed", False))
         record = {
             "check_date": check_date_obj.isoformat(),
             "close_price": float(last_row["close"]) if pd.notna(last_row.get("close")) else None,
             "change_pct": float(df_before["close"].pct_change().iloc[-1] * 100) if len(df_before) >= 2 and pd.notna(df_before["close"].pct_change().iloc[-1]) else None,
-            "kdj_j": float(last_row["J"]) if pd.notna(last_row.get("J")) else None,
+            "kdj_j": b1_result.get("j") if b1_result.get("j") is not None else (float(last_row["J"]) if pd.notna(last_row.get("J")) else None),
             "kdj_low_rank": None,
             "zx_long_pos": bool(last_row["zxdq"] > last_row["zxdkx"]) if pd.notna(last_row.get("zxdq")) and pd.notna(last_row.get("zxdkx")) else None,
             "weekly_ma_aligned": bool(last_row["wma_bull"]) if pd.notna(last_row.get("wma_bull")) else None,
@@ -1866,6 +1878,7 @@ class AnalysisService:
             "turnover_rate": self._extract_market_metric(last_row, "turnover_rate"),
             "volume_ratio": self._extract_market_metric(last_row, "volume_ratio"),
             "b1_passed": b1_passed,
+            "b1_signal_type": b1_result.get("b1_signal_type"),
             "prefilter_passed": prefilter_passed,
             "prefilter_blocked_by": prefilter_blocked_by,
             "score": score_result.get("score"),
@@ -1900,6 +1913,7 @@ class AnalysisService:
             check.weekly_ma_aligned = record["weekly_ma_aligned"]
             check.volume_healthy = record["volume_healthy"]
             check.b1_passed = record["b1_passed"]
+            check.b1_signal_type = record.get("b1_signal_type")
             check.active_pool_rank = record["active_pool_rank"]
             check.turnover_rate = record["turnover_rate"]
             check.volume_ratio = record["volume_ratio"]

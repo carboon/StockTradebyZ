@@ -288,6 +288,9 @@
                 <div>
                   <div class="mobile-analysis-item__code">{{ row.code }}</div>
                   <div class="mobile-analysis-item__name">{{ row.name || row.code }}</div>
+                  <div class="mobile-analysis-item__concepts">
+                    {{ formatConcepts(row.concepts || row.sector_names || []) }}
+                  </div>
                 </div>
                 <el-tag :type="getScoreType(row.total_score)" size="small">
                   {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
@@ -446,6 +449,30 @@
               <el-table-column prop="name" label="名称" width="86" sortable="custom" :sort-orders="candidateSortOrders" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span class="stock-name-cell">{{ row.name || row.code }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="所属板块" width="140" show-overflow-tooltip>
+                <template #header>
+                  <el-dropdown trigger="click" @command="handleConceptFilter">
+                    <span class="concept-filter-header">
+                      所属板块 ▼
+                    </span>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item :command="null">全部</el-dropdown-item>
+                        <el-dropdown-item v-for="concept in availableConcepts" :key="concept" :command="concept">
+                          <el-checkbox v-model="selectedConcepts[concept]" @click.native.prevent>
+                            {{ concept }}
+                          </el-checkbox>
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                </template>
+                <template #default="{ row }">
+                  <span class="concept-cell">
+                    {{ formatConcepts(row.concepts || row.sector_names || []) }}
+                  </span>
                 </template>
               </el-table-column>
               <el-table-column prop="b1_passed" label="B1" width="58" align="center" sortable="custom" :sort-orders="candidateSortOrders">
@@ -613,6 +640,12 @@ const sectorHistoryPage = ref(1)
 const sectorCandidatePage = ref(1)
 const sectorCandidateSort = ref<SectorCandidateSortState>({ prop: '', order: null })
 const dateRowsCache = ref<Map<string, SectorSnapshotRow[]>>(new Map())
+
+// 概念板块相关
+const availableConcepts = ref<string[]>([])
+const selectedConcepts = ref<Record<string, boolean>>({})
+const stockConceptsCache = ref<Record<string, string[]>>({})
+const conceptFilterActive = ref(false)
 
 const overviewChartRef = ref<HTMLDivElement | null>(null)
 let overviewChartInstance: ECharts | null = null
@@ -917,7 +950,8 @@ function sortSectorRows(rows: SectorSnapshotRow[]): SectorSnapshotRow[] {
 }
 
 const selectedSectorCurrentRows = computed(() => {
-  return sortSectorRows(selectedDateRows.value)
+  const filtered = filterByConcepts(selectedDateRows.value)
+  return sortSectorRows(filtered)
 })
 
 const sectorCandidatePageCount = computed(() => Math.max(1, Math.ceil(selectedSectorCurrentRows.value.length / candidatePageSize)))
@@ -1183,6 +1217,60 @@ function goToOverview() {
   router.push(getSectorRoutePath(sectorCatalog.value.defaultSectorKey || DEFAULT_SECTOR_ANALYSIS_CATALOG.defaultSectorKey))
 }
 
+// ==================== 概念板块相关方法 ====================
+
+function formatConcepts(concepts: string[]): string {
+  if (!concepts || concepts.length === 0) return '-'
+  if (concepts.length <= 2) return concepts.join('、')
+  return `${concepts.slice(0, 2).join('、')}等${concepts.length}个`
+}
+
+/** 从 API 返回的行数据中提取并更新概念板块缓存 */
+function updateConceptsCacheFromRows(rows: SectorSnapshotRow[]) {
+  const updatedCache = { ...stockConceptsCache.value }
+  const allConcepts = new Set<string>()
+
+  for (const row of rows) {
+    const concepts = row.sector_names || []
+    if (concepts.length > 0) {
+      updatedCache[row.code] = concepts
+      concepts.forEach(concept => allConcepts.add(concept))
+    }
+  }
+
+  stockConceptsCache.value = updatedCache
+  availableConcepts.value = Array.from(allConcepts).sort()
+}
+
+function handleConceptFilter(command: string | null) {
+  // 点击"全部"时清空所有选择
+  if (command === null) {
+    Object.keys(selectedConcepts.value).forEach(key => {
+      selectedConcepts.value[key] = false
+    })
+    conceptFilterActive.value = false
+  } else {
+    // 切换概念选择状态
+    selectedConcepts.value[command] = !selectedConcepts.value[command]
+    // 检查是否有任何概念被选中
+    conceptFilterActive.value = Object.values(selectedConcepts.value).some(v => v)
+  }
+  sectorCandidatePage.value = 1
+}
+
+function filterByConcepts(rows: SectorSnapshotRow[]): SectorSnapshotRow[] {
+  if (!conceptFilterActive.value) return rows
+
+  const selectedConceptKeys = Object.keys(selectedConcepts.value).filter(k => selectedConcepts.value[k])
+  if (selectedConceptKeys.length === 0) return rows
+
+  return rows.filter(row => {
+    const concepts = row.concepts || row.sector_names || []
+    // 如果股票有任何一个被选中的概念，则显示
+    return concepts.some((c: string) => selectedConceptKeys.includes(c))
+  })
+}
+
 async function loadSectorAnalytics() {
   sectorLoading.value = true
   try {
@@ -1210,9 +1298,13 @@ async function loadSectorDateRows(date: string, force: boolean = false) {
   sectorRowsLoading.value = true
   try {
     const response = await apiAnalysis.getSectorAnalysisRows(sectorKey, normalizedDate, { signal })
+    const rows = response.rows || []
     const nextCache = new Map(dateRowsCache.value)
-    nextCache.set(cacheKey, response.rows || [])
+    nextCache.set(cacheKey, rows)
     dateRowsCache.value = nextCache
+
+    // 直接使用 API 返回的 sector_names 数据构建概念缓存
+    updateConceptsCacheFromRows(rows)
   } catch (error) {
     if (isRequestCanceled(error)) return
     ElMessage.error(error instanceof Error ? error.message : '板块个股数据加载失败')
@@ -1608,6 +1700,12 @@ onBeforeUnmount(() => {
   color: #606266;
 }
 
+.mobile-analysis-item__concepts {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
 .mobile-analysis-item__comment {
   line-height: 1.5;
   color: #374151;
@@ -1779,6 +1877,19 @@ onBeforeUnmount(() => {
 
 .text-down {
   color: #16a34a;
+}
+
+.concept-filter-header {
+  cursor: pointer;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+}
+
+.concept-cell {
+  font-size: 12px;
+  color: #64748b;
 }
 
 .el-tag,
