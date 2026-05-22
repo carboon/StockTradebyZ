@@ -71,6 +71,53 @@ class StockSearchResponse(BaseModel):
     total: int
 
 
+class RiskFlagSummary(BaseModel):
+    """风险标的识别结果"""
+    level: Optional[str] = None
+    score: Optional[float] = None
+    heat_score: Optional[float] = None
+    confirmation_score: Optional[float] = None
+    narrative_score: Optional[float] = None
+    recent_limit_up_days: Optional[int] = None
+    recent_runup_pct: Optional[float] = None
+    sector_breadth: Optional[float] = None
+    sector_avg_change_pct: Optional[float] = None
+    isolated_spike: Optional[bool] = None
+    reversal_risk: bool = False
+    tags: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+    matched_themes: List[str] = Field(default_factory=list)
+    summary: Optional[str] = None
+
+
+class RiskRegimeSummary(BaseModel):
+    """市场级过热转弱预警摘要"""
+    level: Optional[str] = None
+    score: Optional[float] = None
+    heat_score: Optional[float] = None
+    failure_score: Optional[float] = None
+    breadth_score: Optional[float] = None
+    triggered: bool = False
+    risk_count: int = 0
+    total_count: int = 0
+    risk_ratio: Optional[float] = None
+    high_risk_count: int = 0
+    reversal_risk_count: int = 0
+    isolated_spike_ratio: Optional[float] = None
+    b1_pass_ratio: Optional[float] = None
+    trend_start_ratio: Optional[float] = None
+    failure_ratio: Optional[float] = None
+    risk_trend: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+    summary: Optional[str] = None
+    ai_confirmed_level: Optional[str] = None
+    ai_confidence: Optional[float] = None
+    ai_stance: Optional[str] = None
+    ai_evidence_strength: Optional[str] = None
+    ai_review: Optional[Dict[str, Any]] = None
+
+
 # ==================== 候选股票 ====================
 class CandidateItem(BaseModel):
     """候选股票项"""
@@ -131,6 +178,7 @@ class CurrentHotCandidateItem(BaseModel):
     total_score: Optional[float] = None
     signal_type: Optional[str] = None
     comment: Optional[str] = None
+    risk_flag: Optional[RiskFlagSummary] = None
     consecutive_days: int = 1
 
 
@@ -139,6 +187,7 @@ class CurrentHotCandidatesResponse(BaseModel):
     pick_date: Optional[date_class] = None
     candidates: List[CurrentHotCandidateItem]
     total: int
+    risk_regime: Optional[RiskRegimeSummary] = None
 
 
 # ==================== 分析结果 ====================
@@ -201,6 +250,7 @@ class CurrentHotAnalysisItem(BaseModel):
     prefilter_blocked_by: Optional[List[str]] = None
     pullback_quality: Optional[str] = None
     pullback_negative_flags: Optional[List[str]] = None
+    risk_flag: Optional[RiskFlagSummary] = None
 
 
 class CurrentHotAnalysisResultResponse(BaseModel):
@@ -209,6 +259,7 @@ class CurrentHotAnalysisResultResponse(BaseModel):
     results: List[CurrentHotAnalysisItem]
     total: int
     min_score_threshold: float
+    risk_regime: Optional[RiskRegimeSummary] = None
 
 
 class IntradayAnalysisItem(BaseModel):
@@ -633,6 +684,7 @@ class DiagnosisResponse(BaseModel):
     score: Optional[float] = None
     verdict: Optional[str] = None
     analysis: Dict[str, Any]
+    risk_regime: Optional[RiskRegimeSummary] = None
     kline_data: Optional[Dict[str, Any]] = None
 
 

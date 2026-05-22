@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     zhipuai_api_key: str = ""
     dashscope_api_key: str = ""
     gemini_api_key: str = ""
+    deepseek_api_key: str = ""
 
     # 分析配置
     default_reviewer: str = "quant"  # quant, glm, qwen, gemini

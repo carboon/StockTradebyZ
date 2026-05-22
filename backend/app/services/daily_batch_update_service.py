@@ -6,7 +6,7 @@ Daily Batch Update Service
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Any, Callable
 
@@ -45,6 +45,87 @@ class DailyBatchUpdateService:
     def _daily_partition_path(self, trade_date: str) -> Path:
         return ROOT / "data" / "raw_daily" / f"{trade_date}.jsonl"
 
+    def _get_recent_trade_dates(self, trade_date: date, limit: int = 5) -> list[date]:
+        rows = self.db.execute(
+            select(StockDaily.trade_date)
+            .where(StockDaily.trade_date < trade_date)
+            .distinct()
+            .order_by(StockDaily.trade_date.desc())
+            .limit(limit)
+        ).scalars().all()
+        return [item for item in rows if item is not None]
+
+    def _fill_missing_volume_ratio_from_history(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty or "code" not in frame.columns or "trade_date" not in frame.columns:
+            return frame
+
+        working = frame.copy()
+        if "volume_ratio" not in working.columns:
+            working["volume_ratio"] = pd.NA
+
+        missing_mask = working["volume_ratio"].isna()
+        if not bool(missing_mask.any()):
+            return working
+
+        trade_date_value = working["trade_date"].iloc[0]
+        if not isinstance(trade_date_value, date):
+            trade_date_value = pd.to_datetime(trade_date_value).date()
+
+        previous_trade_dates = self._get_recent_trade_dates(trade_date_value, limit=5)
+        if not previous_trade_dates:
+            return working
+
+        codes = sorted(
+            {
+                str(code).zfill(6)
+                for code in working.loc[missing_mask, "code"].dropna().astype(str).tolist()
+            }
+        )
+        if not codes:
+            return working
+
+        rows = self.db.execute(
+            select(StockDaily.code, StockDaily.volume)
+            .where(
+                StockDaily.code.in_(codes),
+                StockDaily.trade_date.in_(previous_trade_dates),
+            )
+        ).all()
+
+        avg_volume_by_code: dict[str, float] = {}
+        history_volume_by_code: dict[str, list[float]] = {}
+        for code, volume in rows:
+            if volume is None:
+                continue
+            numeric_volume = float(volume)
+            if numeric_volume <= 0:
+                continue
+            history_volume_by_code.setdefault(str(code).zfill(6), []).append(numeric_volume)
+
+        for code, volumes in history_volume_by_code.items():
+            if volumes:
+                avg_volume_by_code[code] = sum(volumes) / len(volumes)
+
+        filled_count = 0
+        for idx in working.index[missing_mask]:
+            code = str(working.at[idx, "code"]).zfill(6)
+            avg_volume = avg_volume_by_code.get(code)
+            current_volume = pd.to_numeric(working.at[idx, "volume"], errors="coerce")
+            if avg_volume in (None, 0) or pd.isna(current_volume) or float(current_volume) <= 0:
+                continue
+            working.at[idx, "volume_ratio"] = round(float(current_volume) / avg_volume, 4)
+            filled_count += 1
+
+        if filled_count > 0:
+            logger.info(
+                "本地回填量比 trade_date=%s filled=%s/%s prev_trade_days=%s",
+                trade_date_value.isoformat(),
+                filled_count,
+                int(missing_mask.sum()),
+                len(previous_trade_dates),
+            )
+        return working
+
     def fetch_trade_date_snapshot(self, trade_date: str) -> pd.DataFrame:
         normalized = trade_date.replace("-", "")
         acquire_tushare_slot("daily")
@@ -69,8 +150,18 @@ class DailyBatchUpdateService:
             trade_date=normalized,
             fields="ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,free_share,circ_mv",
         )
-        if daily_basic is None:
-            daily_basic = pd.DataFrame()
+        if daily_basic is None or daily_basic.empty:
+            daily_basic = pd.DataFrame(
+                columns=[
+                    "ts_code",
+                    "trade_date",
+                    "turnover_rate",
+                    "turnover_rate_f",
+                    "volume_ratio",
+                    "free_share",
+                    "circ_mv",
+                ]
+            )
         acquire_tushare_slot("moneyflow")
         moneyflow = self.tushare_service.pro.moneyflow(
             trade_date=normalized,
@@ -80,12 +171,27 @@ class DailyBatchUpdateService:
                 "buy_elg_amount,sell_elg_amount,net_mf_amount"
             ),
         )
-        if moneyflow is None:
-            moneyflow = pd.DataFrame()
+        if moneyflow is None or moneyflow.empty:
+            moneyflow = pd.DataFrame(
+                columns=[
+                    "ts_code",
+                    "trade_date",
+                    "buy_sm_amount",
+                    "sell_sm_amount",
+                    "buy_md_amount",
+                    "sell_md_amount",
+                    "buy_lg_amount",
+                    "sell_lg_amount",
+                    "buy_elg_amount",
+                    "sell_elg_amount",
+                    "net_mf_amount",
+                ]
+            )
         frame = frame.merge(daily_basic, on=["ts_code", "trade_date"], how="left")
         frame = frame.merge(moneyflow, on=["ts_code", "trade_date"], how="left")
         frame["code"] = frame["ts_code"].astype(str).str.split(".").str[0].str.zfill(6)
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
+        frame = self._fill_missing_volume_ratio_from_history(frame)
         return frame.sort_values(["trade_date", "code"]).reset_index(drop=True)
 
     def _frame_to_records(self, frame: pd.DataFrame) -> list[dict[str, Any]]:

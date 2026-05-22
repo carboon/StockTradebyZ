@@ -13,6 +13,8 @@ from app.models import (
     CurrentHotCandidate,
     CurrentHotIntradaySnapshot,
     CurrentHotRun,
+    DailyB1Check,
+    DailyB1CheckDetail,
     Stock,
     StockActivePoolRank,
     StockDaily,
@@ -184,6 +186,224 @@ def test_get_current_hot_candidates_and_results(test_client_with_db: Any) -> Non
     assert results_data["results"][0]["turnover_rate"] == 12.3
     assert results_data["results"][0]["volume_ratio"] == 1.5
     assert results_data["results"][0]["active_pool_rank"] == 18
+
+
+def test_get_current_hot_candidates_flags_speculative_risk(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    pick_date = date(2026, 5, 8)
+    history_dates = [
+        date(2026, 4, 30),
+        date(2026, 5, 4),
+        date(2026, 5, 5),
+        date(2026, 5, 6),
+        date(2026, 5, 7),
+        pick_date,
+    ]
+
+    db.add_all([
+        Stock(code="600011", name="故事龙", market="SH", industry="房地产开发"),
+        Stock(code="600012", name="板块跟随", market="SH", industry="房地产开发"),
+    ])
+    db.add(CurrentHotRun(pick_date=pick_date, status="success", candidate_count=2, analysis_count=2, trend_start_count=1))
+
+    lead_closes = [10.0, 11.0, 12.1, 12.4, 13.6, 14.9]
+    peer_closes = [10.0, 10.1, 10.2, 10.25, 10.3, 10.35]
+    for trade_date, lead_close, peer_close in zip(history_dates, lead_closes, peer_closes):
+        db.add(StockDaily(code="600011", trade_date=trade_date, open=lead_close, close=lead_close, high=lead_close, low=lead_close * 0.98, volume=100000))
+        db.add(StockDaily(code="600012", trade_date=trade_date, open=peer_close, close=peer_close, high=peer_close, low=peer_close * 0.99, volume=80000))
+
+    db.add_all([
+        CurrentHotCandidate(
+            pick_date=pick_date,
+            code="600011",
+            sector_names_json=["存储芯片"],
+            board_group="other",
+            change_pct=9.8,
+            turnover_rate=18.2,
+            volume_ratio=3.1,
+            b1_passed=False,
+        ),
+        CurrentHotCandidate(
+            pick_date=pick_date,
+            code="600012",
+            sector_names_json=["存储芯片"],
+            board_group="other",
+            change_pct=0.8,
+            turnover_rate=4.2,
+            volume_ratio=0.9,
+            b1_passed=True,
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=pick_date,
+            code="600011",
+            reviewer="quant",
+            b1_passed=False,
+            verdict="WATCH",
+            total_score=3.8,
+            signal_type="rebound",
+            comment="story",
+            turnover_rate=18.2,
+            volume_ratio=3.1,
+            details_json={},
+        ),
+        CurrentHotAnalysisResult(
+            pick_date=pick_date,
+            code="600012",
+            reviewer="quant",
+            b1_passed=True,
+            verdict="PASS",
+            total_score=5.1,
+            signal_type="trend_start",
+            comment="steady",
+            turnover_rate=4.2,
+            volume_ratio=0.9,
+            details_json={},
+        ),
+        StockActivePoolRank(trade_date=pick_date, code="600011", top_m=2000, n_turnover_days=43, turnover_n=100000.0, active_pool_rank=8, in_active_pool=True),
+        StockActivePoolRank(trade_date=pick_date, code="600012", top_m=2000, n_turnover_days=43, turnover_n=80000.0, active_pool_rank=45, in_active_pool=True),
+    ])
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/current-hot/candidates?date=2026-05-08")
+
+    assert response.status_code == 200
+    data = response.json()
+    risk_item = next(item for item in data["candidates"] if item["code"] == "600011")
+    assert risk_item["risk_flag"]["level"] == "high"
+    assert risk_item["risk_flag"]["isolated_spike"] is True
+    assert risk_item["risk_flag"]["recent_limit_up_days"] >= 2
+    assert "板块内孤立拉升" in risk_item["risk_flag"]["tags"]
+    assert data["risk_regime"]["level"] in {"medium", "high"}
+    assert data["risk_regime"]["risk_count"] >= 1
+
+
+def test_market_risk_regime_is_not_limited_to_current_hot_pool(test_client_with_db: Any) -> None:
+    db = test_client_with_db.db
+    pick_date = date(2026, 5, 8)
+    db.add_all([
+        Stock(code="600100", name="自选观察", market="SH", industry="银行"),
+        Stock(code="600201", name="全市场故事1", market="SH", industry="房地产开发"),
+        Stock(code="600202", name="全市场故事2", market="SH", industry="房地产开发"),
+        Stock(code="600203", name="全市场趋势", market="SH", industry="通信设备"),
+    ])
+    db.add(CurrentHotRun(pick_date=pick_date, status="success", candidate_count=1, analysis_count=1, trend_start_count=1))
+    db.add(CurrentHotCandidate(
+        pick_date=pick_date,
+        code="600100",
+        sector_names_json=["银行"],
+        board_group="other",
+        change_pct=1.2,
+        turnover_rate=2.1,
+        volume_ratio=0.8,
+        b1_passed=True,
+    ))
+    db.add(CurrentHotAnalysisResult(
+        pick_date=pick_date,
+        code="600100",
+        reviewer="quant",
+        b1_passed=True,
+        verdict="PASS",
+        total_score=5.1,
+        signal_type="trend_start",
+        comment="watchlist only",
+        details_json={},
+    ))
+    db.add_all([
+        StockActivePoolRank(trade_date=pick_date, code="600100", top_m=2000, n_turnover_days=43, turnover_n=50000.0, active_pool_rank=60, in_active_pool=True),
+        StockActivePoolRank(trade_date=pick_date, code="600201", top_m=2000, n_turnover_days=43, turnover_n=110000.0, active_pool_rank=6, in_active_pool=True),
+        StockActivePoolRank(trade_date=pick_date, code="600202", top_m=2000, n_turnover_days=43, turnover_n=100000.0, active_pool_rank=9, in_active_pool=True),
+        StockActivePoolRank(trade_date=pick_date, code="600203", top_m=2000, n_turnover_days=43, turnover_n=90000.0, active_pool_rank=15, in_active_pool=True),
+    ])
+    db.add_all([
+        DailyB1Check(
+            code="600201",
+            check_date=pick_date,
+            close_price=14.9,
+            change_pct=9.8,
+            kdj_j=92.0,
+            b1_passed=False,
+            active_pool_rank=6,
+            turnover_rate=18.2,
+            volume_ratio=3.1,
+            score=3.7,
+        ),
+        DailyB1Check(
+            code="600202",
+            check_date=pick_date,
+            close_price=13.6,
+            change_pct=8.6,
+            kdj_j=88.0,
+            b1_passed=False,
+            active_pool_rank=9,
+            turnover_rate=15.1,
+            volume_ratio=2.7,
+            score=3.8,
+        ),
+        DailyB1Check(
+            code="600203",
+            check_date=pick_date,
+            close_price=11.5,
+            change_pct=2.2,
+            kdj_j=35.0,
+            b1_passed=True,
+            active_pool_rank=15,
+            turnover_rate=6.2,
+            volume_ratio=1.2,
+            score=4.9,
+        ),
+    ])
+    db.add_all([
+        DailyB1CheckDetail(
+            code="600201",
+            check_date=pick_date,
+            status="ready",
+            score_details_json={"verdict": "WATCH", "signal_type": "rebound"},
+            rules_json={"prefilter_passed": False},
+            details_json={"pullback_negative_flags": ["异常放量阴线"]},
+        ),
+        DailyB1CheckDetail(
+            code="600202",
+            check_date=pick_date,
+            status="ready",
+            score_details_json={"verdict": "WATCH", "signal_type": "rebound"},
+            rules_json={"prefilter_passed": False},
+            details_json={"pullback_negative_flags": ["下跌逐步上量"]},
+        ),
+        DailyB1CheckDetail(
+            code="600203",
+            check_date=pick_date,
+            status="ready",
+            score_details_json={"verdict": "PASS", "signal_type": "trend_start"},
+            rules_json={"prefilter_passed": True},
+            details_json={"pullback_negative_flags": []},
+        ),
+    ])
+    history_dates = [
+        date(2026, 4, 30),
+        date(2026, 5, 4),
+        date(2026, 5, 5),
+        date(2026, 5, 6),
+        date(2026, 5, 7),
+        pick_date,
+    ]
+    closes_201 = [10.0, 11.0, 12.1, 12.4, 13.6, 14.9]
+    closes_202 = [10.0, 10.8, 11.4, 12.2, 12.8, 13.6]
+    closes_203 = [10.0, 10.2, 10.4, 10.6, 11.0, 11.5]
+    for trade_date, c1, c2, c3 in zip(history_dates, closes_201, closes_202, closes_203):
+        db.add(StockDaily(code="600201", trade_date=trade_date, open=c1, close=c1, high=c1, low=c1 * 0.98, volume=120000))
+        db.add(StockDaily(code="600202", trade_date=trade_date, open=c2, close=c2, high=c2, low=c2 * 0.98, volume=110000))
+        db.add(StockDaily(code="600203", trade_date=trade_date, open=c3, close=c3, high=c3, low=c3 * 0.99, volume=100000))
+        db.add(StockDaily(code="600100", trade_date=trade_date, open=10.0, close=10.1, high=10.2, low=9.9, volume=80000))
+    db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/current-hot/candidates?date=2026-05-08")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["candidates"][0]["code"] == "600100"
+    assert data["risk_regime"]["risk_count"] >= 2
+    assert data["risk_regime"]["total_count"] >= 3
 
 
 def test_current_hot_replaces_generic_sector_with_stock_industry(test_client_with_db: Any) -> None:

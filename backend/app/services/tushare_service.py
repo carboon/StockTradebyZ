@@ -412,6 +412,7 @@ class TushareService:
             "metric_fill_ratio": 0.0,
             "daily_basic_fill_ratio": 0.0,
             "required_fill_ratio": round(threshold, 4),
+            "volume_ratio_fallback_required": False,
             "reason": "invalid_trade_date",
         }
         if len(normalized) != 8 or not normalized.isdigit():
@@ -480,9 +481,12 @@ class TushareService:
             result["turnover_rate_count"] = turnover_count
             result["volume_ratio_count"] = volume_ratio_count
 
-            metric_count = min(turnover_count, volume_ratio_count)
+            metric_count = turnover_count
             if result["daily_row_count"] > 0:
                 result["metric_fill_ratio"] = round(metric_count / result["daily_row_count"], 4)
+            result["volume_ratio_fallback_required"] = (
+                result["daily_row_count"] > 0 and volume_ratio_count < result["daily_row_count"]
+            )
 
             result["ready"] = (
                 result["daily_basic_fill_ratio"] >= threshold
@@ -993,6 +997,95 @@ class TushareService:
         except Exception as e:
             import logging
             logging.getLogger("tushare_service").warning(f"获取概念板块 {concept_code} 成分股失败: {e}")
+            return []
+
+    def get_announcements(
+        self,
+        ts_code: str,
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[dict]:
+        """获取公告摘要。"""
+        if not self.token or not ts_code:
+            return []
+
+        try:
+            acquire_tushare_slot("anns_d")
+            df = self.pro.anns_d(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            if df is None or df.empty:
+                return []
+
+            items = []
+            for _, row in df.head(limit).iterrows():
+                items.append({
+                    "ann_date": row.get("ann_date"),
+                    "name": row.get("name"),
+                    "title": row.get("title"),
+                    "url": row.get("url"),
+                })
+            return items
+        except Exception:
+            return []
+
+    def get_abnormal_volatility_events(
+        self,
+        ts_code: str,
+        *,
+        trade_date: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[dict]:
+        """获取异常波动信息。"""
+        if not self.token or not ts_code:
+            return []
+
+        try:
+            acquire_tushare_slot("stk_high_shock")
+            df = self.pro.stk_high_shock(ts_code=ts_code, trade_date=trade_date)
+            if df is None or df.empty:
+                return []
+
+            items = []
+            for _, row in df.head(limit).iterrows():
+                items.append({
+                    "trade_date": row.get("trade_date"),
+                    "ts_code": row.get("ts_code"),
+                    "name": row.get("name"),
+                    "reason": row.get("reason") or row.get("shock_type") or row.get("remark"),
+                })
+            return items
+        except Exception:
+            return []
+
+    def get_news_items(
+        self,
+        *,
+        src: str = "",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[dict]:
+        """获取新闻快讯。"""
+        if not self.token:
+            return []
+
+        try:
+            acquire_tushare_slot("news")
+            df = self.pro.news(src=src, start_date=start_date, end_date=end_date)
+            if df is None or df.empty:
+                return []
+
+            items = []
+            for _, row in df.head(limit).iterrows():
+                items.append({
+                    "datetime": row.get("datetime"),
+                    "title": row.get("title"),
+                    "content": row.get("content"),
+                    "src": row.get("src"),
+                })
+            return items
+        except Exception:
             return []
 
     @classmethod

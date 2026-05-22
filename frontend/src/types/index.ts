@@ -20,6 +20,72 @@ export interface StockSearchResponse {
   total: number
 }
 
+export interface RiskFlagSummary {
+  level?: 'low' | 'medium' | 'high' | string | null
+  score?: number | null
+  heat_score?: number | null
+  confirmation_score?: number | null
+  narrative_score?: number | null
+  recent_limit_up_days?: number | null
+  recent_runup_pct?: number | null
+  sector_breadth?: number | null
+  sector_avg_change_pct?: number | null
+  isolated_spike?: boolean | null
+  reversal_risk?: boolean | null
+  tags?: string[]
+  reasons?: string[]
+  matched_themes?: string[]
+  summary?: string | null
+}
+
+export interface RiskRegimeAiResult {
+  confirmed_level?: 'low' | 'medium' | 'high' | string | null
+  confidence?: number | null
+  evidence_strength?: 'weak' | 'medium' | 'strong' | string | null
+  stance?: 'confirm' | 'soft_confirm' | 'reject' | string | null
+  summary?: string | null
+  reasons?: string[]
+  risk_signals?: string[]
+  news_findings?: string[]
+  announcement_findings?: string[]
+  warnings?: string[]
+}
+
+export interface RiskRegimeAiReview {
+  provider?: string | null
+  model?: string | null
+  enabled?: boolean | null
+  context?: Record<string, any> | null
+  result?: RiskRegimeAiResult | null
+}
+
+export interface RiskRegimeSummary {
+  level?: 'low' | 'medium' | 'high' | string | null
+  score?: number | null
+  heat_score?: number | null
+  failure_score?: number | null
+  breadth_score?: number | null
+  triggered?: boolean | null
+  risk_count?: number | null
+  total_count?: number | null
+  risk_ratio?: number | null
+  high_risk_count?: number | null
+  reversal_risk_count?: number | null
+  isolated_spike_ratio?: number | null
+  b1_pass_ratio?: number | null
+  trend_start_ratio?: number | null
+  failure_ratio?: number | null
+  risk_trend?: string | null
+  tags?: string[]
+  reasons?: string[]
+  summary?: string | null
+  ai_confirmed_level?: string | null
+  ai_confidence?: number | null
+  ai_stance?: string | null
+  ai_evidence_strength?: string | null
+  ai_review?: RiskRegimeAiReview | null
+}
+
 export interface Candidate {
   id: number
   pick_date: string
@@ -98,6 +164,7 @@ export interface CurrentHotCandidate {
   prefilter_blocked_by?: string[] | null
   pullback_quality?: string | null
   pullback_negative_flags?: string[] | null
+  risk_flag?: RiskFlagSummary | null
 }
 
 export interface CurrentHotAnalysisResult {
@@ -121,6 +188,7 @@ export interface CurrentHotAnalysisResult {
   prefilter_blocked_by?: string[] | null
   pullback_quality?: string | null
   pullback_negative_flags?: string[] | null
+  risk_flag?: RiskFlagSummary | null
 }
 
 export interface ExitPlan {
@@ -614,6 +682,7 @@ export interface CurrentHotCandidatesResponse {
   pick_date?: string | null
   candidates: CurrentHotCandidate[]
   total: number
+  risk_regime?: RiskRegimeSummary | null
 }
 
 export interface AnalysisResultsResponse {
@@ -628,6 +697,7 @@ export interface CurrentHotAnalysisResultsResponse {
   results: CurrentHotAnalysisResult[]
   total: number
   min_score_threshold: number
+  risk_regime?: RiskRegimeSummary | null
 }
 
 export interface SectorAnalysisRow {
@@ -831,6 +901,7 @@ interface DiagnosisAnalysisDetails {
   signal_type?: string
   signal_reasoning?: string
   comment?: string
+  risk_flag?: RiskFlagSummary | null
 }
 
 export interface DiagnosisAnalyzeTaskResponse {
@@ -855,6 +926,7 @@ export interface DiagnosisResultResponse {
   score?: number
   verdict?: 'PASS' | 'WATCH' | 'FAIL'
   analysis?: DiagnosisAnalysisDetails
+  risk_regime?: RiskRegimeSummary | null
 }
 
 export interface WatchlistResponse {

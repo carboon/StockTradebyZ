@@ -27,7 +27,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, StockDaily, Task
+from app.models import AnalysisResult, CurrentHotCandidate, DailyB1Check, DailyB1CheckDetail, Stock, StockActivePoolRank, StockDaily, Task
 from app.schemas import SignalReturnBenchmark
 
 
@@ -746,6 +746,152 @@ def test_get_diagnosis_result_completed(test_client_with_db: Any) -> None:
     assert data["score"] == 4.5
     assert data["verdict"] == "PASS"
     assert data["analysis"]["kdj_j"] == 15.3
+
+
+@pytest.mark.api
+def test_get_diagnosis_result_includes_speculative_risk_flag(test_client_with_db: Any) -> None:
+    from app.time_utils import utc_now
+
+    now = utc_now()
+    task = Task(
+        task_type="single_analysis",
+        status="completed",
+        progress=100,
+        params_json={"code": "600011", "reviewer": "quant"},
+        result_json={
+            "check_date": "2026-05-08",
+            "analysis_date": "2026-05-08",
+            "close_price": 14.9,
+            "b1_passed": False,
+            "score": 3.7,
+            "verdict": "WATCH",
+            "signal_type": "rebound",
+            "comment": "热度驱动",
+            "turnover_rate": 18.2,
+            "volume_ratio": 3.1,
+            "active_pool_rank": 8,
+        },
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    history_dates = [
+        date(2026, 4, 30),
+        date(2026, 5, 4),
+        date(2026, 5, 5),
+        date(2026, 5, 6),
+        date(2026, 5, 7),
+        date(2026, 5, 8),
+    ]
+    lead_closes = [10.0, 11.0, 12.1, 12.4, 13.6, 14.9]
+    peer_closes = [10.0, 10.1, 10.2, 10.25, 10.3, 10.35]
+
+    test_client_with_db.db.add_all([
+        task,
+        Stock(code="600011", name="故事龙", market="SH", industry="房地产开发"),
+        Stock(code="600012", name="板块跟随", market="SH", industry="房地产开发"),
+        CurrentHotCandidate(
+            pick_date=date(2026, 5, 8),
+            code="600011",
+            sector_names_json=["存储芯片"],
+            board_group="other",
+            change_pct=9.8,
+            turnover_rate=18.2,
+            volume_ratio=3.1,
+            b1_passed=False,
+        ),
+        StockActivePoolRank(
+            trade_date=date(2026, 5, 8),
+            code="600011",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=100000.0,
+            active_pool_rank=8,
+            in_active_pool=True,
+        ),
+        StockActivePoolRank(
+            trade_date=date(2026, 5, 8),
+            code="600012",
+            top_m=2000,
+            n_turnover_days=43,
+            turnover_n=80000.0,
+            active_pool_rank=45,
+            in_active_pool=True,
+        ),
+        DailyB1Check(
+            code="600011",
+            check_date=date(2026, 5, 8),
+            close_price=14.9,
+            change_pct=9.8,
+            kdj_j=92.0,
+            b1_passed=False,
+            active_pool_rank=8,
+            turnover_rate=18.2,
+            volume_ratio=3.1,
+            score=3.7,
+        ),
+        DailyB1Check(
+            code="600012",
+            check_date=date(2026, 5, 8),
+            close_price=10.35,
+            change_pct=0.5,
+            kdj_j=35.0,
+            b1_passed=True,
+            active_pool_rank=45,
+            turnover_rate=4.2,
+            volume_ratio=0.9,
+            score=5.0,
+        ),
+        DailyB1CheckDetail(
+            code="600011",
+            check_date=date(2026, 5, 8),
+            status="ready",
+            score_details_json={"verdict": "WATCH", "signal_type": "rebound"},
+            rules_json={"prefilter_passed": False},
+            details_json={"pullback_negative_flags": ["异常放量阴线"]},
+        ),
+        DailyB1CheckDetail(
+            code="600012",
+            check_date=date(2026, 5, 8),
+            status="ready",
+            score_details_json={"verdict": "PASS", "signal_type": "trend_start"},
+            rules_json={"prefilter_passed": True},
+            details_json={"pullback_negative_flags": []},
+        ),
+    ])
+    for trade_date, lead_close, peer_close in zip(history_dates, lead_closes, peer_closes):
+        test_client_with_db.db.add(
+            StockDaily(
+                code="600011",
+                trade_date=trade_date,
+                open=lead_close,
+                close=lead_close,
+                high=lead_close,
+                low=lead_close * 0.98,
+                volume=100000,
+            )
+        )
+        test_client_with_db.db.add(
+            StockDaily(
+                code="600012",
+                trade_date=trade_date,
+                open=peer_close,
+                close=peer_close,
+                high=peer_close,
+                low=peer_close * 0.99,
+                volume=80000,
+            )
+        )
+    test_client_with_db.db.commit()
+
+    response = test_client_with_db.get("/api/v1/analysis/diagnosis/600011/result")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["analysis"]["risk_flag"]["level"] == "high"
+    assert data["analysis"]["risk_flag"]["recent_limit_up_days"] >= 2
+    assert data["risk_regime"]["risk_count"] >= 1
+    assert data["risk_regime"]["level"] in {"medium", "high", "low"}
 
 
 @pytest.mark.api

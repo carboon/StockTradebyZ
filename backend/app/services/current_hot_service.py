@@ -18,6 +18,8 @@ from app.models import (
     CurrentHotAnalysisResult,
     CurrentHotCandidate,
     CurrentHotRun,
+    DailyB1Check,
+    DailyB1CheckDetail,
     Stock,
     StockActivePoolRank,
     StockDaily,
@@ -26,10 +28,13 @@ from app.models import (
 from app.services.analysis_service import analysis_service
 from app.services.current_hot_pool import DEFAULT_CURRENT_HOT_POOL
 from app.services.daily_data_service import DailyDataService
+from app.services.risk_regime_ai_service import RiskRegimeAIService
+from app.services.risk_regime_service import RiskRegimeService
 from app.services.sector_analysis_config import (
     resolve_sector_analysis_catalog,
     resolve_sector_stock_pool,
 )
+from app.services.speculative_risk_service import SpeculativeRiskService
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
 
@@ -326,6 +331,133 @@ class CurrentHotService:
             if normalized_names & aliases
         ]
         return sorted(set(matches))
+
+    @staticmethod
+    def _limit_up_threshold(code: str) -> float:
+        normalized = str(code or "").zfill(6)
+        if normalized.startswith(("688", "689", "300")):
+            return 19.6
+        if normalized.startswith(("430", "8", "920")):
+            return 29.6
+        return 9.6
+
+    def _load_recent_trade_metrics(
+        self,
+        codes: list[str],
+        target_date: date,
+        *,
+        window_size: int = 5,
+    ) -> dict[str, dict[str, Any]]:
+        normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return {}
+
+        rows = (
+            self.db.query(StockDaily.code, StockDaily.trade_date, StockDaily.close)
+            .filter(
+                StockDaily.code.in_(normalized_codes),
+                StockDaily.trade_date <= target_date,
+            )
+            .order_by(StockDaily.code.asc(), StockDaily.trade_date.desc())
+            .all()
+        )
+
+        grouped: dict[str, list[tuple[date, float]]] = {}
+        required_points = window_size + 1
+        for code, trade_date, close in rows:
+            bucket = grouped.setdefault(str(code).zfill(6), [])
+            if len(bucket) >= required_points:
+                continue
+            if trade_date is None or close is None:
+                continue
+            bucket.append((trade_date, float(close)))
+
+        metrics: dict[str, dict[str, Any]] = {}
+        for code, points_desc in grouped.items():
+            points = list(reversed(points_desc))
+            recent_limit_up_days = 0
+            for (_, previous_close), (_, close_price) in zip(points, points[1:]):
+                if previous_close in (None, 0) or close_price is None:
+                    continue
+                change_pct = (close_price - previous_close) / previous_close * 100
+                if change_pct >= self._limit_up_threshold(code):
+                    recent_limit_up_days += 1
+
+            recent_runup_pct = None
+            if len(points) >= 2 and points[0][1] not in (None, 0):
+                recent_runup_pct = (points[-1][1] - points[0][1]) / points[0][1] * 100
+
+            metrics[code] = {
+                "recent_limit_up_days": recent_limit_up_days,
+                "recent_runup_pct": recent_runup_pct,
+            }
+        return metrics
+
+    def _build_sector_story_context(self, items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        sector_members: dict[str, list[tuple[str, float]]] = {}
+        for item in items:
+            code = str(item.get("code") or "").zfill(6)
+            change_pct = self._safe_float(item.get("change_pct"))
+            if change_pct is None:
+                continue
+            for sector_name in item.get("sector_names") or []:
+                sector = str(sector_name or "").strip()
+                if not sector or self._is_generic_sector_name(sector):
+                    continue
+                sector_members.setdefault(sector, []).append((code, change_pct))
+
+        context_by_code: dict[str, dict[str, Any]] = {}
+        for item in items:
+            code = str(item.get("code") or "").zfill(6)
+            change_pct = self._safe_float(item.get("change_pct"))
+            if change_pct is None:
+                continue
+
+            best_context: dict[str, Any] | None = None
+            best_score = float("-inf")
+            for sector_name in item.get("sector_names") or []:
+                sector = str(sector_name or "").strip()
+                peer_changes = [
+                    member_change
+                    for member_code, member_change in (sector_members.get(sector) or [])
+                    if member_code != code
+                ]
+                if not peer_changes:
+                    continue
+                avg_change = sum(peer_changes) / len(peer_changes)
+                breadth = sum(1 for value in peer_changes if value >= 2.0) / len(peer_changes)
+                divergence = change_pct - avg_change
+                isolated_spike = bool(
+                    change_pct >= 5.0
+                    and divergence >= 4.0
+                    and (breadth <= 0.45 or avg_change <= 2.0)
+                )
+                ranking_score = divergence - breadth * 5.0 + (12.0 if isolated_spike else 0.0)
+                if best_context is None or ranking_score > best_score:
+                    best_score = ranking_score
+                    best_context = {
+                        "sector_focus_name": sector,
+                        "sector_avg_change_pct": avg_change,
+                        "sector_breadth": breadth,
+                        "isolated_spike": isolated_spike,
+                    }
+
+            if best_context is not None:
+                context_by_code[code] = best_context
+        return context_by_code
+
+    def _build_sector_story_context_by_sector_name(
+        self,
+        items: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            sector_names = self._resolve_sector_names(
+                item.get("sector_names") if isinstance(item.get("sector_names"), list) else [],
+                industry=item.get("industry"),
+            )
+            normalized_items.append({**item, "sector_names": sector_names})
+        return self._build_sector_story_context(normalized_items)
 
     def _build_sector_metrics(
         self,
@@ -1128,7 +1260,13 @@ class CurrentHotService:
             "latest_date": latest_date,
         }
 
-    def load_candidates(self, pick_date: Optional[str] = None, limit: int = 200) -> dict[str, Any]:
+    def load_candidates(
+        self,
+        pick_date: Optional[str] = None,
+        limit: int = 200,
+        *,
+        include_risk_regime: bool = True,
+    ) -> dict[str, Any]:
         target_date = self._normalize_trade_date(pick_date) or self.get_latest_pick_date()
         if target_date is None:
             return {"pick_date": None, "candidates": [], "total": 0}
@@ -1166,13 +1304,24 @@ class CurrentHotService:
             .filter(CurrentHotCandidate.pick_date == target_date)
             .all()
         )
-        items = [
-            {
+        items: list[dict[str, Any]] = []
+        item_context_by_code: dict[str, dict[str, Any]] = {}
+        for row, analysis, stock_name, stock_industry, active_pool_rank in rows:
+            sector_names = self._resolve_sector_names(row.sector_names_json, industry=stock_industry)
+            prefilter_passed, _prefilter_summary, _prefilter_blocked_by = self._extract_prefilter_fields(
+                analysis.details_json if analysis else None
+            )
+            pullback_negative_flags = self._normalize_pullback_negative_flags(
+                analysis.details_json.get("pullback_negative_flags")
+                if analysis and isinstance(analysis.details_json, dict)
+                else None
+            )
+            item = {
                 "id": row.id,
                 "pick_date": target_date,
                 "code": row.code,
                 "name": stock_name,
-                "sector_names": self._resolve_sector_names(row.sector_names_json, industry=stock_industry),
+                "sector_names": sector_names,
                 "board_group": row.board_group,
                 "open_price": row.open_price,
                 "close_price": row.close_price,
@@ -1189,8 +1338,42 @@ class CurrentHotService:
                 "comment": analysis.comment if analysis else None,
                 "consecutive_days": int(row.consecutive_days or 1),
             }
-            for row, analysis, stock_name, stock_industry, active_pool_rank in rows
-        ]
+            items.append(item)
+            item_context_by_code[item["code"]] = {
+                "industry": stock_industry,
+                "prefilter_passed": prefilter_passed,
+                "pullback_negative_flags": pullback_negative_flags,
+            }
+
+        recent_trade_metrics = self._load_recent_trade_metrics([item["code"] for item in items], target_date)
+        sector_story_context = self._build_sector_story_context(items)
+        risk_service = SpeculativeRiskService(self.db)
+        for item in items:
+            item_context = item_context_by_code.get(item["code"], {})
+            recent_metrics = recent_trade_metrics.get(item["code"], {})
+            sector_context = sector_story_context.get(item["code"], {})
+            item["risk_flag"] = risk_service.evaluate(
+                code=item["code"],
+                name=item.get("name"),
+                industry=item_context.get("industry"),
+                sector_names=item.get("sector_names") or [],
+                change_pct=item.get("change_pct"),
+                turnover_rate=item.get("turnover_rate"),
+                volume_ratio=item.get("volume_ratio"),
+                active_pool_rank=item.get("active_pool_rank"),
+                b1_passed=item.get("b1_passed"),
+                verdict=item.get("verdict"),
+                total_score=item.get("total_score"),
+                signal_type=item.get("signal_type"),
+                prefilter_passed=item_context.get("prefilter_passed"),
+                pullback_negative_flags=item_context.get("pullback_negative_flags") or [],
+                recent_limit_up_days=recent_metrics.get("recent_limit_up_days"),
+                recent_runup_pct=recent_metrics.get("recent_runup_pct"),
+                sector_breadth=sector_context.get("sector_breadth"),
+                sector_avg_change_pct=sector_context.get("sector_avg_change_pct"),
+                isolated_spike=sector_context.get("isolated_spike"),
+                sector_focus_name=sector_context.get("sector_focus_name"),
+            )
         items.sort(
             key=lambda item: (
                 self._signal_sort_priority(item.get("signal_type")),
@@ -1200,13 +1383,21 @@ class CurrentHotService:
                 item["code"],
             )
         )
-        return {
+        payload = {
             "pick_date": target_date,
             "candidates": items[:limit],
             "total": len(items),
         }
+        if include_risk_regime:
+            payload["risk_regime"] = self.build_risk_regime(target_date=target_date, items=items)
+        return payload
 
-    def get_results(self, pick_date: Optional[str] = None) -> dict[str, Any]:
+    def get_results(
+        self,
+        pick_date: Optional[str] = None,
+        *,
+        include_risk_regime: bool = True,
+    ) -> dict[str, Any]:
         target_date = self._normalize_trade_date(pick_date) or self.get_latest_pick_date()
         if target_date is None:
             return {"pick_date": None, "results": [], "total": 0, "min_score_threshold": 4.0}
@@ -1244,9 +1435,16 @@ class CurrentHotService:
             .all()
         )
         items = []
+        item_context_by_code: dict[str, dict[str, Any]] = {}
         for result, candidate, stock_name, stock_industry, active_pool_rank in rows:
             prefilter_passed, prefilter_summary, prefilter_blocked_by = self._extract_prefilter_fields(result.details_json)
-            items.append({
+            sector_names = self._resolve_sector_names(candidate.sector_names_json if candidate else [], industry=stock_industry)
+            pullback_negative_flags = self._normalize_pullback_negative_flags(
+                result.details_json.get("pullback_negative_flags")
+                if isinstance(result.details_json, dict)
+                else None
+            )
+            item = {
                 "id": result.id,
                 "pick_date": target_date,
                 "code": result.code,
@@ -1257,10 +1455,11 @@ class CurrentHotService:
                 "total_score": result.total_score,
                 "signal_type": result.signal_type,
                 "comment": result.comment,
+                "change_pct": candidate.change_pct if candidate else None,
                 "turnover_rate": result.turnover_rate if result.turnover_rate is not None else (candidate.turnover_rate if candidate else None),
                 "volume_ratio": result.volume_ratio if result.volume_ratio is not None else (candidate.volume_ratio if candidate else None),
                 "active_pool_rank": int(active_pool_rank) if active_pool_rank is not None else None,
-                "sector_names": self._resolve_sector_names(candidate.sector_names_json if candidate else [], industry=stock_industry),
+                "sector_names": sector_names,
                 "board_group": candidate.board_group if candidate else self.get_board_group(result.code),
                 "prefilter_passed": prefilter_passed,
                 "prefilter_summary": prefilter_summary,
@@ -1270,12 +1469,44 @@ class CurrentHotService:
                     if isinstance(result.details_json, dict)
                     else None
                 ),
-                "pullback_negative_flags": self._normalize_pullback_negative_flags(
-                    result.details_json.get("pullback_negative_flags")
-                    if isinstance(result.details_json, dict)
-                    else None
-                ),
-            })
+                "pullback_negative_flags": pullback_negative_flags,
+            }
+            items.append(item)
+            item_context_by_code[item["code"]] = {
+                "industry": stock_industry,
+                "pullback_negative_flags": pullback_negative_flags,
+                "prefilter_passed": prefilter_passed,
+            }
+
+        recent_trade_metrics = self._load_recent_trade_metrics([item["code"] for item in items], target_date)
+        sector_story_context = self._build_sector_story_context(items)
+        risk_service = SpeculativeRiskService(self.db)
+        for item in items:
+            item_context = item_context_by_code.get(item["code"], {})
+            recent_metrics = recent_trade_metrics.get(item["code"], {})
+            sector_context = sector_story_context.get(item["code"], {})
+            item["risk_flag"] = risk_service.evaluate(
+                code=item["code"],
+                name=item.get("name"),
+                industry=item_context.get("industry"),
+                sector_names=item.get("sector_names") or [],
+                change_pct=item.get("change_pct"),
+                turnover_rate=item.get("turnover_rate"),
+                volume_ratio=item.get("volume_ratio"),
+                active_pool_rank=item.get("active_pool_rank"),
+                b1_passed=item.get("b1_passed"),
+                verdict=item.get("verdict"),
+                total_score=item.get("total_score"),
+                signal_type=item.get("signal_type"),
+                prefilter_passed=item_context.get("prefilter_passed"),
+                pullback_negative_flags=item_context.get("pullback_negative_flags") or [],
+                recent_limit_up_days=recent_metrics.get("recent_limit_up_days"),
+                recent_runup_pct=recent_metrics.get("recent_runup_pct"),
+                sector_breadth=sector_context.get("sector_breadth"),
+                sector_avg_change_pct=sector_context.get("sector_avg_change_pct"),
+                isolated_spike=sector_context.get("isolated_spike"),
+                sector_focus_name=sector_context.get("sector_focus_name"),
+            )
         items.sort(
             key=lambda item: (
                 self._signal_sort_priority(item.get("signal_type")),
@@ -1285,12 +1516,15 @@ class CurrentHotService:
                 item["code"],
             )
         )
-        return {
+        payload = {
             "pick_date": target_date,
             "results": items,
             "total": len(items),
             "min_score_threshold": 4.0,
         }
+        if include_risk_regime:
+            payload["risk_regime"] = self.build_risk_regime(target_date=target_date, items=items)
+        return payload
 
     def get_sector_analysis(self, window_size: int = DEFAULT_WINDOW_SIZE, top_n: int = 5) -> dict[str, Any]:
         catalog = self._load_sector_analysis_catalog()
@@ -1502,6 +1736,208 @@ class CurrentHotService:
                 if str(sector.get("key") or "").strip()
             ],
         }
+
+    def build_risk_regime(
+        self,
+        *,
+        target_date: date,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del items
+        market_items = self._load_market_risk_sample(target_date)
+        previous_date = (
+            self.db.query(StockDaily.trade_date)
+            .filter(StockDaily.trade_date < target_date)
+            .order_by(StockDaily.trade_date.desc())
+            .limit(1)
+            .scalar()
+        )
+        previous_items: list[dict[str, Any]] = self._load_market_risk_sample(previous_date) if previous_date else []
+
+        regime = RiskRegimeService().evaluate(items=market_items, previous_items=previous_items)
+        ai_review = RiskRegimeAIService(self.db).confirm_market_regime(
+            pick_date=target_date,
+            items=market_items,
+            base_regime=regime,
+        )
+        regime["ai_review"] = ai_review
+        if ai_review and isinstance(ai_review.get("result"), dict):
+            ai_result = ai_review["result"]
+            regime["ai_confirmed_level"] = ai_result.get("confirmed_level")
+            regime["ai_confidence"] = ai_result.get("confidence")
+            regime["ai_stance"] = ai_result.get("stance")
+            regime["ai_evidence_strength"] = ai_result.get("evidence_strength")
+            if str(ai_result.get("summary") or "").strip():
+                regime["summary"] = str(ai_result.get("summary")).strip()
+        return regime
+
+    def _load_market_risk_sample(self, trade_date: Optional[date], *, top_m: int = 200, lookback_window: int = 5) -> list[dict[str, Any]]:
+        if trade_date is None:
+            return []
+
+        rank_rows = (
+            self.db.query(
+                StockActivePoolRank.code,
+                StockActivePoolRank.active_pool_rank,
+                Stock.name,
+                Stock.industry,
+            )
+            .outerjoin(Stock, Stock.code == StockActivePoolRank.code)
+            .filter(
+                StockActivePoolRank.trade_date == trade_date,
+                StockActivePoolRank.top_m == 2000,
+                StockActivePoolRank.n_turnover_days == 43,
+                StockActivePoolRank.active_pool_rank <= top_m,
+            )
+            .order_by(StockActivePoolRank.active_pool_rank.asc(), StockActivePoolRank.code.asc())
+            .all()
+        )
+        if not rank_rows:
+            return []
+
+        codes = [str(code).zfill(6) for code, *_ in rank_rows]
+        rank_map = {str(code).zfill(6): int(active_pool_rank) for code, active_pool_rank, *_ in rank_rows}
+        stock_meta = {
+            str(code).zfill(6): {
+                "name": name,
+                "industry": industry,
+            }
+            for code, _rank, name, industry in rank_rows
+        }
+
+        previous_trade_date = (
+            self.db.query(StockDaily.trade_date)
+            .filter(StockDaily.trade_date < trade_date)
+            .order_by(StockDaily.trade_date.desc())
+            .limit(1)
+            .scalar()
+        )
+
+        b1_rows = (
+            self.db.query(
+                DailyB1Check,
+                DailyB1CheckDetail,
+            )
+            .outerjoin(
+                DailyB1CheckDetail,
+                (DailyB1CheckDetail.code == DailyB1Check.code)
+                & (DailyB1CheckDetail.check_date == DailyB1Check.check_date),
+            )
+            .filter(
+                DailyB1Check.check_date == trade_date,
+                DailyB1Check.code.in_(codes),
+            )
+            .all()
+        )
+        b1_map = {
+            str(check.code).zfill(6): (check, detail)
+            for check, detail in b1_rows
+        }
+
+        daily_rows = (
+            self.db.query(
+                StockDaily.code,
+                StockDaily.trade_date,
+                StockDaily.open,
+                StockDaily.close,
+                StockDaily.turnover_rate,
+                StockDaily.volume_ratio,
+            )
+            .filter(
+                StockDaily.trade_date == trade_date,
+                StockDaily.code.in_(codes),
+            )
+            .all()
+        )
+        daily_map = {
+            str(code).zfill(6): {
+                "trade_date": trade_date_value,
+                "open_price": self._safe_float(open_price),
+                "close_price": self._safe_float(close_price),
+                "turnover_rate": self._safe_float(turnover_rate),
+                "volume_ratio": self._safe_float(volume_ratio),
+            }
+            for code, trade_date_value, open_price, close_price, turnover_rate, volume_ratio in daily_rows
+        }
+
+        previous_close_map: dict[str, float] = {}
+        if previous_trade_date is not None:
+            previous_daily_rows = (
+                self.db.query(StockDaily.code, StockDaily.close)
+                .filter(
+                    StockDaily.trade_date == previous_trade_date,
+                    StockDaily.code.in_(codes),
+                )
+                .all()
+            )
+            previous_close_map = {
+                str(code).zfill(6): float(close_price)
+                for code, close_price in previous_daily_rows
+                if close_price is not None
+            }
+
+        recent_trade_metrics = self._load_recent_trade_metrics(codes, trade_date, window_size=lookback_window)
+        sample_items: list[dict[str, Any]] = []
+        for code in codes:
+            stock_info = stock_meta.get(code, {})
+            check_pair = b1_map.get(code)
+            daily_info = daily_map.get(code, {})
+            check = check_pair[0] if check_pair else None
+            detail = check_pair[1] if check_pair else None
+            detail_rules = detail.rules_json if detail and isinstance(detail.rules_json, dict) else {}
+            detail_score = detail.score_details_json if detail and isinstance(detail.score_details_json, dict) else {}
+            detail_details = detail.details_json if detail and isinstance(detail.details_json, dict) else {}
+            close_price = daily_info.get("close_price")
+            previous_close = previous_close_map.get(code)
+            change_pct = self._safe_float(getattr(check, "change_pct", None))
+            if change_pct is None and previous_close not in (None, 0) and close_price is not None:
+                change_pct = (close_price - previous_close) / previous_close * 100
+
+            item = {
+                "code": code,
+                "name": stock_info.get("name"),
+                "industry": stock_info.get("industry"),
+                "sector_names": [str(stock_info.get("industry")).strip()] if str(stock_info.get("industry") or "").strip() else [],
+                "change_pct": change_pct if change_pct is not None else getattr(check, "change_pct", None),
+                "turnover_rate": getattr(check, "turnover_rate", None) if check and getattr(check, "turnover_rate", None) is not None else daily_info.get("turnover_rate"),
+                "volume_ratio": getattr(check, "volume_ratio", None) if check and getattr(check, "volume_ratio", None) is not None else daily_info.get("volume_ratio"),
+                "active_pool_rank": rank_map.get(code),
+                "b1_passed": getattr(check, "b1_passed", None),
+                "signal_type": detail_score.get("signal_type"),
+                "verdict": detail_score.get("verdict"),
+                "total_score": getattr(check, "score", None),
+                "prefilter_passed": detail_rules.get("prefilter_passed"),
+                "pullback_negative_flags": detail_details.get("pullback_negative_flags") or [],
+            }
+            sample_items.append(item)
+
+        sector_story_context = self._build_sector_story_context_by_sector_name(sample_items)
+        risk_service = SpeculativeRiskService(self.db)
+        for item in sample_items:
+            code = str(item.get("code") or "").zfill(6)
+            item["risk_flag"] = risk_service.evaluate(
+                code=code,
+                name=item.get("name"),
+                industry=item.get("industry"),
+                sector_names=item.get("sector_names") or [],
+                change_pct=item.get("change_pct"),
+                turnover_rate=item.get("turnover_rate"),
+                volume_ratio=item.get("volume_ratio"),
+                active_pool_rank=item.get("active_pool_rank"),
+                b1_passed=item.get("b1_passed"),
+                verdict=item.get("verdict"),
+                total_score=item.get("total_score"),
+                signal_type=item.get("signal_type"),
+                prefilter_passed=item.get("prefilter_passed"),
+                pullback_negative_flags=item.get("pullback_negative_flags") or [],
+                recent_limit_up_days=recent_trade_metrics.get(code, {}).get("recent_limit_up_days"),
+                recent_runup_pct=recent_trade_metrics.get(code, {}).get("recent_runup_pct"),
+                sector_breadth=sector_story_context.get(code, {}).get("sector_breadth"),
+                sector_avg_change_pct=sector_story_context.get(code, {}).get("sector_avg_change_pct"),
+                isolated_spike=sector_story_context.get(code, {}).get("isolated_spike"),
+                sector_focus_name=sector_story_context.get(code, {}).get("sector_focus_name"),
+            )
+        return sample_items
 
     def prune_window(self, window_size: int = DEFAULT_WINDOW_SIZE) -> dict[str, Any]:
         keep_dates = self.get_recent_trade_dates(window_size)

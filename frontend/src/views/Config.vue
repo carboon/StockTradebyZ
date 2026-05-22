@@ -52,7 +52,7 @@
             </el-form-item>
 
             <!-- LLM 配置 -->
-            <el-divider content-position="left" class="llm-divider">LLM API 配置 (待完善)</el-divider>
+            <el-divider content-position="left" class="llm-divider">LLM API 配置</el-divider>
 
             <el-form-item label="GLM API Key">
               <el-input
@@ -93,6 +93,19 @@
               />
               <div class="form-tip form-tip-disabled">
                 获取地址: <a href="https://ai.google.dev/" target="_blank">https://ai.google.dev/</a>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="DeepSeek Key">
+              <el-input
+                v-model="configs.deepseek_api_key"
+                type="password"
+                show-password
+                placeholder="DeepSeek API Key"
+                class="config-input"
+              />
+              <div class="form-tip">
+                获取地址: <a href="https://platform.deepseek.com/" target="_blank">https://platform.deepseek.com/</a>
               </div>
             </el-form-item>
 
@@ -365,11 +378,24 @@ const { isMobile } = useResponsive()
 
 const activeTab = ref('config')
 
-const configs = ref({
+type ConfigFormState = {
+  tushare_token: string
+  zhipuai_api_key: string
+  dashscope_api_key: string
+  gemini_api_key: string
+  deepseek_api_key: string
+  default_reviewer: string
+  min_score_threshold: number
+  register_validation_question: string
+  register_validation_answer: string
+}
+
+const configs = ref<ConfigFormState>({
   tushare_token: '',
   zhipuai_api_key: '',
   dashscope_api_key: '',
   gemini_api_key: '',
+  deepseek_api_key: '',
   default_reviewer: 'quant',
   min_score_threshold: 4.0,
   register_validation_question: '系统管理员的微信名是什么',
@@ -586,6 +612,7 @@ async function loadConfigs() {
       zhipuai_api_key: configStore.configs.zhipuai_api_key || '',
       dashscope_api_key: configStore.configs.dashscope_api_key || '',
       gemini_api_key: configStore.configs.gemini_api_key || '',
+      deepseek_api_key: configStore.configs.deepseek_api_key || '',
       default_reviewer: configStore.configs.default_reviewer || 'quant',
       min_score_threshold: parseFloat(configStore.configs.min_score_threshold || '4.0'),
       register_validation_question: configStore.configs.register_validation_question || '系统管理员的微信名是什么',

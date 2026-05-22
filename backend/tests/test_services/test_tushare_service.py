@@ -229,6 +229,48 @@ def test_get_stock_list_cached(tushare_service, mock_stock_list_df):
 
 
 @pytest.mark.service
+def test_get_announcements_returns_structured_items(tushare_service):
+    with patch("tushare.pro_api") as mock_pro_api:
+        mock_pro = MagicMock()
+        mock_pro.anns_d.return_value = pd.DataFrame([
+            {"ann_date": "20260508", "name": "故事龙", "title": "股票交易异常波动公告", "url": "https://example.com/a"},
+        ])
+        mock_pro_api.return_value = mock_pro
+
+        result = tushare_service.get_announcements("600011.SH", start_date="20260501", end_date="20260508")
+
+        assert result[0]["title"] == "股票交易异常波动公告"
+
+
+@pytest.mark.service
+def test_get_abnormal_volatility_events_returns_structured_items(tushare_service):
+    with patch("tushare.pro_api") as mock_pro_api:
+        mock_pro = MagicMock()
+        mock_pro.stk_high_shock.return_value = pd.DataFrame([
+            {"trade_date": "20260508", "ts_code": "600011.SH", "name": "故事龙", "reason": "严重异常波动"},
+        ])
+        mock_pro_api.return_value = mock_pro
+
+        result = tushare_service.get_abnormal_volatility_events("600011.SH", trade_date="20260508")
+
+        assert result[0]["reason"] == "严重异常波动"
+
+
+@pytest.mark.service
+def test_get_news_items_returns_structured_items(tushare_service):
+    with patch("tushare.pro_api") as mock_pro_api:
+        mock_pro = MagicMock()
+        mock_pro.news.return_value = pd.DataFrame([
+            {"datetime": "2026-05-08 10:00:00", "title": "存储芯片热度升温", "content": "市场关注故事股", "src": "test"},
+        ])
+        mock_pro_api.return_value = mock_pro
+
+        result = tushare_service.get_news_items(start_date="20260501", end_date="20260508")
+
+        assert result[0]["title"] == "存储芯片热度升温"
+
+
+@pytest.mark.service
 def test_find_stock_by_code(tushare_service, mock_stock_list_df):
     """
     测试通过6位代码查找股票名称
@@ -461,11 +503,12 @@ def test_load_stock_data_columns_lowercased(tushare_service, tmp_path):
 
 
 @pytest.mark.service
-def test_trade_date_data_readiness_requires_complete_metrics(tushare_service):
+def test_trade_date_data_readiness_accepts_local_volume_ratio_fallback(tushare_service):
     """
-    测试最新交易日就绪判定会校验关键指标完整性
+    测试最新交易日就绪判定允许本地量比兜底
 
-    当 daily_basic 存在但 volume_ratio 未填充时，应判定为未就绪。
+    当 daily_basic 已完整返回且换手率已补齐时，即使 volume_ratio 尚未填充，
+    也应允许进入后续本地回填流程。
     """
     TushareService.clear_data_status_cache()
 
@@ -485,13 +528,14 @@ def test_trade_date_data_readiness_requires_complete_metrics(tushare_service):
     with patch("app.services.tushare_service.acquire_tushare_slot"):
         readiness = tushare_service.get_trade_date_data_readiness("2026-05-19", ttl_seconds=0)
 
-    assert readiness["ready"] is False
+    assert readiness["ready"] is True
     assert readiness["daily_row_count"] == 2
     assert readiness["daily_basic_row_count"] == 2
     assert readiness["turnover_rate_count"] == 2
     assert readiness["volume_ratio_count"] == 0
-    assert readiness["metric_fill_ratio"] == 0.0
-    assert readiness["reason"] == "daily_metrics_incomplete"
+    assert readiness["metric_fill_ratio"] == 1.0
+    assert readiness["volume_ratio_fallback_required"] is True
+    assert readiness["reason"] is None
 
 
 @pytest.mark.service

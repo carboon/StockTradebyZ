@@ -119,6 +119,24 @@
                   </div>
                 </div>
               </div>
+
+              <div class="panel-section">
+                <h3>过热转弱预警怎么用</h3>
+                <div class="definition-list">
+                  <div class="definition-item">
+                    <el-tag type="danger" effect="plain">第一步</el-tag>
+                    <p>先看当前热盘顶部的“过热转弱预警”。它不是基于你的自选热盘，而是基于全市场活跃股票样本，判断短线投机环境是否开始从过热转向急跌风险。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag type="warning" effect="plain">第二步</el-tag>
+                    <p>再看单股诊断里的“风险标的识别”和“市场级过热转弱”。前者看这只股票是否像故事股，后者看它所处环境是不是已经开始恶化。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag type="info" effect="plain">第三步</el-tag>
+                    <p>若规则预警高、AI 也确认，说明应优先防守，少做追高；若规则预警高但 AI 证据弱，说明市场有风险苗头，但外部证据暂不足，只能保守观察。</p>
+                  </div>
+                </div>
+              </div>
             </el-tab-pane>
 
             <el-tab-pane label="名词解释" name="terms">
@@ -178,6 +196,10 @@
                   <div class="definition-item">
                     <el-tag effect="plain">Tushare</el-tag>
                     <p>本系统主要的数据源，用于拉取 A 股行情、行业分类、指数、解禁与基础资料。系统中的候选筛选、前置过滤和部分状态检查依赖这些数据。</p>
+                  </div>
+                  <div class="definition-item">
+                    <el-tag effect="plain">AI 二次确认</el-tag>
+                    <p>风险预警支持“规则初筛 + AI 二次确认”。系统会先用本地规则识别高热度、弱确认、板块背离等信号，再把候选标的、公告、异常波动和可匹配新闻整理后交给模型复核。若外部证据不足，AI 只会给出保守确认，不应视为硬结论。</p>
                   </div>
                 </div>
               </div>

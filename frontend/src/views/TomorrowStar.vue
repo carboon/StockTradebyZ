@@ -150,6 +150,15 @@
                       <el-radio-button value="sci-tech">科创板</el-radio-button>
                       <el-radio-button value="others">其他板块</el-radio-button>
                     </el-radio-group>
+                    <el-radio-group
+                      v-if="showBoardFilter"
+                      v-model="currentHotRiskFilter"
+                      size="small"
+                      class="board-filter"
+                    >
+                      <el-radio-button value="all">全部标的</el-radio-button>
+                      <el-radio-button value="risk-only">风险标的</el-radio-button>
+                    </el-radio-group>
                     <el-button
                       type="primary"
                       size="small"
@@ -187,6 +196,13 @@
                   <div class="mobile-analysis-item__meta">
                     <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                       {{ getSignalTypeLabel(row.signal_type) }}
+                    </el-tag>
+                    <el-tag
+                      v-if="isCurrentHotTab && isRiskCandidate(row)"
+                      :type="getRiskFlagTagType(getRiskFlagLevel(row))"
+                      size="small"
+                    >
+                      {{ getRiskFlagLabel(getRiskFlagLevel(row)) }}
                     </el-tag>
                     <el-tag v-if="isCurrentHotTab" :type="getBooleanTagType(getAnalysisB1Passed(row))" size="small">
                       B1 {{ getBooleanTagLabel(getAnalysisB1Passed(row)) }}
@@ -373,6 +389,15 @@
                         <el-radio-button value="sci-tech">科创板</el-radio-button>
                         <el-radio-button value="others">其他板块</el-radio-button>
                       </el-radio-group>
+                      <el-radio-group
+                        v-if="showBoardFilter"
+                        v-model="currentHotRiskFilter"
+                        size="small"
+                        class="board-filter"
+                      >
+                        <el-radio-button value="all">全部标的</el-radio-button>
+                        <el-radio-button value="risk-only">风险标的</el-radio-button>
+                      </el-radio-group>
                       <el-button
                         type="primary"
                         size="small"
@@ -418,6 +443,40 @@
                   当前排序：{{ activeCandidateSortLabel }}
                 </div>
 
+                <div v-if="isCurrentHotTab && currentHotRiskRegime" class="risk-regime-banner">
+                  <div class="risk-regime-banner__header">
+                    <span class="risk-regime-banner__title">过热转弱预警</span>
+                    <div class="risk-regime-banner__tags">
+                      <el-tag :type="getRiskRegimeTagType(currentHotRiskRegime.level)" size="small">
+                        {{ getRiskRegimeLabel(currentHotRiskRegime.level) }}
+                      </el-tag>
+                      <el-tag v-if="currentHotRiskRegime.triggered" type="danger" size="small" effect="plain">
+                        已触发
+                      </el-tag>
+                      <el-tag
+                        v-if="currentHotRiskRegime.ai_review?.result?.confirmed_level"
+                        :type="getRiskRegimeTagType(currentHotRiskRegime.ai_review?.result?.confirmed_level)"
+                        size="small"
+                        effect="plain"
+                      >
+                        AI {{ getRiskRegimeLabel(currentHotRiskRegime.ai_review?.result?.confirmed_level) }}
+                      </el-tag>
+                    </div>
+                  </div>
+                  <p class="risk-regime-banner__summary">
+                    {{ currentHotRiskRegime.summary || '暂无明确市场级过热转弱信号。' }}
+                  </p>
+                  <div class="risk-regime-banner__meta">
+                    <span>总分 {{ formatRiskRegimeScore(currentHotRiskRegime.score) }}</span>
+                    <span>风险占比 {{ formatRatioPct(currentHotRiskRegime.risk_ratio) }}</span>
+                    <span>趋势启动 {{ formatRatioPct(currentHotRiskRegime.trend_start_ratio) }}</span>
+                    <span>AI置信 {{ formatAiConfidence(currentHotRiskRegime.ai_review?.result?.confidence) }}</span>
+                  </div>
+                  <div class="risk-regime-banner__hint">
+                    该预警基于全市场活跃股票样本，不基于你的自选热盘。
+                  </div>
+                </div>
+
                 <div class="table-header-tip">
                   <template v-if="tab.name === 'tomorrow-star'">
                     <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
@@ -456,6 +515,18 @@
                       <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                         {{ getSignalTypeLabel(row.signal_type) }}
                       </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" label="风险" width="78" align="center">
+                    <template #default="{ row }">
+                      <el-tag
+                        v-if="isRiskCandidate(row)"
+                        :type="getRiskFlagTagType(getRiskFlagLevel(row))"
+                        size="small"
+                      >
+                        {{ getRiskFlagLabel(getRiskFlagLevel(row)) }}
+                      </el-tag>
+                      <span v-else>-</span>
                     </template>
                   </el-table-column>
                   <el-table-column v-if="!isCurrentHotTab" prop="tomorrow_star_pass" label="星" width="58" align="center">
@@ -1223,6 +1294,7 @@ import type {
   IntradayMarketOverviewItem,
   IntradayAnalysisResponse,
   IntradayAnalysisStatusResponse,
+  RiskRegimeSummary,
   TomorrowStarHistoryItem,
   TomorrowStarWindowStatusResponse,
   SignalReturnAnalysisResponse,
@@ -1236,6 +1308,7 @@ import { useResponsive } from '@/composables/useResponsive'
 type DataTabKey = 'tomorrow-star' | 'current-hot'
 type MiddaySourceKey = DataTabKey
 type BoardFilter = 'all' | 'sci-tech' | 'others'
+type CurrentHotRiskFilter = 'all' | 'risk-only'
 type SortOrder = 'ascending' | 'descending' | null
 type CandidateSortProp =
   | 'code'
@@ -1314,6 +1387,7 @@ const loadingMiddayAction = ref(false)
 const currentHotLoaded = ref(false)
 const currentHotHydratedFromCache = ref(false)
 const currentHotBoardFilter = ref<BoardFilter>('all')
+const currentHotRiskFilter = ref<CurrentHotRiskFilter>('all')
 const selectedTomorrowStarIndustries = ref<string[]>([])
 const middaySource = ref<MiddaySourceKey>('tomorrow-star')
 
@@ -1455,13 +1529,14 @@ const currentHotLastHistorySignature = ref<string>('')
 const currentHotHistoryPage = ref(1)
 const currentHotLatestCandidates = ref<CurrentHotCandidate[]>([])
 const currentHotAnalysisResults = ref<CurrentHotAnalysisResult[]>([])
+const currentHotRiskRegime = ref<RiskRegimeSummary | null>(null)
 const currentHotCandidatePage = ref(1)
 const currentHotAnalysisPage = ref(1)
 const currentHotCandidatePageSize = 18
 const currentHotAnalysisPageSize = 5
 const currentHotCandidateSort = ref<CandidateSortState>({ prop: '', order: null })
 const currentHotViewingDate = ref<string | null>(null)
-const currentHotCandidatesCache = ref<Map<string, { candidates: CurrentHotCandidate[], results: CurrentHotAnalysisResult[], timestamp: number }>>(new Map())
+const currentHotCandidatesCache = ref<Map<string, { candidates: CurrentHotCandidate[], results: CurrentHotAnalysisResult[], riskRegime?: RiskRegimeSummary | null, timestamp: number }>>(new Map())
 const candidateSortOrders: Array<Exclude<SortOrder, null>> = ['descending', 'ascending']
 
 // 增量更新状态
@@ -1518,7 +1593,11 @@ const activeCandidateLoading = computed(() => (
     ? currentHotLoading.value || currentHotLoadingLatest.value
     : loading.value || loadingLatest.value || checkingFreshness.value
 ))
-const activeCandidateTitle = computed(() => (isCurrentHotTab.value ? '热力股票池' : '候选股票'))
+const activeCandidateTitle = computed(() => (
+  isCurrentHotTab.value
+    ? (currentHotRiskFilter.value === 'risk-only' ? '风险标的' : '热力股票池')
+    : '候选股票'
+))
 const activeStockSource = computed<'tomorrow-star' | 'current-hot'>(() => (isCurrentHotTab.value ? 'current-hot' : 'tomorrow-star'))
 const showBoardFilter = computed(() => isCurrentHotTab.value)
 const showAnalysisComment = computed(() => !isCurrentHotTab.value)
@@ -1664,6 +1743,7 @@ const currentHotFilteredCandidates = computed(() => {
   return [...currentHotLatestCandidates.value]
     .map(mergeCurrentHotCandidateAnalysis)
     .filter((candidate) => matchesBoardFilter(candidate.code, currentHotBoardFilter.value))
+    .filter((candidate) => currentHotRiskFilter.value === 'all' || isRiskCandidate(candidate))
     .sort(compareCurrentHotCandidates)
 })
 const totalCurrentHotCandidates = computed(() => currentHotFilteredCandidates.value.length)
@@ -1917,6 +1997,7 @@ const topAnalysisResults = computed(() => {
 const currentHotFilteredAnalysisResults = computed(() => {
   return [...currentHotAnalysisResults.value]
     .filter((result) => matchesBoardFilter(result.code, currentHotBoardFilter.value))
+    .filter((result) => currentHotRiskFilter.value === 'all' || isRiskCandidate(result))
     .sort(compareCurrentHotAnalysisResults)
 })
 const totalCurrentHotAnalysisResults = computed(() => currentHotFilteredAnalysisResults.value.length)
@@ -1927,9 +2008,17 @@ const showActiveAnalysisPagination = computed(() => (
     : false
 ))
 const activeMobileAnalysisRows = computed(() => (isCurrentHotTab.value ? displayCurrentHotLatestCandidates.value : topAnalysisResults.value))
-const activeMobileAnalysisTitle = computed(() => (isCurrentHotTab.value ? '热力股票池' : '分析结果 Top 5'))
+const activeMobileAnalysisTitle = computed(() => (
+  isCurrentHotTab.value
+    ? (currentHotRiskFilter.value === 'risk-only' ? '风险标的' : '热力股票池')
+    : '分析结果 Top 5'
+))
 const activeMobileAnalysisTip = computed(() => (isCurrentHotTab.value ? '· 已合并评分与信号，默认按趋势启动、B1通过、评分排序' : '· 仅展示评分最高的 5 只股票'))
-const activeMobileAnalysisEmptyDescription = computed(() => (isCurrentHotTab.value ? '暂无热力股票池' : '暂无 Top 5 分析结果'))
+const activeMobileAnalysisEmptyDescription = computed(() => (
+  isCurrentHotTab.value
+    ? (currentHotRiskFilter.value === 'risk-only' ? '暂无风险标的' : '暂无热力股票池')
+    : '暂无 Top 5 分析结果'
+))
 const activeMobileAnalysisPage = computed({
   get: () => (isCurrentHotTab.value ? currentHotCandidatePage.value : currentHotAnalysisPage.value),
   set: (value: number) => {
@@ -2435,6 +2524,7 @@ async function loadCurrentHotData(skipLatestLoad: boolean = false) {
       currentHotViewingDate.value = null
       currentHotLatestCandidates.value = []
       currentHotAnalysisResults.value = []
+      currentHotRiskRegime.value = null
       currentHotLatestDataDate.value = ''
       persistTomorrowStarCache()
       return
@@ -2472,6 +2562,7 @@ async function loadCurrentHotLatestCandidates() {
     if (requestId !== currentHotCandidatesRequestId) return
     const candidates = candidatesData.candidates || []
     currentHotLatestCandidates.value = candidates
+    currentHotRiskRegime.value = candidatesData.risk_regime || null
     currentHotCandidatePage.value = 1
     currentHotAnalysisPage.value = 1
     currentHotCandidateSort.value = { prop: '', order: null }
@@ -2491,6 +2582,7 @@ async function loadCurrentHotLatestCandidates() {
           currentHotCandidatesCache.value.set(newPickDate, {
             candidates,
             results: resultsData.results || [],
+            riskRegime: candidatesData.risk_regime || resultsData.risk_regime || null,
             timestamp: Date.now(),
           })
         } catch {
@@ -2511,6 +2603,7 @@ async function loadCurrentHotLatestCandidates() {
         currentHotCandidatesCache.value.set(currentHotLatestDataDate.value, {
           candidates,
           results: resultsData.results || [],
+          riskRegime: candidatesData.risk_regime || resultsData.risk_regime || null,
           timestamp: Date.now(),
         })
       }
@@ -2540,6 +2633,7 @@ async function selectCurrentHotDate(row: HistoryRow) {
   if (row.status !== 'success') {
     currentHotLatestCandidates.value = []
     currentHotAnalysisResults.value = []
+    currentHotRiskRegime.value = null
     currentHotLatestDataDate.value = row.rawDate
     if (row.status === 'running') {
       ElMessage.info(`${row.rawDate} 正在生成中，稍后再查看`)
@@ -2557,6 +2651,7 @@ async function selectCurrentHotDate(row: HistoryRow) {
   if (cached && (now - cached.timestamp) < CACHE_TTL_MS) {
     currentHotLatestCandidates.value = cached.candidates
     currentHotAnalysisResults.value = cached.results
+    currentHotRiskRegime.value = cached.riskRegime || null
     currentHotLatestDataDate.value = row.rawDate
     persistTomorrowStarCache()
     return
@@ -2577,6 +2672,7 @@ async function selectCurrentHotDate(row: HistoryRow) {
 
     currentHotLatestCandidates.value = candidates
     currentHotAnalysisResults.value = results
+    currentHotRiskRegime.value = candidatesData.risk_regime || resultsData.risk_regime || null
     currentHotLatestDataDate.value = row.rawDate
     currentHotCandidatePage.value = 1
     currentHotAnalysisPage.value = 1
@@ -2584,6 +2680,7 @@ async function selectCurrentHotDate(row: HistoryRow) {
     currentHotCandidatesCache.value.set(row.rawDate, {
       candidates,
       results,
+      riskRegime: candidatesData.risk_regime || resultsData.risk_regime || null,
       timestamp: now,
     })
     persistTomorrowStarCache()
@@ -3214,9 +3311,10 @@ function getCandidatePrefilterNote(row: CandidateNoteLike): string {
 function getCandidateInlineNote(row: Candidate | CurrentHotCandidate): string {
   const pullbackSummary = getRowPullbackSummary(row)
   const prefilterNote = getCandidatePrefilterNote(row as CandidateNoteLike)
+  const riskSummary = getRiskFlagSummary(row as AnalysisDisplayRow)
   if (isCurrentHotTab.value) {
     const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
-    return [pullbackSummary, comment, prefilterNote]
+    return [riskSummary, pullbackSummary, comment, prefilterNote]
       .filter((item) => typeof item === 'string' && item.trim())
       .join('；') || '点击查看单股诊断'
   }
@@ -3360,6 +3458,57 @@ function getScoreType(score?: number | null): string {
   if (score >= 4.0) return 'success'
   if (score >= 3.5) return 'warning'
   return 'danger'
+}
+
+function getRiskFlagLevel(row: AnalysisDisplayRow | null | undefined): string | null {
+  if (!row || !('risk_flag' in row) || !row.risk_flag) return null
+  return row.risk_flag.level || null
+}
+
+function getRiskFlagLabel(level?: string | null): string {
+  if (level === 'high') return '高风险'
+  if (level === 'medium') return '观察'
+  return '低风险'
+}
+
+function getRiskFlagTagType(level?: string | null): 'danger' | 'warning' | 'info' {
+  if (level === 'high') return 'danger'
+  if (level === 'medium') return 'warning'
+  return 'info'
+}
+
+function isRiskCandidate(row: AnalysisDisplayRow | null | undefined): boolean {
+  if (!row || !('risk_flag' in row) || !row.risk_flag) return false
+  return ['high', 'medium'].includes(row.risk_flag?.level || '')
+}
+
+function getRiskFlagSummary(row: AnalysisDisplayRow | null | undefined): string {
+  if (!row || !('risk_flag' in row) || !row.risk_flag) return ''
+  return row.risk_flag.summary?.trim() || ''
+}
+
+function getRiskRegimeLabel(level?: string | null): string {
+  if (level === 'high') return '高警惕'
+  if (level === 'medium') return '转弱观察'
+  return '正常'
+}
+
+function getRiskRegimeTagType(level?: string | null): 'danger' | 'warning' | 'info' {
+  if (level === 'high') return 'danger'
+  if (level === 'medium') return 'warning'
+  return 'info'
+}
+
+function formatRiskRegimeScore(value?: number | null): string {
+  return typeof value === 'number' ? value.toFixed(1) : '-'
+}
+
+function formatRatioPct(value?: number | null): string {
+  return typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '-'
+}
+
+function formatAiConfidence(value?: number | null): string {
+  return typeof value === 'number' ? `${Math.round(value)}%` : '-'
 }
 
 function getSignalTypeLabel(signalType?: string | null): string {
@@ -3729,6 +3878,7 @@ function persistTomorrowStarCache() {
     currentHotCandidateSort: currentHotCandidateSort.value,
     currentHotLastHistorySignature: currentHotLastHistorySignature.value,
     currentHotBoardFilter: currentHotBoardFilter.value,
+    currentHotRiskFilter: currentHotRiskFilter.value,
     cachedAt: Date.now(),
   }
 
@@ -3803,6 +3953,7 @@ function hydrateTomorrowStarCache() {
     currentHotCandidateSort.value = normalizeCandidateSortState(payload.currentHotCandidateSort)
     currentHotLastHistorySignature.value = payload.currentHotLastHistorySignature || ''
     currentHotBoardFilter.value = payload.currentHotBoardFilter || 'all'
+    currentHotRiskFilter.value = payload.currentHotRiskFilter || 'all'
 
     // 防止旧缓存把某一天的右侧结果挂到另一日期上。
     if (
@@ -3908,6 +4059,11 @@ watch(canUseMiddayAnalysis, (allowed) => {
 })
 
 watch(currentHotBoardFilter, () => {
+  currentHotCandidatePage.value = 1
+  currentHotAnalysisPage.value = 1
+})
+
+watch(currentHotRiskFilter, () => {
   currentHotCandidatePage.value = 1
   currentHotAnalysisPage.value = 1
 })
@@ -4308,6 +4464,49 @@ $space-lg: 32px;
       &:last-child {
         margin-right: 0;
       }
+    }
+  }
+
+  .risk-regime-banner {
+    margin-bottom: 10px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid #fed7aa;
+    background: linear-gradient(180deg, #fffbeb 0%, #fff7ed 100%);
+
+    &__header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+
+    &__title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #9a3412;
+    }
+
+    &__tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    &__summary {
+      margin: 0 0 8px;
+      color: #7c2d12;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    &__meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: #9a3412;
+      font-size: 12px;
     }
   }
 

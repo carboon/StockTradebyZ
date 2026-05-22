@@ -26,6 +26,12 @@ DISABLE_STARTUP_PREWARM_FILE = ROOT / "data" / ".disable_startup_prewarm"
 LOG_DIR = ROOT / "data" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 BACKEND_LOG_FILE = LOG_DIR / "backend.log"
+DISABLE_AUTO_UPDATE_SCHEDULER = os.environ.get("DISABLE_AUTO_UPDATE_SCHEDULER", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -174,9 +180,11 @@ async def lifespan(app: FastAPI):
     if not _TEST_MODE and not DISABLE_STARTUP_PREWARM_FILE.exists():
         asyncio.create_task(warm_stock_metadata_cache())
         asyncio.create_task(warm_diagnosis_history_cache())
-    if not _TEST_MODE:
+    if not _TEST_MODE and not DISABLE_AUTO_UPDATE_SCHEDULER:
         auto_update_scheduler = AutoDailyUpdateScheduler(manager=manager)
         auto_update_scheduler.start()
+    elif not _TEST_MODE and DISABLE_AUTO_UPDATE_SCHEDULER:
+        logger.info("自动更新调度器已禁用（DISABLE_AUTO_UPDATE_SCHEDULER）")
 
     yield
     if auto_update_scheduler is not None:

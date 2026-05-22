@@ -128,6 +128,7 @@ services:
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173}
       - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DISABLE_AUTO_UPDATE_SCHEDULER=1
     depends_on:
       postgres:
         condition: service_healthy

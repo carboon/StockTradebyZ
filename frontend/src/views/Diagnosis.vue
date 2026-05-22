@@ -231,6 +231,78 @@
                 </div>
               </template>
 
+              <div v-if="analysisRiskFlag" class="analysis-risk-panel">
+                <div class="analysis-risk-panel__header">
+                  <span class="analysis-risk-panel__title">风险标的识别</span>
+                  <div class="analysis-risk-panel__actions">
+                    <el-tag :type="getRiskFlagTagType(analysisRiskFlag.level)" size="small">
+                      {{ getRiskFlagLabel(analysisRiskFlag.level) }}
+                    </el-tag>
+                    <el-tag v-if="analysisRiskFlag.reversal_risk" type="danger" size="small" effect="plain">
+                      热度反转边缘
+                    </el-tag>
+                  </div>
+                </div>
+                <p class="analysis-risk-panel__summary">
+                  {{ analysisRiskFlag.summary || '暂无明显情绪化风险特征。' }}
+                </p>
+                <div class="analysis-risk-panel__meta">
+                  <span>总分 {{ formatRiskScore(analysisRiskFlag.score) }}</span>
+                  <span>热度 {{ formatRiskScore(analysisRiskFlag.heat_score) }}</span>
+                  <span>确认缺口 {{ formatRiskScore(analysisRiskFlag.confirmation_score) }}</span>
+                  <span>叙事 {{ formatRiskScore(analysisRiskFlag.narrative_score) }}</span>
+                </div>
+                <div v-if="analysisRiskFlag.tags?.length" class="analysis-risk-panel__tags">
+                  <el-tag
+                    v-for="tag in analysisRiskFlag.tags"
+                    :key="`risk-tag-${tag}`"
+                    size="small"
+                    effect="plain"
+                    :type="getRiskFlagTagType(analysisRiskFlag.level)"
+                  >
+                    {{ tag }}
+                  </el-tag>
+                </div>
+                <ul v-if="analysisRiskFlag.reasons?.length" class="analysis-risk-panel__reasons">
+                  <li v-for="reason in analysisRiskFlag.reasons.slice(0, 4)" :key="reason">
+                    {{ reason }}
+                  </li>
+                </ul>
+              </div>
+
+              <div v-if="analysisRiskRegime" class="analysis-risk-panel analysis-risk-panel--market">
+                <div class="analysis-risk-panel__header">
+                  <span class="analysis-risk-panel__title">市场级过热转弱</span>
+                  <div class="analysis-risk-panel__actions">
+                    <el-tag :type="getRiskRegimeTagType(analysisRiskRegime.level)" size="small">
+                      {{ getRiskRegimeLabel(analysisRiskRegime.level) }}
+                    </el-tag>
+                    <el-tag
+                      v-if="analysisRiskRegime.ai_review?.result?.confirmed_level"
+                      :type="getRiskRegimeTagType(analysisRiskRegime.ai_review?.result?.confirmed_level)"
+                      size="small"
+                      effect="plain"
+                    >
+                      AI {{ getRiskRegimeLabel(analysisRiskRegime.ai_review?.result?.confirmed_level) }}
+                    </el-tag>
+                  </div>
+                </div>
+                <p class="analysis-risk-panel__summary">
+                  {{ analysisRiskRegime.summary || '暂无明确市场级过热转弱信号。' }}
+                </p>
+                <div class="analysis-risk-panel__meta">
+                  <span>总分 {{ formatRiskRegimeScore(analysisRiskRegime.score) }}</span>
+                  <span>风险占比 {{ formatRatioPct(analysisRiskRegime.risk_ratio) }}</span>
+                  <span>趋势启动 {{ formatRatioPct(analysisRiskRegime.trend_start_ratio) }}</span>
+                  <span>AI置信 {{ formatAiConfidence(analysisRiskRegime.ai_review?.result?.confidence) }}</span>
+                </div>
+                <ul v-if="analysisRiskRegime.ai_review?.result?.reasons?.length" class="analysis-risk-panel__reasons">
+                  <li v-for="reason in analysisRiskRegime.ai_review?.result?.reasons.slice(0, 3)" :key="reason">
+                    {{ reason }}
+                  </li>
+                </ul>
+              </div>
+
               <el-divider />
 
               <div v-if="isMobileViewport" class="mobile-analysis-panels">
@@ -676,7 +748,7 @@ import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, StockSearchItem, WatchlistItem } from '@/types'
+import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, RiskFlagSummary, RiskRegimeSummary, StockSearchItem, WatchlistItem } from '@/types'
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
@@ -725,6 +797,7 @@ type DiagnosisViewResult = {
   position_reasoning?: string
   volume_reasoning?: string
   abnormal_move_reasoning?: string
+  risk_flag?: RiskFlagSummary | null
 }
 
 type DiagnosisSearchSuggestion = StockSearchItem & {
@@ -741,6 +814,8 @@ const historyDetailVisible = ref(false)
 const historyDetailLoading = ref(false)
 const historyDetailData = ref<DiagnosisHistoryDetailResponse | null>(null)
 const analysisResult = ref<DiagnosisViewResult | null>(null)
+const analysisRiskFlag = computed(() => analysisResult.value?.risk_flag || null)
+const analysisRiskRegime = ref<RiskRegimeSummary | null>(null)
 const stockName = ref('')
 const currentDiagnosisChartData = ref<KLineData | null>(null)
 const lastAutoHistoryRefreshAt = ref<Record<string, number>>({})
@@ -1442,7 +1517,9 @@ async function checkAnalysisResult() {
         position_reasoning: analysis.position_reasoning || '',
         volume_reasoning: analysis.volume_reasoning || '',
         abnormal_move_reasoning: analysis.abnormal_move_reasoning || '',
+        risk_flag: analysis.risk_flag || null,
       }
+      analysisRiskRegime.value = data.risk_regime || null
 
       // 刷新历史数据
       await loadHistoryData()
@@ -1547,6 +1624,50 @@ function getScoreType(score?: number): string {
   return 'danger'
 }
 
+function getRiskFlagLabel(level?: string | null): string {
+  if (level === 'high') return '高风险'
+  if (level === 'medium') return '观察'
+  return '低风险'
+}
+
+function getRiskFlagTagType(level?: string | null): 'danger' | 'warning' | 'info' {
+  if (level === 'high') return 'danger'
+  if (level === 'medium') return 'warning'
+  return 'info'
+}
+
+function formatRiskScore(value?: number | null): string {
+  if (value === undefined || value === null) return '-'
+  return value.toFixed(1)
+}
+
+function getRiskRegimeLabel(level?: string | null): string {
+  if (level === 'high') return '高警惕'
+  if (level === 'medium') return '转弱观察'
+  return '正常'
+}
+
+function getRiskRegimeTagType(level?: string | null): 'danger' | 'warning' | 'info' {
+  if (level === 'high') return 'danger'
+  if (level === 'medium') return 'warning'
+  return 'info'
+}
+
+function formatRiskRegimeScore(value?: number | null): string {
+  if (value === undefined || value === null) return '-'
+  return value.toFixed(1)
+}
+
+function formatRatioPct(value?: number | null): string {
+  if (value === undefined || value === null) return '-'
+  return `${(value * 100).toFixed(0)}%`
+}
+
+function formatAiConfidence(value?: number | null): string {
+  if (value === undefined || value === null) return '-'
+  return `${Math.round(value)}%`
+}
+
 function getGateLabel(value?: boolean | null): string {
   if (value === true) return '是'
   if (value === false) return '否'
@@ -1638,6 +1759,7 @@ function persistDiagnosisState() {
     trendStartDates: trendStartDates.value,
     tomorrowStarDates: tomorrowStarDates.value,
     analysisResult: analysisResult.value,
+    analysisRiskRegime: analysisRiskRegime.value,
     isInWatchlist: isInWatchlist.value,
     lastAutoHistoryRefreshAt: lastAutoHistoryRefreshAt.value,
   }
@@ -1745,6 +1867,7 @@ function restoreDiagnosisState() {
     trendStartDates.value = state.trendStartDates || []
     tomorrowStarDates.value = state.tomorrowStarDates || []
     analysisResult.value = state.analysisResult || null
+    analysisRiskRegime.value = state.analysisRiskRegime || null
     isInWatchlist.value = Boolean(state.isInWatchlist)
     lastAutoHistoryRefreshAt.value = state.lastAutoHistoryRefreshAt || {}
     applyMobileRouteChartPreference()
@@ -2056,6 +2179,82 @@ function normalizeRouteCode(code: unknown): string {
         color: #606266;
         font-size: 13px;
         line-height: 1.6;
+      }
+
+      .analysis-risk-panel {
+        display: grid;
+        gap: 8px;
+        margin: 10px 0 4px;
+        padding: 12px;
+        border: 1px solid #fecaca;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #fff7ed 0%, #fff1f2 100%);
+
+        &__header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+        }
+
+        &__title {
+          font-weight: 600;
+          color: #7f1d1d;
+        }
+
+        &__actions {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 6px;
+        }
+
+        &__summary {
+          margin: 0;
+          color: #7c2d12;
+          font-size: 13px;
+          line-height: 1.6;
+        }
+
+        &__meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          color: #9a3412;
+          font-size: 12px;
+        }
+
+        &__tags {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+
+        &__reasons {
+          margin: 0;
+          padding-left: 18px;
+          color: #7c2d12;
+          font-size: 12px;
+          line-height: 1.6;
+        }
+      }
+
+      .analysis-risk-panel--market {
+        border-color: #bfdbfe;
+        background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
+
+        .analysis-risk-panel__title {
+          color: #1d4ed8;
+        }
+
+        .analysis-risk-panel__summary,
+        .analysis-risk-panel__reasons {
+          color: #1e3a8a;
+        }
+
+        .analysis-risk-panel__meta {
+          color: #1d4ed8;
+        }
       }
 
       .collapse-title {
