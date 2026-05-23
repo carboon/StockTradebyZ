@@ -26,8 +26,13 @@ data/db/*.db-*
 # IDE
 .vscode/
 .idea/
+.claude/
+.mcp-web-inspector/
 *.swp
 *.swo
+
+# 本地运行/导入数据
+user/
 
 # 日志
 *.log

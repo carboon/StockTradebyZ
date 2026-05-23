@@ -77,6 +77,8 @@ EOF
 check_docker() {
     mkdir -p "$DOCKER_CONFIG_DIR"
     export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+    export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+    export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-1}"
 
     if ! command -v docker >/dev/null 2>&1; then
         log_error "未找到 Docker，请先安装 Docker"

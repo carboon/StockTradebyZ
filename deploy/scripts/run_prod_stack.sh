@@ -41,6 +41,8 @@ main() {
 
     mkdir -p "$DOCKER_CONFIG_DIR"
     export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+    export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+    export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-1}"
 
     resolve_docker_compose
     cd "$DEPLOY_DIR"

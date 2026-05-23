@@ -103,11 +103,16 @@ def run(
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     log(f"$ {shell_join(cmd)}")
+    run_env = os.environ.copy()
+    run_env.setdefault("DOCKER_BUILDKIT", "1")
+    run_env.setdefault("COMPOSE_DOCKER_CLI_BUILD", "1")
+    if env:
+        run_env.update(env)
     if capture:
         result = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
-            env=env,
+            env=run_env,
             text=True,
             capture_output=True,
         )
@@ -119,7 +124,7 @@ def run(
         result = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
-            env=env,
+            env=run_env,
             text=True,
         )
     if check and result.returncode != 0:
