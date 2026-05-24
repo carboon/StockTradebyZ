@@ -56,8 +56,6 @@ class TushareService:
     def verify_token(self) -> tuple[bool, str]:
         """验证 Token 是否有效"""
         cache_key = self.token or ""
-        if self._pro is None:
-            self._verify_cache.pop(cache_key, None)
         cached = self._verify_cache.get(cache_key)
         now = time.time()
         if cached and now - cached[0] < 60:
@@ -79,8 +77,6 @@ class TushareService:
     def get_stock_list(self) -> pd.DataFrame:
         """获取股票列表"""
         cache_key = self.token or ""
-        if self._pro is None:
-            self._stock_list_cache.pop(cache_key, None)
         cached = self._stock_list_cache.get(cache_key)
         now = time.time()
         if cached and now - cached[0] < 3600:
@@ -691,13 +687,17 @@ class TushareService:
 
         return df.sort_values("date").reset_index(drop=True)
 
-    def check_data_status(self, *, prefer_realtime_latest: bool = False) -> dict:
+    def check_data_status(
+        self,
+        *,
+        prefer_realtime_latest: bool = False,
+        include_remote_checks: bool = True,
+    ) -> dict:
         """检查数据状态，优先数据库，失败时回退本地文件系统。"""
         # 检查缓存
         now = time.time()
-        cache_key = f"data_status:{'realtime' if prefer_realtime_latest else 'default'}"
-        if self._pro is None:
-            self._data_status_cache.pop(cache_key, None)
+        mode = "remote" if include_remote_checks else "local"
+        cache_key = f"{self.token or ''}:data_status:{mode}:{'realtime' if prefer_realtime_latest else 'default'}"
         cached = self._data_status_cache.get(cache_key)
         if cached and now - cached[0] < self._data_status_cache_ttl:
             return cached[1]
@@ -707,8 +707,12 @@ class TushareService:
         from app.models import StockDaily, Candidate, AnalysisResult
         from sqlalchemy import func, select, distinct
 
-        latest_trade_date = self.get_effective_latest_trade_date(prefer_realtime=prefer_realtime_latest)
-        calendar_latest_trade_date = self.get_latest_trade_date()
+        latest_trade_date = (
+            self.get_effective_latest_trade_date(prefer_realtime=prefer_realtime_latest)
+            if include_remote_checks
+            else None
+        )
+        calendar_latest_trade_date = self.get_latest_trade_date() if include_remote_checks else None
 
         # 获取预期的股票总数（从 stocklist.csv）
         from backend.app.api.tasks import _load_expected_fetch_codes
@@ -762,6 +766,9 @@ class TushareService:
                     ).first()
                     if latest:
                         latest_local_date = latest[0].isoformat() if hasattr(latest[0], "isoformat") else str(latest[0])
+                        if latest_trade_date is None:
+                            latest_trade_date = latest_local_date
+                            status["raw_data"]["latest_trade_date"] = latest_local_date
                         status["raw_data"]["latest_date"] = latest_local_date
                         status["raw_data"]["latest_db_date"] = latest_local_date
                         latest_day_stock_count = db.execute(
@@ -784,7 +791,11 @@ class TushareService:
                     status["raw_data"]["db_record_count"] = int(kline_count or 0)
 
                     # 获取停牌股票信息（从预期总数中排除）
-                    suspended_codes = self.get_suspended_stocks(latest_trade_date) if latest_trade_date else set()
+                    suspended_codes = (
+                        self.get_suspended_stocks(latest_trade_date)
+                        if include_remote_checks and latest_trade_date
+                        else set()
+                    )
 
                     # 额外获取"长期无数据"的股票（可能是长期停牌或退市）
                     from datetime import timedelta
@@ -833,6 +844,13 @@ class TushareService:
                     .limit(1)
                 ).scalar_one_or_none()
                 if latest_manifest is not None:
+                    if latest_trade_date is None and latest_manifest.trade_date is not None:
+                        latest_trade_date = (
+                            latest_manifest.trade_date.isoformat()
+                            if hasattr(latest_manifest.trade_date, "isoformat")
+                            else str(latest_manifest.trade_date)
+                        )
+                        status["raw_data"]["latest_trade_date"] = latest_trade_date
                     self._apply_manifest_to_raw_status(
                         status["raw_data"],
                         latest_manifest=latest_manifest,
@@ -903,8 +921,6 @@ class TushareService:
             概念板块列表，每个元素包含概念代码、概念名称等
         """
         cache_key = self.token or ""
-        if self._pro is None:
-            self._concept_list_cache.pop(cache_key, None)
         cached = self._concept_list_cache.get(cache_key)
         now = time.time()
         if cached and now - cached[0] < 86400:  # 24小时缓存

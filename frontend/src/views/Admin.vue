@@ -4,12 +4,19 @@
       <template #header>
         <div class="card-header" :class="{ 'card-header--mobile': isMobile }">
           <span>用户管理</span>
-          <el-input
-            v-model="searchQuery"
-            placeholder="搜索用户名或显示名称..."
-            class="search-input"
-            clearable
-          />
+          <div class="header-controls">
+            <el-select v-model="onlineFilter" placeholder="在线状态" clearable class="online-filter">
+              <el-option label="全部用户" :value="null" />
+              <el-option label="仅在线" :value="true" />
+              <el-option label="仅离线" :value="false" />
+            </el-select>
+            <el-input
+              v-model="searchQuery"
+              placeholder="搜索用户名或显示名称..."
+              class="search-input"
+              clearable
+            />
+          </div>
         </div>
       </template>
 
@@ -33,17 +40,24 @@
                 <el-tag :type="user.is_active ? 'success' : 'danger'" size="small">
                   {{ user.is_active ? '活跃' : '禁用' }}
                 </el-tag>
+                <el-tag :type="user.is_online ? 'success' : 'info'" size="small">
+                  {{ user.is_online ? '在线' : '离线' }}
+                </el-tag>
               </div>
             </div>
 
             <div class="user-card__meta">
               <div class="meta-item">
-                <span class="meta-label">日配额</span>
-                <span class="meta-value">{{ user.daily_quota }}</span>
-              </div>
-              <div class="meta-item">
                 <span class="meta-label">注册时间</span>
                 <span class="meta-value">{{ formatDate(user.created_at) }}</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">最后登录</span>
+                <span class="meta-value">{{ user.last_login_at ? formatDate(user.last_login_at) : '从未登录' }}</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">近10天API请求</span>
+                <span class="meta-value">{{ user.recent_visit_count }} 次</span>
               </div>
             </div>
 
@@ -94,7 +108,19 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="daily_quota" label="日配额" width="80" />
+        <el-table-column prop="is_online" label="在线" width="70">
+          <template #default="{ row }">
+            <el-tag :type="row.is_online ? 'success' : 'info'" size="small">
+              {{ row.is_online ? '在线' : '离线' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="last_login_at" label="最后登录" width="170">
+          <template #default="{ row }">{{ row.last_login_at ? formatDate(row.last_login_at) : '从未登录' }}</template>
+        </el-table-column>
+        <el-table-column prop="recent_visit_count" label="近10天API请求" width="120" align="center">
+          <template #default="{ row }">{{ row.recent_visit_count }} 次</template>
+        </el-table-column>
         <el-table-column prop="created_at" label="注册时间" width="170">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
@@ -213,15 +239,27 @@ import type { UserListItem, UsageStatsResponse } from '@/types'
 
 const users = ref<UserListItem[]>([])
 const searchQuery = ref('')
+const onlineFilter = ref<boolean | null>(null)
 const { isMobile } = useResponsive()
 
 const filteredUsers = computed(() => {
-  if (!searchQuery.value) return users.value
-  const q = searchQuery.value.toLowerCase()
-  return users.value.filter(u =>
-    u.username.toLowerCase().includes(q) ||
-    (u.display_name ?? '').toLowerCase().includes(q)
-  )
+  let result = users.value
+
+  // 按在线状态筛选
+  if (onlineFilter.value !== null) {
+    result = result.filter(u => u.is_online === onlineFilter.value)
+  }
+
+  // 按搜索关键词筛选
+  if (searchQuery.value) {
+    const q = searchQuery.value.toLowerCase()
+    result = result.filter(u =>
+      u.username.toLowerCase().includes(q) ||
+      (u.display_name ?? '').toLowerCase().includes(q)
+    )
+  }
+
+  return result
 })
 
 async function loadUsers() {
@@ -313,6 +351,16 @@ onMounted(() => {
   justify-content: space-between;
   font-weight: 600;
   gap: 16px;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.online-filter {
+  width: 120px;
 }
 
 .search-input {
@@ -436,6 +484,15 @@ onMounted(() => {
   .card-header--mobile {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .header-controls {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .online-filter {
+    width: 100%;
   }
 
   .search-input {

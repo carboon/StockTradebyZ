@@ -352,18 +352,33 @@ class CurrentHotService:
         if not normalized_codes:
             return {}
 
+        required_points = window_size + 1
+        recent_dates = [
+            row[0]
+            for row in (
+                self.db.query(StockDaily.trade_date)
+                .distinct()
+                .filter(StockDaily.trade_date <= target_date)
+                .order_by(StockDaily.trade_date.desc())
+                .limit(required_points)
+                .all()
+            )
+            if row and row[0]
+        ]
+        if not recent_dates:
+            return {}
+
         rows = (
             self.db.query(StockDaily.code, StockDaily.trade_date, StockDaily.close)
             .filter(
                 StockDaily.code.in_(normalized_codes),
-                StockDaily.trade_date <= target_date,
+                StockDaily.trade_date.in_(recent_dates),
             )
             .order_by(StockDaily.code.asc(), StockDaily.trade_date.desc())
             .all()
         )
 
         grouped: dict[str, list[tuple[date, float]]] = {}
-        required_points = window_size + 1
         for code, trade_date, close in rows:
             bucket = grouped.setdefault(str(code).zfill(6), [])
             if len(bucket) >= required_points:

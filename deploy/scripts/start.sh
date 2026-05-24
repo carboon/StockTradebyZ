@@ -71,12 +71,11 @@ StockTrader 统一运行脚本
 
 访问地址:
   开发环境:
-    - 主入口: http://127.0.0.1:8080 (nginx-dev)
     - 前端直连: http://127.0.0.1:5173 (frontend-dev)
     - 后端: http://127.0.0.1:8000
 
   生产环境:
-    - 主入口: http://127.0.0.1 (nginx)
+    - 主入口: 由 deploy/.env 中 NGINX_PORT 决定，未设置时为 http://127.0.0.1
     - 后端: http://127.0.0.1:8000
 EOF
 }
@@ -160,6 +159,10 @@ get_compose_args() {
     local mode="$1"
     local args=(-f docker-compose.yml --profile postgres)
 
+    if [ "$mode" = "prod" ] && use_prod_nobind_override; then
+        args=(-f docker-compose.yml -f docker-compose.prod-nobind.yml --profile postgres)
+    fi
+
     case "$mode" in
         dev)
             args+=(--profile dev)
@@ -174,6 +177,24 @@ get_compose_args() {
     esac
 
     echo "${args[*]}"
+}
+
+use_prod_nobind_override() {
+    if [ "${STOCKTRADE_PROD_NOBIND:-}" = "0" ]; then
+        return 1
+    fi
+    if [ "${STOCKTRADE_PROD_NOBIND:-}" = "1" ]; then
+        return 0
+    fi
+
+    case "$PROJECT_ROOT" in
+        /Volumes/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 compose_run() {
@@ -250,8 +271,6 @@ build_mode_images() {
 detect_mode() {
     if docker ps --format '{{.Names}}' | grep -q '^stocktrade-nginx$'; then
         echo "prod"
-    elif docker ps --format '{{.Names}}' | grep -q '^stocktrade-nginx-dev$'; then
-        echo "dev"
     else
         echo "dev"  # 默认
     fi
@@ -275,10 +294,9 @@ cmd_dev() {
     echo ""
     log_success "开发环境已启动"
     echo ""
-    echo -e "  ${GREEN}主入口 (nginx-dev):${NC}  http://127.0.0.1:8080"
-    echo -e "  ${GREEN}前端直连:${NC}         http://127.0.0.1:5173"
-    echo -e "  ${GREEN}后端 API:${NC}         http://127.0.0.1:8000"
-    echo -e "  ${GREEN}API 文档:${NC}         http://127.0.0.1:8000/docs"
+    echo -e "  ${GREEN}前端直连 (frontend-dev):${NC}  http://127.0.0.1:5173"
+    echo -e "  ${GREEN}后端 API:${NC}                http://127.0.0.1:8000"
+    echo -e "  ${GREEN}API 文档:${NC}                http://127.0.0.1:8000/docs"
     echo ""
 
     compose_run dev ps
@@ -287,6 +305,9 @@ cmd_dev() {
 # 启动生产环境
 cmd_prod() {
     log_info "启动生产环境..."
+    if use_prod_nobind_override; then
+        log_warning "检测到外部磁盘路径，启用生产无 bind mount 覆盖，运行数据将保存在 Docker volume: deploy_stocktrade_data"
+    fi
 
     if [ "$NO_CACHE" = "1" ] || [ "$BUILD" = "1" ]; then
         build_mode_images prod
@@ -302,9 +323,9 @@ cmd_prod() {
     echo ""
     log_success "生产环境已启动"
     echo ""
-    echo -e "  ${GREEN}主入口 (nginx):${NC}    http://127.0.0.1"
-    echo -e "  ${GREEN}后端 API:${NC}         http://127.0.0.1:8000"
-    echo -e "  ${GREEN}API 文档:${NC}         http://127.0.0.1:8000/docs"
+    echo -e "  ${GREEN}主入口 (nginx):${NC}  由 deploy/.env 中 NGINX_PORT 决定，未设置时为 http://127.0.0.1"
+    echo -e "  ${GREEN}后端 API:${NC}       http://127.0.0.1:8000"
+    echo -e "  ${GREEN}API 文档:${NC}       http://127.0.0.1:8000/docs"
     echo ""
 
     compose_run prod ps

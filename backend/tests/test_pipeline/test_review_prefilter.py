@@ -42,3 +42,32 @@ def test_index_daily_uses_sw_daily_for_si_and_recovers_empty_cache(tmp_path) -> 
     cached = pd.read_csv(empty_cache)
     assert not cached.empty
     assert cached.iloc[0]["ts_code"] == "801170.SI"
+
+
+def test_index_daily_uses_latest_local_trade_date_for_default_end(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    index_df = pd.DataFrame(
+        {
+            "ts_code": ["000905.SH"],
+            "trade_date": ["20260522"],
+            "close": [5012.34],
+        }
+    )
+
+    mock_pro = MagicMock()
+    mock_pro.index_daily.return_value = index_df
+
+    with patch("tushare.pro_api", return_value=mock_pro):
+        with patch("pipeline.review_prefilter.acquire_tushare_slot", lambda endpoint: None):
+            with patch("pipeline.review_prefilter._default_index_end_date", return_value="20260522"):
+                store = TushareMetadataStore(cache_dir=cache_dir, token="test_token_123456")
+                frame = store.index_daily("000905.SH", "20190101")
+
+    assert len(frame) == 1
+    mock_pro.index_daily.assert_called_once_with(
+        ts_code="000905.SH",
+        start_date="20190101",
+        end_date="20260522",
+        fields="ts_code,trade_date,close",
+    )
+    assert (cache_dir / "index_daily" / "000905.SH_20190101_20260522.csv").exists()

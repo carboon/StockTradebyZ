@@ -5,6 +5,7 @@ Tushare 服务测试用例
 """
 import json
 import os
+import time
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,24 @@ from app.services.tushare_service import TushareService
 # ============================================
 # Test Fixtures
 # ============================================
+
+@pytest.fixture
+def clear_tushare_service_caches():
+    TushareService._verify_cache.clear()
+    TushareService._stock_list_cache.clear()
+    TushareService.clear_data_status_cache()
+    TushareService.clear_concept_cache()
+    yield
+    TushareService._verify_cache.clear()
+    TushareService._stock_list_cache.clear()
+    TushareService.clear_data_status_cache()
+    TushareService.clear_concept_cache()
+
+
+@pytest.fixture(autouse=True)
+def isolate_tushare_service_caches(clear_tushare_service_caches):
+    yield
+
 
 @pytest.fixture
 def tushare_service():
@@ -226,6 +245,56 @@ def test_get_stock_list_cached(tushare_service, mock_stock_list_df):
         assert result1.equals(result2)
         # pro_api应该只被调用一次（因为pro属性被缓存）
         mock_pro_api.assert_called_once()
+
+
+@pytest.mark.service
+def test_get_stock_list_cache_survives_new_service_instance(mock_stock_list_df):
+    """新建 service 实例时仍应复用同 token 的股票列表缓存。"""
+    with patch("tushare.pro_api") as mock_pro_api:
+        mock_pro = MagicMock()
+        mock_pro.stock_basic.return_value = mock_stock_list_df
+        mock_pro_api.return_value = mock_pro
+
+        result1 = TushareService(token="test_token_123456").get_stock_list()
+        result2 = TushareService(token="test_token_123456").get_stock_list()
+
+    assert result1.equals(result2)
+    mock_pro.stock_basic.assert_called_once()
+    mock_pro_api.assert_called_once()
+
+
+@pytest.mark.service
+def test_verify_token_cache_survives_new_service_instance(mock_daily_df):
+    """新建 service 实例时仍应复用同 token 的验证结果缓存。"""
+    with patch("tushare.pro_api") as mock_pro_api, \
+         patch("app.services.tushare_service.acquire_tushare_slot"):
+        mock_pro = MagicMock()
+        mock_pro.daily.return_value = mock_daily_df
+        mock_pro_api.return_value = mock_pro
+
+        result1 = TushareService(token="test_token_123456").verify_token()
+        result2 = TushareService(token="test_token_123456").verify_token()
+
+    assert result1 == (True, "Token 验证成功")
+    assert result2 == result1
+    mock_pro.daily.assert_called_once()
+    mock_pro_api.assert_called_once()
+
+
+@pytest.mark.service
+def test_check_data_status_cache_survives_new_service_instance():
+    """状态页轮询会频繁新建 service，数据状态缓存不能因此失效。"""
+    expected = {
+        "raw_data": {"exists": True, "latest_date": "2026-05-22"},
+        "candidates": {"exists": True},
+        "analysis": {"exists": True},
+        "kline": {"exists": True},
+    }
+    TushareService._data_status_cache["test_token_123456:data_status:remote:default"] = (time.time(), expected)
+
+    result = TushareService(token="test_token_123456").check_data_status()
+
+    assert result is expected
 
 
 @pytest.mark.service

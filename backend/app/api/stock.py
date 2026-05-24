@@ -143,11 +143,7 @@ async def search_stocks(
 async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
     """获取股票基本信息"""
     code = code.zfill(6)
-    stock = None
-    try:
-        stock = TushareService().sync_stock_to_db(db, code)
-    except Exception:
-        stock = db.query(Stock).filter(Stock.code == code).first()
+    stock = db.query(Stock).filter(Stock.code == code).first()
 
     # 检查数据是否存在
     csv_path = ROOT / settings.raw_data_dir / f"{code}.csv"

@@ -60,6 +60,7 @@ from app.database import engine, Base, get_db, SessionLocal
 from app.api import auth, config, stock, analysis, watchlist, tasks
 from app.schema_migrations import apply_startup_sql_migrations
 from app.services.auto_update_service import AutoDailyUpdateScheduler
+from app.services.online_status_service import get_online_status_service
 from app.services.tushare_service import TushareService
 
 # 测试环境检测：pytest 收集阶段尚未设置 PYTEST_CURRENT_TEST，
@@ -149,6 +150,7 @@ async def lifespan(app: FastAPI):
     logger.info("StockTrader API v%s 启动成功", app.version)
     logger.info("API 文档: http://%s:%s/docs", settings.host, settings.port)
     auto_update_scheduler: AutoDailyUpdateScheduler | None = None
+    online_status_service = get_online_status_service()
 
     async def warm_stock_metadata_cache() -> None:
         try:
@@ -186,9 +188,16 @@ async def lifespan(app: FastAPI):
     elif not _TEST_MODE and DISABLE_AUTO_UPDATE_SCHEDULER:
         logger.info("自动更新调度器已禁用（DISABLE_AUTO_UPDATE_SCHEDULER）")
 
+    # 启动在线状态管理服务
+    if not _TEST_MODE:
+        online_status_service.start()
+        logger.info("在线状态管理服务已启动")
+
     yield
     if auto_update_scheduler is not None:
         await auto_update_scheduler.stop()
+    if not _TEST_MODE:
+        await online_status_service.stop()
     logger.info("StockTrader API 已关闭")
 
 # 创建 FastAPI 应用

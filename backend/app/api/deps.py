@@ -12,6 +12,10 @@ ApiKey.last_used_at 更新策略：
 ## 预期效果
 - 对于高频API调用，last_used_at更新频率降低约98%
 - 从每次请求更新变为每分钟最多一次
+
+## 用户会话活动时间更新策略
+- 使用时间窗口缓存降低 UserSession.last_activity_at 更新频率
+- 同一会话在60秒内只更新一次
 """
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -19,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import decode_access_token, hash_api_key
 from app.database import get_db
-from app.models import ApiKey, User
+from app.models import ApiKey, User, UserSession
 
 # Bearer token 提取器（auto_error=False 使得 token 可选）
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -29,6 +33,11 @@ bearer_scheme = HTTPBearer(auto_error=False)
 # 结构: {api_key_id: last_update_timestamp}
 _api_key_last_update_cache: dict[int, float] = {}
 _API_KEY_UPDATE_INTERVAL = 60  # 秒，同一key的最小更新间隔
+
+# 用户会话最后活动时间缓存（用于降低写库频率）
+# 结构: {session_id: last_update_timestamp}
+_session_activity_last_update_cache: dict[int, float] = {}
+_SESSION_ACTIVITY_UPDATE_INTERVAL = 60  # 秒，同一会话的最小更新间隔
 
 
 def get_current_user(
@@ -40,7 +49,7 @@ def get_current_user(
 
     优先检查 Bearer token，其次检查 X-API-Key header。
     """
-    user = _try_bearer_token(credentials, db)
+    user = _try_bearer_token(credentials, db, request)
     if user:
         _stash_user_context(request, user)
         return user
@@ -90,7 +99,7 @@ def get_optional_user(
 
     用于 usage tracking 等场景，允许匿名请求通过。
     """
-    user = _try_bearer_token(credentials, db)
+    user = _try_bearer_token(credentials, db, request)
     if user:
         _stash_user_context(request, user)
         return user
@@ -127,6 +136,7 @@ def _stash_user_context(request: Request, user: User, *, api_key_id: int | None 
 def _try_bearer_token(
     credentials: HTTPAuthorizationCredentials | None,
     db: Session,
+    request: Request,
 ) -> User | None:
     """尝试从 Bearer token 中解析用户。"""
     if not credentials:
@@ -145,7 +155,12 @@ def _try_bearer_token(
     except (ValueError, TypeError):
         return None
 
-    return db.query(User).filter(User.id == user_id_int).first()
+    user = db.query(User).filter(User.id == user_id_int).first()
+    if user:
+        # 更新用户会话的 last_activity_at
+        _update_session_activity(user.id, db)
+
+    return user
 
 
 def _try_api_key(request: Request, db: Session) -> User | None:
@@ -183,3 +198,32 @@ def _try_api_key(request: Request, db: Session) -> User | None:
     # 返回关联的用户
     request.state.api_key_id = api_key_record.id
     return db.query(User).filter(User.id == api_key_record.user_id).first()
+
+
+def _update_session_activity(user_id: int, db: Session) -> None:
+    """更新用户会话的最后活动时间（使用时间窗口缓存降低写库频率）"""
+    import time
+
+    from app.time_utils import utc_now
+
+    # 查找当前活跃的会话
+    active_session = (
+        db.query(UserSession)
+        .filter(
+            UserSession.user_id == user_id,
+            UserSession.logout_at.is_(None),
+        )
+        .order_by(UserSession.login_at.desc())
+        .first()
+    )
+
+    if not active_session:
+        return
+
+    current_time = time.time()
+    last_update = _session_activity_last_update_cache.get(active_session.id, 0)
+
+    if current_time - last_update >= _SESSION_ACTIVITY_UPDATE_INTERVAL:
+        active_session.last_activity_at = utc_now()
+        db.commit()
+        _session_activity_last_update_cache[active_session.id] = current_time

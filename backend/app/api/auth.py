@@ -21,13 +21,16 @@ from app.auth import (
 from app.config import settings
 from app.database import get_db
 from app.models import Config
-from app.models import ApiKey, UsageLog, User
+from app.models import ApiKey, UsageLog, User, UserSession
 from app.schemas import (
     AdminUserUpdate,
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyResponse,
     ChangePasswordRequest,
+    DailyVisitFrequency,
+    HeartbeatResponse,
+    HourlyVisitStats,
     RegisterValidationPromptResponse,
     TokenResponse,
     UsageStatsItem,
@@ -36,9 +39,11 @@ from app.schemas import (
     UserLogin,
     UserInfo,
     UserRegister,
+    VisitFrequencyResponse,
 )
 from app.audit import log_audit
 from app.api.deps import get_admin_user, get_current_active_user, require_user
+from app.time_utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +129,28 @@ def login(body: UserLogin, request: Request, db: Session = Depends(get_db)):
             detail="用户已被禁用",
         )
 
+    # 更新用户登录时间和在线状态
+    user.last_login_at = utc_now()
+    user.is_online = True
+
+    # 获取客户端IP地址和User Agent
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    # 创建用户登录会话记录
+    now = utc_now()
+    user_session = UserSession(
+        user_id=user.id,
+        login_at=now,
+        last_activity_at=now,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    db.add(user_session)
+    db.commit()
+
     logger.info("用户登录成功: username=%s, user_id=%s", user.username, user.id)
-    log_audit(user_id=user.id, action="user_login", target_type="user", target_id=str(user.id), ip_address=request.client.host if request.client else None)
+    log_audit(user_id=user.id, action="user_login", target_type="user", target_id=str(user.id), ip_address=ip_address)
 
     token = create_access_token({"sub": str(user.id), "role": user.role})
     return TokenResponse(
@@ -141,6 +166,40 @@ def login(body: UserLogin, request: Request, db: Session = Depends(get_db)):
 def get_me(user: User = Depends(get_current_active_user)):
     """获取当前用户信息"""
     return UserInfo.model_validate(user)
+
+
+@router.put("/heartbeat", response_model=HeartbeatResponse)
+def heartbeat(user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """心跳接口 - 更新用户最后活动时间"""
+    now = utc_now()
+
+    # 更新用户在线状态
+    user.is_online = True
+
+    # 查找当前活跃的会话（未登出的最近会话）
+    active_session = (
+        db.query(UserSession)
+        .filter(
+            UserSession.user_id == user.id,
+            UserSession.logout_at.is_(None),
+        )
+        .order_by(UserSession.login_at.desc())
+        .first()
+    )
+
+    session_id = None
+    if active_session:
+        active_session.last_activity_at = now
+        session_id = active_session.id
+
+    db.commit()
+
+    return HeartbeatResponse(
+        is_online=True,
+        last_activity_at=now,
+        session_id=session_id,
+        message="OK",
+    )
 
 
 @router.put("/password")
@@ -237,10 +296,66 @@ def get_usage(user: User = Depends(get_current_active_user), db: Session = Depen
 
 
 @router.get("/admin/users", response_model=list[UserListItem])
-def admin_list_users(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    """管理员：列出所有用户"""
-    users = db.query(User).order_by(User.created_at.desc()).all()
-    return [UserListItem.model_validate(u) for u in users]
+def admin_list_users(
+    is_online: bool | None = None,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """管理员：列出所有用户
+
+    Args:
+        is_online: 可选，按在线状态筛选 (true=仅在线, false=仅离线, None=全部)
+    """
+    # 计算10天前的日期
+    ten_days_ago = utc_now() - timedelta(days=10)
+
+    # 构建基础查询
+    query = db.query(User)
+
+    # 如果需要按在线状态筛选
+    if is_online is not None:
+        query = query.filter(User.is_online == is_online)
+
+    users = query.order_by(User.created_at.desc()).all()
+
+    result = []
+    for user in users:
+        # 关联查询 UserSession 获取最后登录时间
+        last_session = (
+            db.query(UserSession.login_at)
+            .filter(UserSession.user_id == user.id)
+            .order_by(UserSession.login_at.desc())
+            .first()
+        )
+        last_login_at = last_session[0] if last_session else None
+
+        # 计算最近10天访问次数（从 UsageLog 表）
+        recent_visit_count = (
+            db.query(func.count(UsageLog.id))
+            .filter(
+                UsageLog.user_id == user.id,
+                UsageLog.created_at >= ten_days_ago,
+            )
+            .scalar()
+            or 0
+        )
+
+        # 构建 UserListItem 对象
+        user_dict = {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+            "role": user.role,
+            "is_active": user.is_active,
+            "daily_quota": user.daily_quota,
+            "created_at": user.created_at,
+            "last_login_at": last_login_at,
+            "is_online": user.is_online,
+            "recent_visit_count": recent_visit_count,
+        }
+        result.append(UserListItem(**user_dict))
+
+    return result
 
 
 @router.put("/admin/users/{user_id}")
@@ -324,3 +439,148 @@ def admin_get_user_usage(target_user_id: int, admin: User = Depends(get_admin_us
         stats.append(UsageStatsItem(date=d.isoformat(), total_calls=day_total, endpoints=endpoints))
 
     return UsageStatsResponse(stats=stats, total_calls=total)
+
+
+# --- 访问频率统计 ---
+
+
+@router.get("/visit-frequency", response_model=VisitFrequencyResponse)
+def get_visit_frequency(user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """获取最近10天的访问频率统计（含每日API调用次数和活跃时段）"""
+    today = date.today()
+    stats = []
+    total_calls = 0
+    period_days = 10
+
+    for i in range(period_days - 1, -1, -1):
+        d = today - timedelta(days=i)
+
+        # 查询当日总调用次数
+        day_total = (
+            db.query(func.count(UsageLog.id))
+            .filter(
+                UsageLog.user_id == user.id,
+                func.date(UsageLog.created_at) == d,
+            )
+            .scalar()
+            or 0
+        )
+        total_calls += day_total
+
+        # 查询当日每小时调用次数（按活跃时段统计）
+        hourly_rows = (
+            db.query(func.extract("hour", UsageLog.created_at).label("hour"), func.count(UsageLog.id))
+            .filter(
+                UsageLog.user_id == user.id,
+                func.date(UsageLog.created_at) == d,
+            )
+            .group_by("hour")
+            .all()
+        )
+
+        hourly_stats = [
+            HourlyVisitStats(hour=int(row[0]), count=row[1])
+            for row in hourly_rows
+        ]
+
+        # 找出峰值时段
+        peak_hour = None
+        peak_hour_count = 0
+        if hourly_stats:
+            peak_stat = max(hourly_stats, key=lambda x: x.count)
+            peak_hour = peak_stat.hour
+            peak_hour_count = peak_stat.count
+
+        stats.append(
+            DailyVisitFrequency(
+                date=d.isoformat(),
+                total_calls=day_total,
+                hourly_stats=hourly_stats,
+                peak_hour=peak_hour,
+                peak_hour_count=peak_hour_count,
+            )
+        )
+
+    average_calls = round(total_calls / period_days, 2) if period_days > 0 else 0
+
+    return VisitFrequencyResponse(
+        stats=stats,
+        total_calls=total_calls,
+        average_calls_per_day=average_calls,
+        period_days=period_days,
+    )
+
+
+@router.get("/admin/visit-frequency/{target_user_id}", response_model=VisitFrequencyResponse)
+def admin_get_visit_frequency(
+    target_user_id: int,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """管理员：查看指定用户的访问频率统计"""
+    target = db.query(User).filter(User.id == target_user_id).first()
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+
+    today = date.today()
+    stats = []
+    total_calls = 0
+    period_days = 10
+
+    for i in range(period_days - 1, -1, -1):
+        d = today - timedelta(days=i)
+
+        # 查询当日总调用次数
+        day_total = (
+            db.query(func.count(UsageLog.id))
+            .filter(
+                UsageLog.user_id == target_user_id,
+                func.date(UsageLog.created_at) == d,
+            )
+            .scalar()
+            or 0
+        )
+        total_calls += day_total
+
+        # 查询当日每小时调用次数（按活跃时段统计）
+        hourly_rows = (
+            db.query(func.extract("hour", UsageLog.created_at).label("hour"), func.count(UsageLog.id))
+            .filter(
+                UsageLog.user_id == target_user_id,
+                func.date(UsageLog.created_at) == d,
+            )
+            .group_by("hour")
+            .all()
+        )
+
+        hourly_stats = [
+            HourlyVisitStats(hour=int(row[0]), count=row[1])
+            for row in hourly_rows
+        ]
+
+        # 找出峰值时段
+        peak_hour = None
+        peak_hour_count = 0
+        if hourly_stats:
+            peak_stat = max(hourly_stats, key=lambda x: x.count)
+            peak_hour = peak_stat.hour
+            peak_hour_count = peak_stat.count
+
+        stats.append(
+            DailyVisitFrequency(
+                date=d.isoformat(),
+                total_calls=day_total,
+                hourly_stats=hourly_stats,
+                peak_hour=peak_hour,
+                peak_hour_count=peak_hour_count,
+            )
+        )
+
+    average_calls = round(total_calls / period_days, 2) if period_days > 0 else 0
+
+    return VisitFrequencyResponse(
+        stats=stats,
+        total_calls=total_calls,
+        average_calls_per_day=average_calls,
+        period_days=period_days,
+    )

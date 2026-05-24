@@ -1116,7 +1116,11 @@ class TaskService:
 
         from app.services.analysis_service import analysis_service
 
-        result = analysis_service.analyze_stock(code, params.get("reviewer", "quant"))
+        result = await asyncio.to_thread(
+            analysis_service.analyze_stock,
+            code,
+            params.get("reviewer", "quant"),
+        )
         task.result_json = self._make_json_safe(result)
         task.task_stage = "analysis"
         task.progress = 100

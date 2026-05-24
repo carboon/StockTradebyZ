@@ -84,7 +84,7 @@ P2：
 
 推荐两种方式：
 
-1. Docker 统一入口：`http://<LAN-IP>:8080`
+1. Docker 统一入口：`http://<LAN-IP>:<NGINX_PORT>`
 2. Vite 直连前端：`http://<LAN-IP>:5173`
 
 建议流程：
@@ -101,9 +101,9 @@ VITE_API_PROXY_TARGET=http://<LAN-IP>:8000 npm run dev:mobile
 执行要求：
 
 - 电脑与手机连接同一 Wi-Fi
-- 本机防火墙放行 `5173`、`8000`、`8080`
+- 本机防火墙放行 `5173`、`8000`，如使用统一入口还需放行 `NGINX_PORT`
 - 使用 `ipconfig getifaddr en0` 或等效命令获取本机局域网 IP
-- 手机优先访问 `http://<LAN-IP>:8080` 验证完整链路
+- 手机优先访问 `http://<LAN-IP>:<NGINX_PORT>` 验证完整链路
 - 若只调前端样式，再访问 `http://<LAN-IP>:5173`
 - 联调时确认 API、静态资源、登录态与 WebSocket 在局域网地址下可用
 

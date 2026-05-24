@@ -1120,6 +1120,9 @@ export interface UserListItem {
   is_active: boolean
   daily_quota: number
   created_at: string
+  last_login_at: string | null
+  is_online: boolean
+  recent_visit_count: number
 }
 
 // =====================

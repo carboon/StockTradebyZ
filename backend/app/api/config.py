@@ -3,7 +3,9 @@ Config API
 ~~~~~~~~~~
 配置管理相关 API
 """
+import asyncio
 import os
+import time
 from pathlib import Path
 from typing import List
 
@@ -125,7 +127,7 @@ async def verify_tushare(request: TushareVerifyRequest, admin=Depends(get_admin_
     """验证 Tushare Token"""
     try:
         service = TushareService(token=request.token)
-        valid, message = service.verify_token()
+        valid, message = await asyncio.to_thread(service.verify_token)
         return TushareVerifyResponse(valid=valid, message=message)
     except Exception as e:
         return TushareVerifyResponse(valid=False, message=f"验证失败: {str(e)}")
@@ -218,13 +220,18 @@ async def get_tushare_status(db: Session = Depends(get_db), user=Depends(require
         valid = True
         verify_message = "Token 已配置"
 
-        verify_method = getattr(service, "verify_token", None)
-        if callable(verify_method):
-            verify_result = verify_method()
-            if isinstance(verify_result, tuple) and len(verify_result) == 2:
-                valid, verify_message = verify_result
+        verify_cache = getattr(RuntimeTushareService, "_verify_cache", {})
+        cached_verify = verify_cache.get(token) if isinstance(verify_cache, dict) else None
+        if cached_verify and time.time() - cached_verify[0] < 300:
+            valid, verify_message = cached_verify[1]
+        else:
+            verify_message = "Token 已配置（未实时验证）"
 
-        data_status = service.check_data_status() if valid else None
+        data_status = (
+            await asyncio.to_thread(service.check_data_status, include_remote_checks=False)
+            if valid
+            else None
+        )
         return {
             "configured": True,
             "available": valid,

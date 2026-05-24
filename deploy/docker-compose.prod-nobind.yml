@@ -1,0 +1,23 @@
+# Production override for macOS external-volume paths.
+#
+# Docker Desktop can fail to create bind mounts under /Volumes/* with:
+#   mkdir /host_mnt/Volumes/DATA: file exists
+#
+# The production images already contain application code, config, and nginx
+# config, so prod can run without host source bind mounts. Runtime data is kept
+# in Docker named volumes.
+
+services:
+  backend:
+    volumes: !override
+      - stocktrade_data:/app/data
+
+  backend-maintenance:
+    volumes: !override
+      - stocktrade_data:/app/data
+
+  nginx:
+    volumes: !override []
+
+volumes:
+  stocktrade_data:

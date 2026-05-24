@@ -5,6 +5,7 @@ Analysis API
 
 阶段5改造：长任务统一通过TaskService管理，不再使用BackgroundTasks。
 """
+import asyncio
 import json
 import logging
 import os
@@ -35,7 +36,6 @@ from app.services.current_hot_service import CurrentHotService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.market_service import MarketService
-from app.services.risk_regime_ai_service import RiskRegimeAIService
 from app.services.sector_analysis_service import SectorAnalysisService
 from app.services.speculative_risk_service import SpeculativeRiskService
 from app.services.task_service import TaskService
@@ -98,6 +98,48 @@ BLOCKED_ANALYSIS_TASK_TYPES = {
 
 ROOT = Path(__file__).parent.parent.parent.parent
 _signal_return_benchmark_store: TushareMetadataStore | None = None
+_history_generation_locks: dict[str, asyncio.Lock] = {}
+_history_generation_active_counts: dict[str, int] = {}
+_history_generation_state_lock = asyncio.Lock()
+
+
+async def _get_history_generation_lock(code: str) -> asyncio.Lock:
+    async with _history_generation_state_lock:
+        lock = _history_generation_locks.get(code)
+        if lock is None:
+            lock = asyncio.Lock()
+            _history_generation_locks[code] = lock
+        return lock
+
+
+async def _mark_history_generation_active(code: str) -> None:
+    async with _history_generation_state_lock:
+        _history_generation_active_counts[code] = _history_generation_active_counts.get(code, 0) + 1
+
+
+async def _mark_history_generation_inactive(code: str) -> None:
+    async with _history_generation_state_lock:
+        count = _history_generation_active_counts.get(code, 0) - 1
+        if count > 0:
+            _history_generation_active_counts[code] = count
+        else:
+            _history_generation_active_counts.pop(code, None)
+
+
+async def _is_history_generation_active(code: str) -> bool:
+    async with _history_generation_state_lock:
+        return _history_generation_active_counts.get(code, 0) > 0
+
+
+async def _run_history_generation(code: str, func, *args, **kwargs) -> dict[str, Any]:
+    lock = await _get_history_generation_lock(code)
+
+    await _mark_history_generation_active(code)
+    try:
+        async with lock:
+            return await asyncio.to_thread(func, *args, **kwargs)
+    finally:
+        await _mark_history_generation_inactive(code)
 
 
 def _parse_date_or_none(value: Optional[str]) -> Optional[date]:
@@ -303,15 +345,6 @@ def _build_diagnosis_risk_regime(
     if not regime:
         return None
 
-    if not regime.get("ai_review"):
-        market_items = current_hot_service._load_market_risk_sample(target_date)
-        ai_review = RiskRegimeAIService(db).confirm_market_regime(
-            pick_date=target_date,
-            items=market_items,
-            base_regime=regime,
-        )
-        if ai_review:
-            regime = {**regime, "ai_review": ai_review}
     return regime
 
 
@@ -322,11 +355,27 @@ def ensure_tushare_ready() -> None:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
 
 
+async def ensure_tushare_ready_async() -> None:
+    service = TushareService()
+    valid, message = await asyncio.to_thread(service.verify_token)
+    if not valid:
+        raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
+
+
 def ensure_tushare_ready_if_configured() -> None:
     service = TushareService()
     if not service.token:
         return
     valid, message = service.verify_token()
+    if not valid:
+        logger.warning("Tushare 已配置但当前不可用，盘中分析将走降级链路: %s", message)
+
+
+async def ensure_tushare_ready_if_configured_async() -> None:
+    service = TushareService()
+    if not service.token:
+        return
+    valid, message = await asyncio.to_thread(service.verify_token)
     if not valid:
         logger.warning("Tushare 已配置但当前不可用，盘中分析将走降级链路: %s", message)
 
@@ -458,15 +507,19 @@ async def get_tomorrow_star_freshness(
     if cached_result is not None:
         return cached_result
 
-    latest_trade_date = market_service.get_latest_trade_date() if market_service.token else None
+    latest_trade_date = (
+        await asyncio.to_thread(market_service.get_latest_trade_date)
+        if market_service.token
+        else None
+    )
     latest_trade_data_ready = (
-        TushareService().is_trade_date_data_ready(latest_trade_date)
+        await asyncio.to_thread(TushareService().is_trade_date_data_ready, latest_trade_date)
         if latest_trade_date and market_service.token
         else None
     )
-    local_latest_date = market_service.get_local_latest_date()
-    latest_candidate_date = analysis_service.get_latest_candidate_date()
-    latest_result_date = analysis_service.get_latest_result_date()
+    local_latest_date = await asyncio.to_thread(market_service.get_local_latest_date)
+    latest_candidate_date = await asyncio.to_thread(analysis_service.get_latest_candidate_date)
+    latest_result_date = await asyncio.to_thread(analysis_service.get_latest_result_date)
     latest_candidate_count = 0
     latest_result_count = 0
 
@@ -1049,7 +1102,7 @@ async def generate_current_hot(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> dict:
-    ensure_tushare_ready()
+    await ensure_tushare_ready_async()
     return CurrentHotService(db).generate_for_trade_date(date, reviewer=reviewer)
 
 
@@ -1087,7 +1140,7 @@ async def generate_current_hot_intraday(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> CurrentHotIntradayAnalysisGenerateResponse:
-    ensure_tushare_ready_if_configured()
+    await ensure_tushare_ready_if_configured_async()
     service = CurrentHotIntradayAnalysisService(db)
     parsed_date = _parse_date_or_none(date)
     if date and parsed_date is None:
@@ -1102,7 +1155,7 @@ async def prefetch_current_hot_intraday(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> CurrentHotIntradayAnalysisPrefetchResponse:
-    ensure_tushare_ready_if_configured()
+    await ensure_tushare_ready_if_configured_async()
     service = CurrentHotIntradayAnalysisService(db)
     parsed_date = _parse_date_or_none(date)
     if date and parsed_date is None:
@@ -1145,7 +1198,7 @@ async def generate_intraday_analysis(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> IntradayAnalysisGenerateResponse:
-    ensure_tushare_ready_if_configured()
+    await ensure_tushare_ready_if_configured_async()
     service = IntradayAnalysisService(db)
     parsed_date = _parse_date_or_none(date)
     if date and parsed_date is None:
@@ -1160,7 +1213,7 @@ async def prefetch_intraday_analysis(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> IntradayAnalysisPrefetchResponse:
-    ensure_tushare_ready_if_configured()
+    await ensure_tushare_ready_if_configured_async()
     service = IntradayAnalysisService(db)
     parsed_date = _parse_date_or_none(date)
     if date and parsed_date is None:
@@ -1186,7 +1239,9 @@ async def get_diagnosis_history(
     days = max(1, min(int(days), DIAGNOSIS_HISTORY_WINDOW_DAYS))
 
     if refresh:
-        result = analysis_service.ensure_history_page(
+        result = await _run_history_generation(
+            code,
+            analysis_service.ensure_history_page,
             code,
             days=days,
             page=page,
@@ -1257,18 +1312,18 @@ async def generate_diagnosis_history(
     """同步刷新单股诊断历史数据，并更新 Redis 缓存。"""
     code = code.zfill(6)
     page = max(1, int(page))
+    days = max(1, min(int(days), DIAGNOSIS_HISTORY_WINDOW_DAYS))
     page_size = max(1, min(int(page_size), days, 50))
-    result = analysis_service.generate_stock_history_checks(
+    result = await _run_history_generation(
         code,
-        days=days,
-        clean=True,
-    ) if force else analysis_service.ensure_history_page(
+        analysis_service.ensure_history_page,
         code,
         days=days,
         page=page,
         page_size=page_size,
-        force=False,
+        force=force,
     )
+
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "刷新历史数据失败"))
     diagnosis_history_cache_service.invalidate(code)
@@ -1300,6 +1355,7 @@ async def get_history_status(
     """获取历史数据生成状态"""
     code = code.zfill(6)
     page = max(1, int(page))
+    days = max(1, min(int(days), DIAGNOSIS_HISTORY_WINDOW_DAYS))
     page_size = max(1, min(int(page_size), days, 50))
     refresh_status = analysis_service.get_history_refresh_status(
         code,
@@ -1314,9 +1370,10 @@ async def get_history_status(
         .order_by(DailyB1CheckDetail.updated_at.desc(), DailyB1CheckDetail.id.desc())
         .first()
     )
+    generating = await _is_history_generation_active(code)
     return {
         "exists": count > 0,
-        "generating": False,
+        "generating": generating,
         "count": count,
         "total": refresh_status.get("total", 0),
         "page": page,
@@ -1399,7 +1456,7 @@ async def analyze_stock(
     """
     from app.main import manager
 
-    ensure_tushare_ready()
+    await ensure_tushare_ready_if_configured_async()
     code = request.code.zfill(6)
 
     # 创建后台分析任务
@@ -1449,11 +1506,13 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
     if not task:
         raise HTTPException(status_code=404, detail="未找到分析任务")
 
-    # 获取股票信息
-    try:
-        stock = TushareService().sync_stock_to_db(db, code)
-    except Exception:
-        stock = db.query(Stock).filter(Stock.code == code).first()
+    # 获取股票信息，优先使用本地库，避免结果轮询时阻塞等待 Tushare。
+    stock = db.query(Stock).filter(Stock.code == code).first()
+    if stock is None:
+        try:
+            stock = TushareService().sync_stock_to_db(db, code)
+        except Exception:
+            stock = None
 
     # 如果任务还在进行中，返回状态
     if task.status in ("pending", "running"):
@@ -1550,7 +1609,7 @@ async def generate_tomorrow_star(
     user=Depends(require_user),
 ) -> dict:
     """手动生成明日之星"""
-    ensure_tushare_ready()
+    await ensure_tushare_ready_async()
     task_service = TaskService(db)
     active_full_task = task_service.get_active_full_task()
     if active_full_task:
@@ -2177,9 +2236,9 @@ async def get_concepts_list(
     user=Depends(require_user),
 ) -> ConceptsResponse:
     """获取概念板块列表"""
-    ensure_tushare_ready()
+    await ensure_tushare_ready_async()
     service = TushareService()
-    concepts = service.get_concept_list()
+    concepts = await asyncio.to_thread(service.get_concept_list)
     return ConceptsResponse(
         concepts=[ConceptInfo(**c) for c in concepts],
         total=len(concepts),
@@ -2193,7 +2252,7 @@ async def get_stock_concepts(
     user=Depends(require_user),
 ) -> StockConceptsResponse:
     """获取股票所属的概念板块"""
-    ensure_tushare_ready()
+    await ensure_tushare_ready_async()
     code = code.zfill(6)
 
     # 获取股票的 ts_code
@@ -2205,7 +2264,7 @@ async def get_stock_concepts(
     ts_code = f"{code}.{stock.market}" if stock.market else f"{code}.SZ"
 
     service = TushareService()
-    concepts = service.get_stock_concepts(ts_code)
+    concepts = await asyncio.to_thread(service.get_stock_concepts, ts_code)
 
     return StockConceptsResponse(
         stocks={code: concepts},
@@ -2220,7 +2279,7 @@ async def get_stocks_concepts_batch(
     user=Depends(require_user),
 ) -> StockConceptsResponse:
     """批量获取股票所属的概念板块"""
-    ensure_tushare_ready()
+    await ensure_tushare_ready_async()
 
     code_list = [c.zfill(6) for c in codes.split(",") if c.strip()]
     if not code_list:
@@ -2233,14 +2292,18 @@ async def get_stocks_concepts_batch(
     service = TushareService()
     result: dict[str, List[str]] = {}
 
-    for code in code_list:
-        stock = stock_map.get(code)
-        if stock:
-            ts_code = f"{code}.{stock.market}" if stock.market else f"{code}.SZ"
-            concepts = service.get_stock_concepts(ts_code)
-            result[code] = concepts
-        else:
-            result[code] = []
+    def load_concepts_batch() -> dict[str, List[str]]:
+        batch_result: dict[str, List[str]] = {}
+        for code in code_list:
+            stock = stock_map.get(code)
+            if stock:
+                ts_code = f"{code}.{stock.market}" if stock.market else f"{code}.SZ"
+                batch_result[code] = service.get_stock_concepts(ts_code)
+            else:
+                batch_result[code] = []
+        return batch_result
+
+    result = await asyncio.to_thread(load_concepts_batch)
 
     total_concepts = sum(len(concepts) for concepts in result.values())
     return StockConceptsResponse(stocks=result, total=total_concepts)
@@ -2253,9 +2316,9 @@ async def get_concept_members(
     user=Depends(require_user),
 ) -> ConceptMembersResponse:
     """获取概念板块的成分股"""
-    ensure_tushare_ready()
+    await ensure_tushare_ready_async()
     service = TushareService()
-    members = service.get_stock_concept_members(concept_code)
+    members = await asyncio.to_thread(service.get_stock_concept_members, concept_code)
 
     return ConceptMembersResponse(
         concept_code=concept_code,

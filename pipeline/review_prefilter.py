@@ -23,6 +23,7 @@ from backend.app.utils.tushare_rate_limit import acquire_tushare_slot
 
 _ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CACHE_DIR = _ROOT / "data" / "tushare_cache"
+_DEFAULT_INDEX_END_DATE: str | None = None
 
 
 def _resolve_cfg_path(path_like: str | Path, base_dir: Path = _ROOT) -> Path:
@@ -58,6 +59,77 @@ def _normalize_trade_date(value: Any) -> str:
     if "." in text and text.replace(".", "", 1).isdigit():
         text = text.split(".", 1)[0]
     return text.replace("-", "").replace("/", "")
+
+
+def _read_last_csv_date(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            file_size = handle.tell()
+            if file_size <= 0:
+                return None
+
+            chunk_size = min(4096, file_size)
+            handle.seek(-chunk_size, os.SEEK_END)
+            tail = handle.read(chunk_size).decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    value = lines[-1].split(",", 1)[0].strip()
+    normalized = _normalize_trade_date(value)
+    return normalized if len(normalized) == 8 else None
+
+
+def _latest_local_raw_trade_date() -> str | None:
+    raw_dir = _ROOT / "data" / "raw"
+    if not raw_dir.exists():
+        return None
+
+    dates: list[str] = []
+    priority_files = [
+        raw_dir / "000001.csv",
+        raw_dir / "399001.csv",
+        raw_dir / "600000.csv",
+    ]
+    for path in priority_files:
+        if path.exists():
+            date_text = _read_last_csv_date(path)
+            if date_text:
+                dates.append(date_text)
+
+    if dates:
+        return max(dates)
+
+    for path in sorted(raw_dir.glob("*.csv"))[:200]:
+        date_text = _read_last_csv_date(path)
+        if date_text:
+            dates.append(date_text)
+
+    return max(dates) if dates else None
+
+
+def _previous_weekday_trade_date() -> str:
+    ts = pd.Timestamp.today().normalize()
+    while ts.weekday() >= 5:
+        ts -= pd.Timedelta(days=1)
+    return ts.strftime("%Y%m%d")
+
+
+def _default_index_end_date() -> str:
+    global _DEFAULT_INDEX_END_DATE
+
+    override = _normalize_trade_date(os.environ.get("TUSHARE_INDEX_CACHE_END_DATE"))
+    if len(override) == 8:
+        return override
+
+    if _DEFAULT_INDEX_END_DATE:
+        return _DEFAULT_INDEX_END_DATE
+
+    _DEFAULT_INDEX_END_DATE = _latest_local_raw_trade_date() or _previous_weekday_trade_date()
+    return _DEFAULT_INDEX_END_DATE
 
 
 def _to_timestamp(value: Any) -> pd.Timestamp | None:
@@ -174,7 +246,7 @@ class TushareMetadataStore:
     def index_daily(self, ts_code: str, start_date: str, end_date: str | None = None) -> pd.DataFrame:
         ts_code_text = str(ts_code).strip().upper()
         start = _normalize_trade_date(start_date)
-        end = _normalize_trade_date(end_date) if end_date else pd.Timestamp.today().strftime("%Y%m%d")
+        end = _normalize_trade_date(end_date) if end_date else _default_index_end_date()
         rel = f"index_daily/{ts_code_text}_{start}_{end}.csv"
         use_sw_daily = ts_code_text.endswith(".SI")
         return self._load_or_fetch(

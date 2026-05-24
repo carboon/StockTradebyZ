@@ -1004,6 +1004,8 @@ class UserInfo(BaseModel):
     role: str
     is_active: bool
     daily_quota: int
+    is_online: bool = False
+    last_login_at: datetime | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -1060,6 +1062,37 @@ class UsageStatsResponse(BaseModel):
     total_calls: int
 
 
+class HourlyVisitStats(BaseModel):
+    """小时访问统计"""
+    hour: int
+    count: int
+
+
+class DailyVisitFrequency(BaseModel):
+    """单日访问频率统计"""
+    date: str
+    total_calls: int
+    hourly_stats: list[HourlyVisitStats]
+    peak_hour: int | None = None
+    peak_hour_count: int = 0
+
+
+class VisitFrequencyResponse(BaseModel):
+    """访问频率统计响应（最近10天）"""
+    stats: list[DailyVisitFrequency]
+    total_calls: int
+    average_calls_per_day: float
+    period_days: int = 10
+
+
+class HeartbeatResponse(BaseModel):
+    """心跳响应"""
+    is_online: bool
+    last_activity_at: datetime | None = None
+    session_id: int | None = None
+    message: str = "OK"
+
+
 class UserListItem(BaseModel):
     """用户列表项（管理员用）"""
     id: int
@@ -1069,8 +1102,32 @@ class UserListItem(BaseModel):
     is_active: bool
     daily_quota: int
     created_at: datetime
+    last_login_at: datetime | None = None
+    is_online: bool = False
+    recent_visit_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class UserSessionItem(BaseModel):
+    """用户会话项"""
+    id: int
+    user_id: int
+    login_at: datetime
+    last_activity_at: datetime
+    logout_at: datetime | None = None
+    ip_address: str | None = None
+    user_agent: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserSessionListResponse(BaseModel):
+    """用户会话列表响应"""
+    sessions: list[UserSessionItem]
+    total: int
 
 
 # ==================== 区间增量更新 ====================

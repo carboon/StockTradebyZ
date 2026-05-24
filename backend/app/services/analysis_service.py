@@ -670,6 +670,7 @@ class AnalysisService:
         code: str,
         df: pd.DataFrame,
         target_dates: list[date_class],
+        include_prefilter: bool = True,
     ) -> dict[str, Any]:
         if not target_dates:
             return {
@@ -682,7 +683,7 @@ class AnalysisService:
 
         selector = self._build_hybrid_b1_selector()
         quant_config = self._load_quant_review_config()
-        prefilter = self._build_prefilter(quant_config)
+        prefilter = self._build_prefilter(quant_config) if include_prefilter else None
         preselect_cfg = self._load_preselect_config()
         top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
 
@@ -747,13 +748,14 @@ class AnalysisService:
 
                     prefilter_passed: Optional[bool] = None
                     prefilter_blocked_by: Optional[list[str]] = None
-                    try:
-                        prefilter_result = prefilter.evaluate(code=code, pick_date=check_date, price_df=df_before)
-                        prefilter_passed = bool(prefilter_result.get("passed", True))
-                        prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
-                    except Exception:
-                        import traceback
-                        traceback.print_exc()
+                    if prefilter is not None:
+                        try:
+                            prefilter_result = prefilter.evaluate(code=code, pick_date=check_date, price_df=df_before)
+                            prefilter_passed = bool(prefilter_result.get("passed", True))
+                            prefilter_blocked_by = [str(item) for item in prefilter_result.get("blocked_by", [])]
+                        except Exception:
+                            import traceback
+                            traceback.print_exc()
 
                     score_result = self._quant_review_for_date(code, df_before, check_date, config=quant_config)
                     tomorrow_star_pass = self._derive_tomorrow_star_pass(
@@ -861,6 +863,7 @@ class AnalysisService:
         page: int = 1,
         page_size: int = 10,
         force: bool = False,
+        include_prefilter: bool = False,
     ) -> dict[str, Any]:
         code = code.zfill(6)
         status = self.get_history_refresh_status(
@@ -912,6 +915,7 @@ class AnalysisService:
             code=code,
             df=prepared_df,
             target_dates=list(target_date_set),
+            include_prefilter=include_prefilter,
         )
         if not result.get("success"):
             return result

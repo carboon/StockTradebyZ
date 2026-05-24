@@ -9,6 +9,15 @@ cp .env.example deploy/.env
 ./start.sh
 ```
 
+说明：
+
+- 根目录 `./start.sh` 启动的是统一入口/生产形态：`postgres + redis + backend + nginx`
+- 如需前端热更新，请使用开发 HMR 模式：
+
+```bash
+./deploy/scripts/start.sh dev --build
+```
+
 容器运维：
 
 ```bash
@@ -22,15 +31,17 @@ cp .env.example deploy/.env
 开发环境默认启动：
 
 - `postgres`
+- `redis`
 - `backend`
 - `frontend-dev`
-- `nginx-dev`
 
 特点：
 
 - 后端源码挂载，支持热更新
 - 前端使用 Vite HMR
-- 浏览器统一入口为 `http://127.0.0.1:8080`
+- 前端直连入口为 `http://127.0.0.1:5173`
+- 后端 API 为 `http://127.0.0.1:8000`
+- 如需统一 Nginx 入口，请使用根目录 `./start.sh`
 
 ## 移动端本地联调
 
@@ -44,7 +55,7 @@ cp .env.example deploy/.env
 前提：
 
 - 电脑和手机连接同一个 Wi-Fi
-- 本机防火墙允许访问 `5173`、`8000`、`8080`
+- 本机防火墙允许访问 `5173`、`8000`，如使用统一入口还需要允许 `NGINX_PORT`
 
 当前前端 Vite 已支持监听所有网卡，也可以显式使用移动端开发脚本：
 
@@ -56,8 +67,8 @@ npm run dev:mobile
 常用访问地址：
 
 - 前端直连：`http://<LAN-IP>:5173`
-- 统一入口：`http://<LAN-IP>:8080`
 - 后端 API：`http://<LAN-IP>:8000`
+- 统一入口：`http://<LAN-IP>:<NGINX_PORT>`，仅在使用根目录 `./start.sh` 时可用
 
 查看本机局域网 IP 的常见方式：
 
@@ -69,23 +80,24 @@ ifconfig | grep "inet "
 如果使用 Docker 开发环境，推荐先启动：
 
 ```bash
-./start.sh
+./deploy/scripts/start.sh dev --build
 ```
 
 然后在手机浏览器访问：
 
-- `http://<LAN-IP>:8080`
+- `http://<LAN-IP>:5173`
 
 推荐把手机验证分成两步：
 
-1. 先访问 `http://<LAN-IP>:8080`，验证真实联调链路
-2. 再访问 `http://<LAN-IP>:5173`，验证前端样式调试链路
+1. 先访问 `http://<LAN-IP>:5173`，验证前端 HMR 与接口代理
+2. 再访问 `http://<LAN-IP>:8000/docs`，验证后端服务可达
 
 这样可以同时覆盖：
 
-- Nginx 入口是否正常
 - 前后端接口联通是否正常
 - 手机端样式和触控交互是否正常
+
+如需要验证 Nginx 统一入口，请使用根目录 `./start.sh` 启动，并访问 `http://<LAN-IP>:<NGINX_PORT>`。
 
 ### 环境变量与 API 地址
 
@@ -106,7 +118,7 @@ cd frontend
 VITE_API_PROXY_TARGET=http://<LAN-IP>:8000 npm run dev:mobile
 ```
 
-如果通过统一入口 `http://<LAN-IP>:8080` 访问，通常不需要单独改前端代理，但仍应确认：
+如果通过统一入口 `http://<LAN-IP>:<NGINX_PORT>` 访问，通常不需要单独改前端代理，但仍应确认：
 
 - 后端服务可通过局域网地址访问
 - CORS 没有只限制到 `127.0.0.1`

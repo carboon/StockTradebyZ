@@ -3,6 +3,7 @@ Tasks API
 ~~~~~~~~~
 任务调度相关 API
 """
+import asyncio
 import os
 import platform
 import csv
@@ -394,6 +395,26 @@ def _ensure_tushare_ready() -> None:
         raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
 
 
+async def _ensure_tushare_ready_async() -> None:
+    service = TushareService()
+    valid, message = await asyncio.to_thread(service.verify_token)
+    if not valid:
+        raise HTTPException(status_code=503, detail=f"Tushare 未就绪: {message}")
+
+
+async def _check_tushare_data_status(
+    service: TushareService,
+    *,
+    prefer_realtime_latest: bool = False,
+    include_remote_checks: bool = False,
+) -> dict:
+    return await asyncio.to_thread(
+        service.check_data_status,
+        prefer_realtime_latest=prefer_realtime_latest,
+        include_remote_checks=include_remote_checks,
+    )
+
+
 def _resolve_full_update_params(request: UpdateStartRequest, service: TushareService) -> dict:
     """根据当前数据状态自动选择全量初始化的起点。"""
     params = {
@@ -734,8 +755,14 @@ def _resolve_runtime_config_value(db: Session, key: str) -> str:
     return str(db_config.value).strip() if db_config and db_config.value is not None else ""
 
 
-def _build_environment_sections(tushare_service: TushareService, db: Session) -> list[TaskEnvironmentSection]:
-    data_status = tushare_service.check_data_status()
+def _build_environment_sections(
+    tushare_service: TushareService,
+    db: Session,
+    *,
+    data_status: dict | None = None,
+) -> list[TaskEnvironmentSection]:
+    if data_status is None:
+        data_status = tushare_service.check_data_status()
     runtime_tushare_token = _resolve_runtime_config_value(db, "TUSHARE_TOKEN")
     runtime_zhipuai_api_key = _resolve_runtime_config_value(db, "ZHIPUAI_API_KEY")
     runtime_dashscope_api_key = _resolve_runtime_config_value(db, "DASHSCOPE_API_KEY")
@@ -797,7 +824,7 @@ async def get_data_status(
         return cached
 
     tushare_service = TushareService()
-    status = tushare_service.check_data_status()
+    status = await _check_tushare_data_status(tushare_service)
     raw_status = status.get("raw_data", {})
     raw_view = _resolve_raw_status_for_views(raw_status)
 
@@ -821,7 +848,7 @@ async def get_data_status(
 async def get_data_freshness(user=Depends(require_user)) -> dict:
     """实时查询 Tushare 日线数据最新时效"""
     service = TushareService()
-    return service.get_data_freshness()
+    return await asyncio.to_thread(service.get_data_freshness)
 
 
 @router.post("/start", response_model=TaskResponse)
@@ -846,9 +873,9 @@ async def start_update(request: UpdateStartRequest, db: Session = Depends(get_db
             detail="当前有增量更新任务正在运行，请等待完成后再启动全量初始化。",
         )
 
-    _ensure_tushare_ready()
+    await _ensure_tushare_ready_async()
 
-    effective_params = _resolve_full_update_params(request, TushareService())
+    effective_params = await asyncio.to_thread(_resolve_full_update_params, request, TushareService())
     effective_params["trigger_source"] = "manual"
 
     result = await task_service.create_task("full_update", effective_params)
@@ -893,7 +920,10 @@ async def start_incremental_update(
         }
 
     tushare_service = TushareService()
-    resolved_end_date = end_date or tushare_service.get_effective_latest_trade_date(prefer_realtime=True)
+    resolved_end_date = end_date or await asyncio.to_thread(
+        tushare_service.get_effective_latest_trade_date,
+        prefer_realtime=True,
+    )
     if not resolved_end_date:
         raise HTTPException(status_code=503, detail="无法确定目标交易日")
 
@@ -943,7 +973,10 @@ async def start_daily_batch_update(
         _raise_initialization_in_progress(active_full_task)
 
     service = TushareService()
-    resolved_trade_date = trade_date or service.get_effective_latest_trade_date(prefer_realtime=True)
+    resolved_trade_date = trade_date or await asyncio.to_thread(
+        service.get_effective_latest_trade_date,
+        prefer_realtime=True,
+    )
     if not resolved_trade_date:
         raise HTTPException(status_code=503, detail="无法确定目标交易日")
 
@@ -984,7 +1017,7 @@ async def start_recent_120_rebuild(
     if active_full_task:
         _raise_initialization_in_progress(active_full_task)
 
-    _ensure_tushare_ready()
+    await _ensure_tushare_ready_async()
     result = await task_service.create_task(
         TaskService.RECENT_120_REBUILD_TASK_TYPE,
         {
@@ -1133,7 +1166,7 @@ async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_
     )
 
     tushare_service = TushareService()
-    data_status = tushare_service.check_data_status()
+    data_status = await _check_tushare_data_status(tushare_service)
     raw_status = data_status.get("raw_data", {})
     raw_view = _resolve_raw_status_for_views(raw_status)
     raw_csv_progress = (
@@ -1279,7 +1312,8 @@ async def get_task_environment(
     user=Depends(require_user)
 ) -> TaskEnvironmentResponse:
     tushare_service = TushareService()
-    return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service, db))
+    data_status = await _check_tushare_data_status(tushare_service)
+    return TaskEnvironmentResponse(sections=_build_environment_sections(tushare_service, db, data_status=data_status))
 
 
 @router.get("/diagnostics", response_model=TaskDiagnosticsResponse)
@@ -1291,8 +1325,8 @@ async def get_task_diagnostics(
     _cleanup_stale_active_tasks(db)
 
     tushare_service = TushareService()
-    data_status = tushare_service.check_data_status()
-    environment = _build_environment_sections(tushare_service, db)
+    data_status = await _check_tushare_data_status(tushare_service)
+    environment = _build_environment_sections(tushare_service, db, data_status=data_status)
 
     running_tasks = (
         db.query(Task)

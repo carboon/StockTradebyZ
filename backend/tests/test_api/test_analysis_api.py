@@ -539,7 +539,12 @@ def test_get_diagnosis_history_refreshes_current_page_when_requested(test_client
 
 @pytest.mark.api
 def test_generate_diagnosis_history_refreshes_first_page_synchronously(test_client: TestClient) -> None:
-    with patch("app.api.analysis.analysis_service") as mock_service:
+    async def run_sync(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    with patch("app.api.analysis.analysis_service") as mock_service, \
+         patch("app.api.analysis.asyncio.to_thread", new=AsyncMock(side_effect=run_sync)) as mock_to_thread, \
+         patch("app.api.analysis.diagnosis_history_cache_service") as mock_cache_service:
         mock_service.ensure_history_page.return_value = {
             "success": True,
             "updated": True,
@@ -548,6 +553,7 @@ def test_generate_diagnosis_history_refreshes_first_page_synchronously(test_clie
             "latest_trade_date": "2026-05-06",
             "latest_history_date": "2026-05-06",
         }
+        mock_cache_service.ensure_cached.return_value = {"total": 120}
 
         response = test_client.post("/api/v1/analysis/diagnosis/600000/generate-history")
 
@@ -563,6 +569,14 @@ def test_generate_diagnosis_history_refreshes_first_page_synchronously(test_clie
             page=1,
             page_size=10,
             force=False,
+        )
+        assert mock_to_thread.await_count == 1
+        mock_cache_service.invalidate.assert_called_once_with("600000")
+        mock_cache_service.ensure_cached.assert_called_once_with(
+            "600000",
+            days=120,
+            force=True,
+            generate_if_missing=False,
         )
 
 
