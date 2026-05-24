@@ -49,9 +49,8 @@
 
     <!-- 分析结果 -->
     <template v-if="stockCode">
-      <div class="content-grid">
-        <!-- K线图 -->
-        <div class="chart-column">
+      <!-- K线图 -->
+      <div class="chart-section">
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
@@ -109,12 +108,98 @@
                 </div>
               </div>
             </template>
+            <!-- 图表系列控制 -->
+            <div class="chart-series-controls">
+              <el-tooltip effect="dark" placement="top">
+                <template #content>
+                  <div class="control-tooltip">
+                    <strong>MA5均线：</strong><br/>
+                    5日简单移动平均线，反映短期价格趋势，<br/>
+                    对价格变化较为敏感，适合捕捉短期波动。
+                  </div>
+                </template>
+                <el-checkbox v-model="chartSeriesVisibility.ma5" @change="refreshChart">MA5</el-checkbox>
+              </el-tooltip>
+              <el-tooltip effect="dark" placement="top">
+                <template #content>
+                  <div class="control-tooltip">
+                    <strong>MA10均线：</strong><br/>
+                    10日简单移动平均线，平衡短期与中期趋势，<br/>
+                    是判断短期买卖点的重要参考线。
+                  </div>
+                </template>
+                <el-checkbox v-model="chartSeriesVisibility.ma10" @change="refreshChart">MA10</el-checkbox>
+              </el-tooltip>
+              <el-tooltip effect="dark" placement="top">
+                <template #content>
+                  <div class="control-tooltip">
+                    <strong>MA20均线：</strong><br/>
+                    20日简单移动平均线，也称月线，<br/>
+                    是中期趋势的重要参考，股价站稳20日均线通常意味着中期趋势向好。
+                  </div>
+                </template>
+                <el-checkbox v-model="chartSeriesVisibility.ma20" @change="refreshChart">MA20</el-checkbox>
+              </el-tooltip>
+              <el-tooltip effect="dark" placement="top">
+                <template #content>
+                  <div class="control-tooltip">
+                    <strong>MA60均线：</strong><br/>
+                    60日简单移动平均线，也称季线，<br/>
+                    反映长期趋势，是判断牛熊转换的重要参考。
+                  </div>
+                </template>
+                <el-checkbox v-model="chartSeriesVisibility.ma60" @change="refreshChart">MA60</el-checkbox>
+              </el-tooltip>
+              <el-tooltip effect="dark" placement="top">
+                <template #content>
+                  <div class="control-tooltip">
+                    <strong>成交量：</strong><br/>
+                    成交量反映市场参与度和资金流向，<br/>
+                    健康的上涨需要成交量的配合，放量上涨缩量下跌通常是强势特征。
+                  </div>
+                </template>
+                <el-checkbox v-model="chartSeriesVisibility.volume" @change="refreshChart">成交量</el-checkbox>
+              </el-tooltip>
+            </div>
             <div ref="chartRef" class="chart-container" />
+            <!-- 偏离率显示 -->
+            <div v-if="advancedIndicatorsData" class="deviation-info">
+              <div class="deviation-item">
+                <el-tooltip effect="dark" placement="top">
+                  <template #content>
+                    <div class="deviation-tooltip">
+                      偏离率越高，说明价格偏离均线越远，短期回调风险越大；<br/>
+                      偏离率为负且绝对值较大时，可能意味着超卖反弹的机会。<br/>
+                      <strong>注意：展示的是日线，以收盘价来计算偏离率。</strong>
+                    </div>
+                  </template>
+                  <span class="deviation-label deviation-label-yellow">黄线偏离</span>
+                </el-tooltip>
+                <span class="deviation-value" :class="getDeviationClass(advancedIndicatorsData.yellowDeviation)">
+                  {{ formatDeviation(advancedIndicatorsData.yellowDeviation) }}
+                </span>
+              </div>
+              <div class="deviation-item">
+                <el-tooltip effect="dark" placement="top">
+                  <template #content>
+                    <div class="deviation-tooltip">
+                      偏离率越高，说明价格偏离均线越远，短期回调风险越大；<br/>
+                      偏离率为负且绝对值较大时，可能意味着超卖反弹的机会。<br/>
+                      <strong>注意：展示的是日线，以收盘价来计算偏离率。</strong>
+                    </div>
+                  </template>
+                  <span class="deviation-label deviation-label-white">白线偏离</span>
+                </el-tooltip>
+                <span class="deviation-value" :class="getDeviationClass(advancedIndicatorsData.whiteDeviation)">
+                  {{ formatDeviation(advancedIndicatorsData.whiteDeviation) }}
+                </span>
+              </div>
+            </div>
           </el-card>
-        </div>
+      </div>
 
-        <!-- 分析面板 -->
-        <div class="analysis-column">
+      <!-- 分析面板 -->
+      <div class="analysis-section">
           <el-card class="analysis-card">
             <div v-if="analysisResult" class="analysis-content">
               <div v-if="isMobileViewport" class="analysis-summary-grid">
@@ -472,7 +557,6 @@
 
             <el-empty v-else description="暂无分析数据" :image-size="80" />
           </el-card>
-        </div>
       </div>
 
       <!-- 历史记录 -->
@@ -753,7 +837,7 @@ import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import { useResponsive } from '@/composables/useResponsive'
-import { buildKLineChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
+import { buildKLineChartOption, loadKLineChartRuntime, getAdvancedIndicators } from '@/utils/klineChart'
 
 const route = useRoute()
 const router = useRouter()
@@ -769,7 +853,17 @@ const READ_ONLY_ROUTE_SOURCES = new Set(['tomorrow-star', 'current-hot', 'midday
 
 const searchForm = ref({ code: '' })
 const stockCode = ref('')
-const chartDays = ref(120)
+const chartDays = ref(180)
+
+// 图表系列显示控制（趋势分界和短期动能通过 ECharts 图例控制）
+const chartSeriesVisibility = ref({
+  ma5: true,
+  ma10: true,
+  ma20: true,
+  ma60: false,
+  volume: true,
+})
+
 const chartRef = ref<HTMLElement>()
 const analyzing = ref(false)
 const refreshingHistory = ref(false)
@@ -820,6 +914,10 @@ const stockName = ref('')
 const currentDiagnosisChartData = ref<KLineData | null>(null)
 const lastAutoHistoryRefreshAt = ref<Record<string, number>>({})
 const mobileAnalysisSections = ref(['b1', 'scores'])
+const advancedIndicatorsData = ref<{
+  yellowDeviation: number
+  whiteDeviation: number
+} | null>(null)
 
 // 评分项配置
 const scoreConfig = {
@@ -828,7 +926,7 @@ const scoreConfig = {
   volume_behavior: { label: '量价行为', weight: 0.3 },
   previous_abnormal_move: { label: '历史异动', weight: 0.3 },
 }
-const chartDayOptions = [30, 60, 120] as const
+const chartDayOptions = [30, 60, 120, 180] as const
 
 // 计算评分项
 const scoreItems = computed(() => {
@@ -1280,11 +1378,16 @@ function selectChartDays(days: number) {
   void loadKlineData()
 }
 
+function refreshChart() {
+  if (!currentDiagnosisChartData.value) return
+  void renderChart(currentDiagnosisChartData.value, chartDays.value)
+}
+
 watch(
   [historyData, trendStartDates],
   () => {
     if (!currentDiagnosisChartData.value || !stockCode.value) return
-    void renderChart(getDiagnosisDisplayChartData(currentDiagnosisChartData.value, chartDays.value))
+    void renderChart(currentDiagnosisChartData.value, chartDays.value)
   },
   { deep: true },
 )
@@ -1311,12 +1414,15 @@ async function loadKlineData() {
   activeKlineRequestKey = requestKey
 
   const requestedDays = chartDays.value
+  // 为了计算MA114等高级指标，需要额外的历史数据
+  const indicatorBufferDays = 120
+  const totalDaysNeeded = requestedDays + indicatorBufferDays
   const signal = beginRequest('kline')
   try {
     let data = diagnosisChartCache.get(stockCode.value)
     let cachedDays = diagnosisChartCacheDays.get(stockCode.value) || 0
 
-    if (!data || cachedDays < Math.min(requestedDays, DIAGNOSIS_INITIAL_CHART_DAYS)) {
+    if (!data || cachedDays < Math.min(totalDaysNeeded, DIAGNOSIS_INITIAL_CHART_DAYS)) {
       const persistent = loadDiagnosisChartCache(stockCode.value)
       if (persistent) {
         data = persistent.data
@@ -1326,17 +1432,18 @@ async function loadKlineData() {
       }
     }
 
-    const initialDays = requestedDays >= 120 ? DIAGNOSIS_INITIAL_CHART_DAYS : requestedDays
+    // 初始加载时请求足够的数据用于计算高级指标
+    const initialDays = totalDaysNeeded >= 120 ? totalDaysNeeded : totalDaysNeeded
     if (!data || cachedDays < initialDays) {
       data = await apiStock.getKline(stockCode.value, initialDays, false, { signal })
       cachedDays = initialDays
       setDiagnosisChartCache(stockCode.value, data, initialDays)
     }
 
-    const displayData = getDiagnosisDisplayChartData(data, requestedDays)
+    // 使用全部数据计算高级指标，但只显示用户请求的天数
     currentDiagnosisChartData.value = data
     await nextTick()
-    await renderChart(displayData)
+    await renderChart(data, requestedDays)
     // 确保图表在容器渲染完成后有正确的尺寸
     setTimeout(() => {
       chartInstance?.resize()
@@ -1356,7 +1463,7 @@ async function loadKlineData() {
   }
 }
 
-async function renderChart(data: KLineData) {
+async function renderChart(fullData: KLineData, displayDays: number = 180) {
   if (!chartRef.value) return
 
   const { initChart } = await loadKLineChartRuntime()
@@ -1365,12 +1472,38 @@ async function renderChart(data: KLineData) {
     chartInstance = initChart(chartRef.value)
   }
 
+  // 截取需要显示的数据
+  const displayData = getDiagnosisDisplayChartData(fullData, displayDays)
+
+  // 根据可见性配置构建 MA 列表
+  const movingAverages: Array<'ma5' | 'ma10' | 'ma20' | 'ma60'> = []
+  if (chartSeriesVisibility.value.ma5) movingAverages.push('ma5')
+  if (chartSeriesVisibility.value.ma10) movingAverages.push('ma10')
+  if (chartSeriesVisibility.value.ma20) movingAverages.push('ma20')
+  if (chartSeriesVisibility.value.ma60) movingAverages.push('ma60')
+
   const option: EChartsCoreOption = buildKLineChartOption({
-    data,
+    data: displayData,
+    fullData: fullData,  // 传递完整数据用于计算高级指标
     highlightedDates: trendStartDates.value,
-    movingAverages: ['ma5', 'ma10', 'ma20'],
+    movingAverages,
     extraLegendLabels: ['趋势启动'],
+    showAdvancedIndicators: true,  // 始终显示高级指标，通过 ECharts 图例控制
+    showTrendBoundary: true,  // 始终显示趋势分界线
+    showMomentumLine: true,  // 始终显示短期动能线
+    showVolume: chartSeriesVisibility.value.volume,
   })
+
+  // 获取高级指标数据（偏离率）- 使用完整数据计算
+  const indicators = getAdvancedIndicators(fullData)
+  if (indicators) {
+    advancedIndicatorsData.value = {
+      yellowDeviation: indicators.yellowDeviation,
+      whiteDeviation: indicators.whiteDeviation,
+    }
+  } else {
+    advancedIndicatorsData.value = null
+  }
 
   await nextTick()
   chartInstance.setOption(option, true)
@@ -1378,23 +1511,28 @@ async function renderChart(data: KLineData) {
 }
 
 function queueDiagnosisFullChartRefresh(code: string, requestedDays: number, currentDays: number) {
-  if (requestedDays < 120 || currentDays >= requestedDays) return
+  const indicatorBufferDays = 120
+  const totalDaysNeeded = requestedDays + indicatorBufferDays
+  if (requestedDays < 120 || currentDays >= totalDaysNeeded) return
   if (stockCode.value !== code) return
-  void refreshDiagnosisFullChartInBackground(code, requestedDays)
+  void refreshDiagnosisFullChartInBackground(code, totalDaysNeeded)
 }
 
-async function refreshDiagnosisFullChartInBackground(code: string, requestedDays: number) {
-  const requestKey = `${code}:${requestedDays}`
+async function refreshDiagnosisFullChartInBackground(code: string, totalDays: number) {
+  const requestKey = `${code}:${totalDays}`
   if (activeFullKlineRequestKey === requestKey) return
   activeFullKlineRequestKey = requestKey
 
   const signal = beginRequest('klineExtended')
   try {
-    const fullData = await apiStock.getKline(code, requestedDays, false, { signal, timeoutMs: 20000 })
-    if (stockCode.value !== code || chartDays.value !== requestedDays) return
-    setDiagnosisChartCache(code, fullData, requestedDays)
+    const fullData = await apiStock.getKline(code, totalDays, false, { signal, timeoutMs: 20000 })
+    // 检查股票代码和用户选择的显示天数是否匹配
+    const displayDays = chartDays.value
+    if (stockCode.value !== code || fullData.daily.length < displayDays) return
+
+    setDiagnosisChartCache(code, fullData, totalDays)
     currentDiagnosisChartData.value = fullData
-    await renderChart(getDiagnosisDisplayChartData(fullData, requestedDays))
+    await renderChart(fullData, displayDays)
     persistDiagnosisState()
   } catch (error) {
     if (isRequestCanceled(error)) return
@@ -1619,6 +1757,16 @@ function formatTurnoverRate(value?: number | null): string {
 function formatVolumeRatio(value?: number | null): string {
   if (value === undefined || value === null) return '-'
   return value.toFixed(2)
+}
+
+function formatDeviation(value: number | null | undefined): string {
+  if (value === undefined || value === null || Number.isNaN(value)) return '-'
+  return (value >= 0 ? '+' : '') + value.toFixed(2) + '%'
+}
+
+function getDeviationClass(value: number | null | undefined): string {
+  if (value === undefined || value === null || Number.isNaN(value)) return ''
+  return value > 0 ? 'deviation-positive' : value < 0 ? 'deviation-negative' : ''
 }
 
 // 中国习惯：红涨绿跌
@@ -1881,7 +2029,7 @@ function restoreDiagnosisState() {
     searchForm.value = state.searchForm || { code: '' }
     stockCode.value = state.stockCode || ''
     stockName.value = state.stockName || ''
-    chartDays.value = chartDayOptions.includes(state.chartDays) ? state.chartDays : 120
+    chartDays.value = chartDayOptions.includes(state.chartDays) ? state.chartDays : 180
     historyData.value = state.historyData || []
     trendStartDates.value = state.trendStartDates || []
     tomorrowStarDates.value = state.tomorrowStarDates || []
@@ -1950,23 +2098,16 @@ function normalizeRouteCode(code: unknown): string {
     }
   }
 
-  .content-grid {
-    display: grid;
-    grid-template-columns: minmax(620px, 1.55fr) minmax(360px, 0.95fr);
-    gap: 20px;
+  .chart-section {
     margin-bottom: 20px;
-    align-items: stretch;
   }
 
-  .chart-column,
-  .analysis-column {
-    min-width: 0;
-    display: flex;
+  .analysis-section {
+    margin-bottom: 20px;
   }
 
   .chart-card {
     width: 100%;
-    height: 100%;
     display: flex;
     flex-direction: column;
 
@@ -2115,17 +2256,108 @@ function normalizeRouteCode(code: unknown): string {
     .chart-container {
       flex: 1;
       min-height: 520px;
+      height: 580px;
+    }
+
+    .chart-series-controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 16px;
+      margin-bottom: 8px;
+      background: rgba(40, 40, 40, 0.6);
+      border-radius: 6px;
+      border: 1px solid #333;
+
+      :deep(.el-checkbox) {
+        margin: 0;
+        margin-right: 4px;
+
+        .el-checkbox__label {
+          font-size: 12px;
+          color: #ccc;
+        }
+
+        .el-checkbox__input.is-checked + .el-checkbox__label {
+          color: #fff;
+        }
+
+        .el-checkbox__inner {
+          background-color: rgba(255, 255, 255, 0.1);
+          border-color: #555;
+
+          &:hover {
+            border-color: #666;
+          }
+        }
+
+        .el-checkbox__input.is-checked .el-checkbox__inner {
+          background-color: #409eff;
+          border-color: #409eff;
+        }
+      }
+    }
+
+    .deviation-info {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 40px;
+      padding: 12px 20px;
+      margin-top: 8px;
+      border-top: 1px solid #333;
+      background: linear-gradient(180deg, #2a2a2a 0%, #1f1f1f 100%);
+
+      .deviation-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+
+        .deviation-label {
+          font-size: 13px;
+          font-weight: 600;
+          padding: 4px 12px;
+          border-radius: 6px;
+
+          &.deviation-label-yellow {
+            background: linear-gradient(135deg, #fff9e6 0%, #ffeaa7 100%);
+            color: #946600;
+            border: 1px solid #ffd700;
+          }
+
+          &.deviation-label-white {
+            background: linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%);
+            color: #333;
+            border: 1px solid #ccc;
+          }
+        }
+
+        .deviation-value {
+          font-size: 15px;
+          font-weight: 700;
+          font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+
+          &.deviation-positive {
+            color: #ef5350;
+          }
+
+          &.deviation-negative {
+            color: #26a69a;
+          }
+        }
+      }
     }
   }
 
   .analysis-card {
     width: 100%;
-    height: 100%;
     display: flex;
     flex-direction: column;
 
     :deep(.el-card__body) {
-      flex: 1;
+      max-height: 500px;
       overflow-y: auto;
     }
 
@@ -2618,8 +2850,7 @@ function normalizeRouteCode(code: unknown): string {
       width: 100%;
     }
 
-    .content-grid {
-      grid-template-columns: 1fr;
+    .chart-section {
       margin-bottom: 16px;
     }
 
@@ -2672,7 +2903,32 @@ function normalizeRouteCode(code: unknown): string {
 
       .chart-container {
         min-height: 300px;
+        height: 320px;
       }
+
+      .deviation-info {
+        flex-direction: column;
+        gap: 10px;
+        padding: 10px 12px;
+
+        .deviation-item {
+          justify-content: space-between;
+          width: 100%;
+
+          .deviation-label {
+            font-size: 12px;
+            padding: 3px 10px;
+          }
+
+          .deviation-value {
+            font-size: 14px;
+          }
+        }
+      }
+    }
+
+    .analysis-section {
+      margin-bottom: 16px;
     }
 
     .analysis-card {
@@ -2738,6 +2994,24 @@ function normalizeRouteCode(code: unknown): string {
         gap: 8px;
       }
     }
+
+    .chart-series-controls {
+      gap: 8px;
+      padding: 6px 12px;
+
+      :deep(.el-checkbox .el-checkbox__label) {
+        font-size: 11px;
+      }
+    }
   }
+}
+
+// Tooltip样式
+.control-tooltip,
+.indicator-tooltip,
+.deviation-tooltip {
+  line-height: 1.6;
+  font-size: 13px;
+  max-width: 300px;
 }
 </style>

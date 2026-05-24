@@ -189,15 +189,15 @@ async def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineR
                 detail=f"数据缺少必需的列: {', '.join(missing_cols)}"
             )
 
-        # 取最近 N 天
-        if request.days > 0:
-            df = df.tail(request.days).copy()
-
-        # 计算均线
+        # 先计算均线（在截取数据之前，确保长周期均线有足够的数据）
         df["ma5"] = df["close"].rolling(window=5).mean()
         df["ma10"] = df["close"].rolling(window=10).mean()
         df["ma20"] = df["close"].rolling(window=20).mean()
         df["ma60"] = df["close"].rolling(window=60).mean()
+
+        # 取最近 N 天（在计算均线之后）
+        if request.days > 0:
+            df = df.tail(request.days).copy()
 
         # 确定成交量列名（可能是 vol 或 volume）
         vol_col = "vol" if "vol" in df.columns else "volume" if "volume" in df.columns else None
