@@ -41,7 +41,8 @@ from app.services.diagnosis_history_cache_service import diagnosis_history_cache
 from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.market_service import MarketService
 from app.services.sector_analysis_service import SectorAnalysisService
-from app.services.speculative_risk_service import SpeculativeRiskService
+# 风险识别服务已暂时屏蔽
+# from app.services.speculative_risk_service import SpeculativeRiskService
 from app.services.task_service import TaskService
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
@@ -282,74 +283,9 @@ def _get_latest_history_summary(db: Session, code: str) -> dict | None:
     }
 
 
-def _build_diagnosis_risk_flag(
-    db: Session,
-    *,
-    code: str,
-    name: Optional[str],
-    result_json: dict[str, Any],
-) -> dict[str, Any]:
-    current_hot_service = CurrentHotService(db)
-    target_date = (
-        _parse_date_or_none(result_json.get("check_date"))
-        or _parse_date_or_none(result_json.get("analysis_date"))
-        or current_hot_service.get_latest_trade_date()
-    )
-    recent_metrics = current_hot_service._load_recent_trade_metrics([code], target_date) if target_date else {}
-
-    latest_hot_candidate = (
-        db.query(CurrentHotCandidate, Stock.industry)
-        .outerjoin(Stock, Stock.code == CurrentHotCandidate.code)
-        .filter(CurrentHotCandidate.code == code)
-        .order_by(CurrentHotCandidate.pick_date.desc(), CurrentHotCandidate.id.desc())
-        .first()
-    )
-    sector_names: list[str] = []
-    industry: Optional[str] = None
-    if latest_hot_candidate:
-        candidate, industry = latest_hot_candidate
-        sector_names = current_hot_service._resolve_sector_names(candidate.sector_names_json, industry=industry)
-
-    return SpeculativeRiskService(db).evaluate(
-        code=code,
-        name=name,
-        industry=industry,
-        sector_names=sector_names,
-        change_pct=result_json.get("change_pct"),
-        turnover_rate=result_json.get("turnover_rate"),
-        volume_ratio=result_json.get("volume_ratio"),
-        active_pool_rank=result_json.get("active_pool_rank"),
-        b1_passed=result_json.get("b1_passed"),
-        verdict=result_json.get("verdict"),
-        total_score=result_json.get("score") if result_json.get("score") is not None else result_json.get("total_score"),
-        signal_type=result_json.get("signal_type"),
-        prefilter_passed=result_json.get("prefilter_passed"),
-        pullback_negative_flags=result_json.get("pullback_negative_flags") or [],
-        recent_limit_up_days=recent_metrics.get(code, {}).get("recent_limit_up_days"),
-        recent_runup_pct=recent_metrics.get(code, {}).get("recent_runup_pct"),
-    )
-
-
-def _build_diagnosis_risk_regime(
-    db: Session,
-    *,
-    result_json: dict[str, Any],
-) -> Optional[dict[str, Any]]:
-    current_hot_service = CurrentHotService(db)
-    target_date = (
-        _parse_date_or_none(result_json.get("check_date"))
-        or _parse_date_or_none(result_json.get("analysis_date"))
-        or current_hot_service.get_latest_pick_date()
-    )
-    if target_date is None:
-        return None
-
-    payload = current_hot_service.load_candidates(target_date.isoformat(), limit=5000)
-    regime = payload.get("risk_regime")
-    if not regime:
-        return None
-
-    return regime
+# 风险识别相关函数已暂时屏蔽
+# def _build_diagnosis_risk_flag(...): ...
+# def _build_diagnosis_risk_regime(...): ...
 
 
 def ensure_tushare_ready() -> None:
@@ -975,7 +911,7 @@ async def get_current_hot_candidates(
             total_score=item.get("total_score"),
             signal_type=item.get("signal_type"),
             comment=item.get("comment"),
-            risk_flag=item.get("risk_flag"),
+            # risk_flag=item.get("risk_flag"),  # 已屏蔽
             consecutive_days=int(item.get("consecutive_days") or 1),
         )
         for item in payload.get("candidates", [])
@@ -984,7 +920,7 @@ async def get_current_hot_candidates(
         pick_date=pick_date,
         candidates=items,
         total=int(payload.get("total", 0) or 0),
-        risk_regime=payload.get("risk_regime"),
+        # risk_regime=payload.get("risk_regime"),  # 已屏蔽
     )
 
 
@@ -1019,7 +955,7 @@ async def get_current_hot_results(
             prefilter_blocked_by=item.get("prefilter_blocked_by"),
             pullback_quality=item.get("pullback_quality"),
             pullback_negative_flags=item.get("pullback_negative_flags"),
-            risk_flag=item.get("risk_flag"),
+            # risk_flag=item.get("risk_flag"),  # 已屏蔽
         )
         for item in payload.get("results", [])
     ]
@@ -1028,7 +964,7 @@ async def get_current_hot_results(
         results=items,
         total=int(payload.get("total", 0) or 0),
         min_score_threshold=float(payload.get("min_score_threshold", 4.0) or 4.0),
-        risk_regime=payload.get("risk_regime"),
+        # risk_regime=payload.get("risk_regime"),  # 已屏蔽
     )
 
 
@@ -1572,13 +1508,9 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
             "b1_signal_type": latest_history.get("b1_signal_type"),
         }
 
-    risk_flag = _build_diagnosis_risk_flag(
-        db,
-        code=code,
-        name=stock.name if stock else None,
-        result_json=result_json,
-    )
-    risk_regime = _build_diagnosis_risk_regime(db, result_json=result_json)
+    # 风险识别功能已暂时屏蔽
+    # risk_flag = _build_diagnosis_risk_flag(...)
+    # risk_regime = _build_diagnosis_risk_regime(...)
 
     return {
         "code": code,
@@ -1589,7 +1521,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
         "b1_passed": result_json.get("b1_passed"),
         "score": result_json.get("score"),
         "verdict": result_json.get("verdict"),
-        "risk_regime": risk_regime,
+        # "risk_regime": risk_regime,  # 已屏蔽
         "analysis": {
             "kdj_j": result_json.get("kdj_j"),
             "zx_long_pos": result_json.get("zx_long_pos"),
@@ -1608,7 +1540,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
             "signal_type": result_json.get("signal_type"),
             "signal_reasoning": result_json.get("signal_reasoning"),
             "comment": result_json.get("comment"),
-            "risk_flag": risk_flag,
+            # "risk_flag": risk_flag,  # 已屏蔽
         },
     }
 
