@@ -86,7 +86,12 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-stocktrade_redis_123}
       - BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
       - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - BACKEND_WORKERS=${BACKEND_WORKERS:-1}
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-10}
+      - DB_POOL_TIMEOUT=${DB_POOL_TIMEOUT:-30}
+      - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-3600}
       - ENVIRONMENT=${ENVIRONMENT:-development}
     depends_on:
       postgres:
@@ -127,7 +132,12 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-stocktrade_redis_123}
       - BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
       - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - BACKEND_WORKERS=${BACKEND_WORKERS:-1}
       - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-10}
+      - DB_POOL_TIMEOUT=${DB_POOL_TIMEOUT:-30}
+      - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-3600}
       - ENVIRONMENT=${ENVIRONMENT:-development}
       - DISABLE_AUTO_UPDATE_SCHEDULER=1
     depends_on:

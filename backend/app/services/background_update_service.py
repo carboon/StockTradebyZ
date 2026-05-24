@@ -555,10 +555,24 @@ class BackgroundLatestTradeDayUpdateService:
                 "total": total_elapsed,
             }
 
-            self.log.info("阶段耗时汇总: %s", timings)
             message = f"{trade_date} 更新完成"
             MarketService.finish_update(message)
             self._invalidate_runtime_caches()
+            view_prewarm_started_at = time.perf_counter()
+            self._push_market_state(
+                {
+                    "task_type": "daily_batch_update",
+                    "mode": "daily_batch",
+                    "target_trade_date": trade_date,
+                    "stage_label": "按交易日批量刷新",
+                    "stage": "view_cache_prewarm",
+                    "progress": 97,
+                    "current": 1,
+                    "total": 1,
+                    "current_code": trade_date,
+                    "message": f"预热 {trade_date} 榜单读路径",
+                }
+            )
             try:
                 from app.services.view_prewarm_service import prewarm_latest_analysis_views
 
@@ -566,6 +580,24 @@ class BackgroundLatestTradeDayUpdateService:
             except Exception as exc:
                 view_prewarm_result = {"success": False, "error": str(exc)}
                 self.log.warning("视图预热失败: %s", exc)
+            view_prewarm_elapsed = round(max(0.0, time.perf_counter() - view_prewarm_started_at), 3)
+            timings["view_cache_prewarm"] = view_prewarm_elapsed
+
+            diagnosis_cache_started_at = time.perf_counter()
+            self._push_market_state(
+                {
+                    "task_type": "daily_batch_update",
+                    "mode": "daily_batch",
+                    "target_trade_date": trade_date,
+                    "stage_label": "按交易日批量刷新",
+                    "stage": "diagnosis_cache_prewarm",
+                    "progress": 98,
+                    "current": 1,
+                    "total": 1,
+                    "current_code": trade_date,
+                    "message": "预热单股诊断历史缓存",
+                }
+            )
             try:
                 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 
@@ -573,6 +605,20 @@ class BackgroundLatestTradeDayUpdateService:
             except Exception as exc:
                 diagnosis_cache_result = {"success": False, "error": str(exc)}
                 self.log.warning("单股诊断历史缓存预热失败: %s", exc)
+            diagnosis_cache_elapsed = round(max(0.0, time.perf_counter() - diagnosis_cache_started_at), 3)
+            timings["diagnosis_cache_prewarm"] = diagnosis_cache_elapsed
+
+            self.log.info(
+                "日更后读路径预热完成 trade_date=%s view_success=%s diagnosis_success=%s timings=%s",
+                trade_date,
+                view_prewarm_result.get("success"),
+                diagnosis_cache_result.get("success"),
+                {
+                    "view_cache_prewarm": view_prewarm_elapsed,
+                    "diagnosis_cache_prewarm": diagnosis_cache_elapsed,
+                },
+            )
+            self.log.info("阶段耗时汇总: %s", timings)
 
             return {
                 "success": True,
@@ -588,6 +634,14 @@ class BackgroundLatestTradeDayUpdateService:
                 "tomorrow_star_stats": tomorrow_stats,
                 "view_data_prewarm": view_prewarm_result,
                 "diagnosis_cache_prewarm": diagnosis_cache_result,
+                "read_path_prewarm": {
+                    "view_data": view_prewarm_result,
+                    "diagnosis_cache": diagnosis_cache_result,
+                    "timings": {
+                        "view_cache_prewarm": view_prewarm_elapsed,
+                        "diagnosis_cache_prewarm": diagnosis_cache_elapsed,
+                    },
+                },
                 "timings": timings,
             }
         except Exception as exc:

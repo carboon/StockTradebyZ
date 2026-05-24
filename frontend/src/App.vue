@@ -110,6 +110,7 @@ const gateActionLabel = computed(() => {
 function enforceRouteAccess() {
   // 登录页不参与任何路由强制跳转
   if (isAuthPage.value) return
+  if (!isLoggedIn.value || !isAdmin.value) return
 
   if (gateType.value === 'tushare-unready' && !isAllowedRoute.value) {
     router.replace('/config')
@@ -121,8 +122,8 @@ function enforceRouteAccess() {
 }
 
 async function refreshStatus() {
-  // 只对已登录用户检查状态
-  if (!isLoggedIn.value) {
+  // Tushare/初始化状态只面向管理员；普通用户查询不依赖这些接口。
+  if (!isLoggedIn.value || !isAdmin.value) {
     return
   }
 
@@ -143,7 +144,7 @@ function goConfig() {
 
 // 初始化：非登录页且已登录时才检查状态
 onMounted(async () => {
-  if (!isAuthPage.value && isLoggedIn.value) {
+  if (!isAuthPage.value && isLoggedIn.value && isAdmin.value) {
     await refreshStatus()
   }
 })

@@ -1206,6 +1206,7 @@ class AnalysisService:
         code: str,
         reviewer: str = "quant",
         use_cache: bool = True,
+        allow_remote_fetch: bool = True,
     ) -> Dict[str, Any]:
         """
         执行完整的单股分析
@@ -1214,13 +1215,14 @@ class AnalysisService:
             code: 股票代码
             reviewer: 评审者类型 (quant/glm/qwen/gemini)
             use_cache: 是否使用缓存（默认 True）
+            allow_remote_fetch: 历史样本不足时是否允许触发 Tushare 补数。
 
         Returns:
             分析结果字典，包含缓存状态标识 _cached
         """
         import json
 
-        history_repaired = self._ensure_analysis_history_window(code)
+        history_repaired = self._ensure_analysis_history_window(code) if allow_remote_fetch else False
         if history_repaired:
             use_cache = False
 

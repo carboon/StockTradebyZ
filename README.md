@@ -208,10 +208,15 @@ cp .env.example deploy/.env
 
 - `ENVIRONMENT=production`
 - `DATABASE_URL` 不使用示例默认连接串
+- `BACKEND_WORKERS` 与数据库连接池容量匹配
+- `DB_POOL_SIZE`、`DB_MAX_OVERFLOW`、`DB_POOL_TIMEOUT`、`DB_POOL_RECYCLE` 符合 PostgreSQL 连接预算
 - `SECRET_KEY` 不使用示例占位值
 - `ADMIN_DEFAULT_PASSWORD` 不使用示例口令
 - `BACKEND_CORS_ORIGINS` 替换为真实域名
 - 对外端口、反向代理和防火墙符合实际部署需求
+
+后端默认使用 Uvicorn 单 worker。Mac mini M4 可先在 `deploy/.env` 设置 `BACKEND_WORKERS=2`，配合 `DB_POOL_SIZE=8`、`DB_MAX_OVERFLOW=8` 做 60 秒压测；连接上限约为 `BACKEND_WORKERS * (DB_POOL_SIZE + DB_MAX_OVERFLOW)`。若 CPU 和 PostgreSQL 连接数都稳定，再尝试 `BACKEND_WORKERS=3`。详细步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+多 worker 部署下，应用内每日自动更新调度器会通过运行期锁保持单例，避免多个 worker 重复触发自动更新。
 
 如 Docker Hub 拉取 `nginx:1.27-alpine` 较慢，可在 `deploy/.env` 覆盖：
 

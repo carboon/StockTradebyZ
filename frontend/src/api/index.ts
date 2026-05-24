@@ -62,6 +62,7 @@ import type {
   ConceptsResponse,
   StockConceptsResponse,
   ConceptMembersResponse,
+  CsvImportResult,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
@@ -585,4 +586,30 @@ export const apiAuth = {
   // 管理员：获取用户用量
   adminGetUsage: (userId: number) =>
     api.get<never, UsageStatsResponse>(`/v1/auth/admin/usage/${userId}`),
+
+  // 管理员：导出所有用户信息
+  adminExportUsers: () =>
+    api.get<never, Blob>('/v1/auth/admin/users/export', { responseType: 'blob' }),
+
+  // 管理员：导入所有用户信息
+  adminImportUsers: (file: File) => {
+    const formData = new FormData()
+    formData.append('upload_file', file)
+    return api.post<FormData, CsvImportResult>('/v1/auth/admin/users/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+
+  // 管理员：导出所有重点观察信息
+  adminExportWatchlist: () =>
+    api.get<never, Blob>('/v1/auth/admin/watchlist/export', { responseType: 'blob' }),
+
+  // 管理员：导入所有重点观察信息
+  adminImportWatchlist: (file: File) => {
+    const formData = new FormData()
+    formData.append('upload_file', file)
+    return api.post<FormData, CsvImportResult>('/v1/auth/admin/watchlist/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
 }

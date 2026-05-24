@@ -3,10 +3,12 @@ Authentication API Router
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 用户注册、登录、API Key 管理、用量统计、管理员接口
 """
+import csv
+import io
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -20,10 +22,10 @@ from app.auth import (
 )
 from app.config import settings
 from app.database import get_db
-from app.models import Config
-from app.models import ApiKey, UsageLog, User, UserSession
+from app.models import ApiKey, Config, Stock, UsageLog, User, UserSession, Watchlist
 from app.schemas import (
     AdminUserUpdate,
+    CsvImportResult,
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyResponse,
@@ -42,12 +44,411 @@ from app.schemas import (
     VisitFrequencyResponse,
 )
 from app.audit import log_audit
-from app.api.deps import get_admin_user, get_current_active_user, require_user
+from app.api.deps import get_admin_user, get_current_active_user
 from app.time_utils import utc_now
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_USER_EXPORT_HEADERS = [
+    "id",
+    "username",
+    "display_name",
+    "role",
+    "is_active",
+    "daily_quota",
+    "last_login_at",
+    "is_online",
+    "created_at",
+    "updated_at",
+]
+
+_USER_IMPORT_REQUIRED_HEADERS = {
+    "username",
+    "role",
+    "is_active",
+    "daily_quota",
+}
+
+_USER_IMPORT_OPTIONAL_HEADERS = {
+    "id",
+    "display_name",
+    "last_login_at",
+    "is_online",
+    "created_at",
+    "updated_at",
+    "password",
+}
+
+_WATCHLIST_EXPORT_HEADERS = [
+    "id",
+    "user_id",
+    "username",
+    "code",
+    "add_reason",
+    "entry_price",
+    "entry_date",
+    "position_ratio",
+    "priority",
+    "is_active",
+    "added_at",
+]
+
+_WATCHLIST_IMPORT_REQUIRED_HEADERS = {
+    "username",
+    "code",
+    "is_active",
+    "priority",
+}
+
+_WATCHLIST_IMPORT_OPTIONAL_HEADERS = {
+    "id",
+    "user_id",
+    "add_reason",
+    "entry_price",
+    "entry_date",
+    "position_ratio",
+    "added_at",
+}
+
+
+def _build_csv_response(filename: str, headers: list[str], rows: list[list[object | None]]) -> Response:
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow(["" if value is None else value for value in row])
+
+    content = "\ufeff" + buffer.getvalue()
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _load_csv_upload(upload: UploadFile) -> tuple[list[str], list[dict[str, str]]]:
+    raw = upload.file.read()
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="上传文件为空")
+
+    decoded: str | None = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            decoded = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV 文件编码不支持，请使用 UTF-8 或 GB18030")
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if reader.fieldnames is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV 文件缺少表头")
+
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        normalized_row: dict[str, str] = {}
+        for key, value in row.items():
+            if key is None:
+                continue
+            normalized_row[key.strip()] = "" if value is None else str(value)
+        rows.append(normalized_row)
+    return [header.strip() for header in reader.fieldnames], rows
+
+
+def _normalize_csv_field(value: object | None) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_bool(value: object | None, field_name: str, row_no: int, *, required: bool = False) -> bool | None:
+    text = _normalize_csv_field(value)
+    if not text:
+        if required:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不能为空")
+        return None
+
+    normalized = text.lower()
+    if normalized in {"1", "true", "yes", "y", "t", "是", "启用"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "f", "否", "禁用"}:
+        return False
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不是有效布尔值")
+
+
+def _parse_int(value: object | None, field_name: str, row_no: int, *, required: bool = False, minimum: int | None = None) -> int | None:
+    text = _normalize_csv_field(value)
+    if not text:
+        if required:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不能为空")
+        return None
+    try:
+        parsed = int(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不是有效整数") from exc
+    if minimum is not None and parsed < minimum:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不能小于 {minimum}")
+    return parsed
+
+
+def _parse_float(value: object | None, field_name: str, row_no: int, *, minimum: float | None = None, maximum: float | None = None) -> float | None:
+    text = _normalize_csv_field(value)
+    if not text:
+        return None
+    try:
+        parsed = float(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不是有效数字") from exc
+    if minimum is not None and parsed < minimum:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不能小于 {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不能大于 {maximum}")
+    return parsed
+
+
+def _parse_date(value: object | None, field_name: str, row_no: int) -> date | None:
+    text = _normalize_csv_field(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不是有效日期") from exc
+
+
+def _parse_datetime(value: object | None, field_name: str, row_no: int) -> datetime | None:
+    text = _normalize_csv_field(value)
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {row_no} 行字段 {field_name} 不是有效日期时间") from exc
+
+
+def _validate_headers(fieldnames: list[str] | None, required: set[str], optional: set[str], *, sheet_name: str) -> None:
+    if not fieldnames:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{sheet_name} CSV 文件缺少表头")
+
+    normalized_headers = [header.strip() for header in fieldnames if header is not None]
+    missing = [header for header in required if header not in normalized_headers]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{sheet_name} CSV 缺少必要字段: {', '.join(missing)}")
+
+    allowed_headers = required | optional
+    unknown = [header for header in normalized_headers if header and header not in allowed_headers]
+    if unknown:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{sheet_name} CSV 含有不支持的字段: {', '.join(unknown)}")
+
+
+def _build_user_export_rows(db: Session) -> list[list[object | None]]:
+    rows: list[list[object | None]] = []
+    users = db.query(User).order_by(User.id.asc()).all()
+    for user in users:
+        rows.append([
+            user.id,
+            user.username,
+            user.display_name,
+            user.role,
+            user.is_active,
+            user.daily_quota,
+            user.last_login_at.isoformat() if user.last_login_at else None,
+            user.is_online,
+            user.created_at.isoformat() if user.created_at else None,
+            user.updated_at.isoformat() if user.updated_at else None,
+        ])
+    return rows
+
+
+def _build_watchlist_export_rows(db: Session) -> list[list[object | None]]:
+    rows: list[list[object | None]] = []
+    query = (
+        db.query(Watchlist, User.username)
+        .join(User, User.id == Watchlist.user_id)
+        .order_by(Watchlist.user_id.asc(), Watchlist.code.asc())
+    )
+    for watchlist, username in query.all():
+        rows.append([
+            watchlist.id,
+            watchlist.user_id,
+            username,
+            watchlist.code,
+            watchlist.add_reason,
+            watchlist.entry_price,
+            watchlist.entry_date.isoformat() if watchlist.entry_date else None,
+            watchlist.position_ratio,
+            watchlist.priority,
+            watchlist.is_active,
+            watchlist.added_at.isoformat() if watchlist.added_at else None,
+        ])
+    return rows
+
+
+def _build_user_row_lookup(db: Session) -> dict[str, User]:
+    return {
+        user.username: user
+        for user in db.query(User).all()
+    }
+
+
+def _build_stock_lookup(db: Session) -> dict[str, Stock]:
+    return {
+        stock.code: stock
+        for stock in db.query(Stock).all()
+    }
+
+
+def _import_users_from_csv(upload: UploadFile, db: Session) -> CsvImportResult:
+    fieldnames, rows = _load_csv_upload(upload)
+    _validate_headers(fieldnames, _USER_IMPORT_REQUIRED_HEADERS, _USER_IMPORT_OPTIONAL_HEADERS, sheet_name="用户")
+
+    existing_users = _build_user_row_lookup(db)
+    seen_usernames: set[str] = set()
+    result = CsvImportResult(total_rows=len(rows))
+
+    for idx, row in enumerate(rows, start=2):
+        username = _normalize_csv_field(row.get("username"))
+        if not username:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 username 不能为空")
+        if username in seen_usernames:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行用户名重复: {username}")
+        seen_usernames.add(username)
+
+        role = _normalize_csv_field(row.get("role"))
+        if role not in {"admin", "user"}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 role 只能是 admin 或 user")
+
+        is_active = _parse_bool(row.get("is_active"), "is_active", idx, required=True)
+        daily_quota = _parse_int(row.get("daily_quota"), "daily_quota", idx, required=True, minimum=0)
+        if daily_quota is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 daily_quota 不能为空")
+
+        display_name = _normalize_csv_field(row.get("display_name")) or None
+        is_online = _parse_bool(row.get("is_online"), "is_online", idx)
+        last_login_at = _parse_datetime(row.get("last_login_at"), "last_login_at", idx)
+        created_at = _parse_datetime(row.get("created_at"), "created_at", idx)
+        updated_at = _parse_datetime(row.get("updated_at"), "updated_at", idx)
+        password = _normalize_csv_field(row.get("password"))
+
+        user = existing_users.get(username)
+        if user is None:
+            if not password:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行新增用户缺少 password")
+            if len(password) < 6:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 password 长度不能少于 6 位")
+            user = User(
+                username=username,
+                hashed_password=hash_password(password),
+                display_name=display_name,
+                role=role,
+                is_active=is_active,
+                daily_quota=daily_quota,
+                last_login_at=last_login_at,
+                is_online=is_online if is_online is not None else False,
+            )
+            if created_at is not None:
+                user.created_at = created_at
+            if updated_at is not None:
+                user.updated_at = updated_at
+            db.add(user)
+            existing_users[username] = user
+            result.inserted_count += 1
+            continue
+
+        user.display_name = display_name
+        user.role = role
+        user.is_active = is_active
+        user.daily_quota = daily_quota
+        user.last_login_at = last_login_at
+        if is_online is not None:
+            user.is_online = is_online
+        user.updated_at = updated_at or utc_now()
+        result.updated_count += 1
+
+    return result
+
+
+def _import_watchlist_from_csv(upload: UploadFile, db: Session) -> CsvImportResult:
+    fieldnames, rows = _load_csv_upload(upload)
+    _validate_headers(fieldnames, _WATCHLIST_IMPORT_REQUIRED_HEADERS, _WATCHLIST_IMPORT_OPTIONAL_HEADERS, sheet_name="重点观察")
+
+    users_by_username = _build_user_row_lookup(db)
+    stocks_by_code = _build_stock_lookup(db)
+    existing_watchlist = {
+        (item.user_id, item.code): item
+        for item in db.query(Watchlist).all()
+    }
+    seen_keys: set[tuple[int, str]] = set()
+    result = CsvImportResult(total_rows=len(rows))
+
+    for idx, row in enumerate(rows, start=2):
+        username = _normalize_csv_field(row.get("username"))
+        if not username:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 username 不能为空")
+
+        user = users_by_username.get(username)
+        if user is None:
+            user_id_text = _normalize_csv_field(row.get("user_id"))
+            if user_id_text and user_id_text.isdigit():
+                user = db.query(User).filter(User.id == int(user_id_text)).first()
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行用户不存在: {username}")
+
+        code = _normalize_csv_field(row.get("code")).upper()
+        if not code or len(code) != 6 or not code.isdigit():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 code 不是有效的 6 位股票代码")
+        if code not in stocks_by_code:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行股票不存在: {code}")
+
+        key = (user.id, code)
+        if key in seen_keys:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行观察项重复: {username}/{code}")
+        seen_keys.add(key)
+
+        add_reason = _normalize_csv_field(row.get("add_reason")) or None
+        entry_price = _parse_float(row.get("entry_price"), "entry_price", idx, minimum=0)
+        entry_date = _parse_date(row.get("entry_date"), "entry_date", idx)
+        position_ratio = _parse_float(row.get("position_ratio"), "position_ratio", idx, minimum=0, maximum=1)
+        priority = _parse_int(row.get("priority"), "priority", idx, required=True, minimum=0)
+        if priority is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"第 {idx} 行字段 priority 不能为空")
+        is_active = _parse_bool(row.get("is_active"), "is_active", idx, required=True)
+        added_at = _parse_datetime(row.get("added_at"), "added_at", idx)
+
+        watchlist = existing_watchlist.get(key)
+        if watchlist is None:
+            watchlist = Watchlist(
+                user_id=user.id,
+                code=code,
+                add_reason=add_reason,
+                entry_price=entry_price,
+                entry_date=entry_date,
+                position_ratio=position_ratio,
+                priority=priority,
+                is_active=is_active if is_active is not None else True,
+            )
+            if added_at is not None:
+                watchlist.added_at = added_at
+            db.add(watchlist)
+            existing_watchlist[key] = watchlist
+            result.inserted_count += 1
+            continue
+
+        watchlist.add_reason = add_reason
+        watchlist.entry_price = entry_price
+        watchlist.entry_date = entry_date
+        watchlist.position_ratio = position_ratio
+        watchlist.priority = priority
+        watchlist.is_active = is_active if is_active is not None else watchlist.is_active
+        if added_at is not None:
+            watchlist.added_at = added_at
+        result.updated_count += 1
+
+    return result
 
 
 # --- 公开接口 ---
@@ -356,6 +757,94 @@ def admin_list_users(
         result.append(UserListItem(**user_dict))
 
     return result
+
+
+@router.get("/admin/users/export")
+def admin_export_users(_admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    """管理员：导出所有用户信息为 CSV"""
+    filename = f"users_export_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _build_csv_response(filename, _USER_EXPORT_HEADERS, _build_user_export_rows(db))
+
+
+@router.post("/admin/users/import", response_model=CsvImportResult)
+def admin_import_users(
+    upload_file: UploadFile = File(..., description="CSV 文件"),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """管理员：导入用户信息（CSV）"""
+    if upload_file.filename and not upload_file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请上传 CSV 文件")
+
+    try:
+        result = _import_users_from_csv(upload_file, db)
+        db.commit()
+        log_audit(
+            user_id=admin.id,
+            action="admin_import_users",
+            target_type="user",
+            target_id="bulk",
+            details=result.model_dump(),
+        )
+        logger.info(
+            "管理员导入用户 CSV: admin_id=%s, total=%s, inserted=%s, updated=%s",
+            admin.id,
+            result.total_rows,
+            result.inserted_count,
+            result.updated_count,
+        )
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("管理员导入用户 CSV 失败: admin_id=%s", admin.id)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"用户 CSV 导入失败: {exc}") from exc
+
+
+@router.get("/admin/watchlist/export")
+def admin_export_watchlist(_admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    """管理员：导出所有用户的重点观察信息为 CSV"""
+    filename = f"watchlist_export_{utc_now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _build_csv_response(filename, _WATCHLIST_EXPORT_HEADERS, _build_watchlist_export_rows(db))
+
+
+@router.post("/admin/watchlist/import", response_model=CsvImportResult)
+def admin_import_watchlist(
+    upload_file: UploadFile = File(..., description="CSV 文件"),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """管理员：导入所有用户的重点观察信息（CSV）"""
+    if upload_file.filename and not upload_file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请上传 CSV 文件")
+
+    try:
+        result = _import_watchlist_from_csv(upload_file, db)
+        db.commit()
+        log_audit(
+            user_id=admin.id,
+            action="admin_import_watchlist",
+            target_type="watchlist",
+            target_id="bulk",
+            details=result.model_dump(),
+        )
+        logger.info(
+            "管理员导入重点观察 CSV: admin_id=%s, total=%s, inserted=%s, updated=%s",
+            admin.id,
+            result.total_rows,
+            result.inserted_count,
+            result.updated_count,
+        )
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("管理员导入重点观察 CSV 失败: admin_id=%s", admin.id)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"重点观察 CSV 导入失败: {exc}") from exc
 
 
 @router.put("/admin/users/{user_id}")

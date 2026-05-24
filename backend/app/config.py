@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     sql_echo: bool = Field(default=False, alias="SQL_ECHO")
     host: str = Field(default="0.0.0.0", alias="BACKEND_HOST")
     port: int = Field(default=8000, alias="BACKEND_PORT")
+    workers: int = Field(default=1, ge=1, alias="BACKEND_WORKERS")
 
     # CORS 配置
     cors_origins: str = Field(
@@ -54,6 +55,10 @@ class Settings(BaseSettings):
         default="postgresql://stocktrade:stocktrade123@postgres:5432/stocktrade",
         alias="DATABASE_URL",
     )
+    db_pool_size: int = Field(default=10, ge=1, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=10, ge=0, alias="DB_MAX_OVERFLOW")
+    db_pool_timeout: int = Field(default=30, ge=1, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=3600, ge=-1, alias="DB_POOL_RECYCLE")
 
     @property
     def database_url(self) -> str:

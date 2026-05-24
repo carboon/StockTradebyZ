@@ -689,7 +689,9 @@ function startPoller() {
 onMounted(() => {
   // 只在已登录时启动轮询
   if (authStore.isAuthenticated) {
-    void configStore.loadConfigs().catch(() => undefined)
+    if (authStore.isAdmin) {
+      void configStore.loadConfigs().catch(() => undefined)
+    }
     void refreshHeaderProgress()
     startPoller()
   }
@@ -703,7 +705,9 @@ onUnmounted(() => {
 watch(() => authStore.isAuthenticated, (isLoggedIn) => {
   if (isLoggedIn && !progressPoller) {
     // 用户刚登录，启动轮询
-    void configStore.loadConfigs().catch(() => undefined)
+    if (authStore.isAdmin) {
+      void configStore.loadConfigs().catch(() => undefined)
+    }
     void refreshHeaderProgress()
     startPoller()
   } else if (!isLoggedIn && progressPoller) {

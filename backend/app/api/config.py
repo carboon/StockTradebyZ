@@ -12,7 +12,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_admin_user, require_user
+from app.api.deps import get_admin_user
 from app.database import get_db
 from app.models import Config
 from app.schemas import (
@@ -80,7 +80,7 @@ def _resolve_runtime_config_value(db: Session, key: str) -> str:
 
 
 @router.get("/", response_model=ConfigResponse)
-async def get_configs(db: Session = Depends(get_db), user=Depends(require_user)) -> ConfigResponse:
+async def get_configs(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> ConfigResponse:
     """获取所有配置"""
     # 同时从数据库和环境变量读取
     configs = {}
@@ -195,14 +195,14 @@ async def save_env(config: dict, db: Session = Depends(get_db), admin=Depends(ge
 
 
 @router.get("/reload")
-async def reload_config(user=Depends(require_user)) -> dict:
+async def reload_config(admin=Depends(get_admin_user)) -> dict:
     """重新加载配置"""
     get_settings.cache_clear()
     return {"status": "ok", "message": "配置已重新加载"}
 
 
 @router.get("/tushare-status")
-async def get_tushare_status(db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+async def get_tushare_status(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """获取 Tushare 配置状态"""
     token = _resolve_runtime_config_value(db, "tushare_token")
 

@@ -1112,6 +1112,14 @@ export interface UsageStatsResponse {
   total_calls: number
 }
 
+export interface CsvImportResult {
+  total_rows: number
+  inserted_count: number
+  updated_count: number
+  skipped_count: number
+  errors: string[]
+}
+
 export interface UserListItem {
   id: number
   username: string

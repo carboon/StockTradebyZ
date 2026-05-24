@@ -80,10 +80,12 @@ def _normalize_watchlist_code(raw_code: str) -> str:
     return code
 
 
-def _ensure_stock_exists(db: Session, code: str) -> Stock:
+def _ensure_stock_exists(db: Session, code: str, *, allow_remote_sync: bool = False) -> Stock:
     stock = db.query(Stock).filter(Stock.code == code).first()
     if stock is not None:
         return stock
+    if not allow_remote_sync:
+        raise HTTPException(status_code=400, detail=f"股票代码不存在或尚未完成本地数据初始化: {code}")
     try:
         stock = TushareService().sync_stock_to_db(db, code)
     except Exception as exc:
@@ -466,7 +468,7 @@ async def get_watchlist(
 async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistItem:
     """添加到当前用户的观察列表"""
     code = _normalize_watchlist_code(request.code)
-    stock = _ensure_stock_exists(db, code)
+    stock = _ensure_stock_exists(db, code, allow_remote_sync=getattr(user, "role", "") == "admin")
 
     # 检查当前用户的列表中是否已存在
     existing = db.query(Watchlist).filter(Watchlist.user_id == user.id, Watchlist.code == code).first()

@@ -3,7 +3,6 @@ Stock API
 ~~~~~~~~~
 股票数据相关 API
 """
-import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -63,31 +62,6 @@ def _query_stock_matches(db: Session, keyword: str, normalized_code: str, limit:
     )
 
 
-def _query_tushare_matches(keyword: str, normalized_code: str, limit: int) -> list[dict]:
-    lookup = TushareService().get_stock_list()
-    if lookup is None or lookup.empty:
-        return []
-
-    frame = lookup.copy()
-    frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
-    code_mask = frame["symbol"].str.startswith(normalized_code) if normalized_code else False
-    name_mask = frame["name"].astype(str).str.contains(keyword, na=False)
-    matched = frame[code_mask | name_mask].head(limit * 3)
-
-    results = []
-    for _, row in matched.iterrows():
-        code = str(row.get("symbol", "")).zfill(6)
-        if not code or code == "000000":
-            continue
-        results.append({
-            "code": code,
-            "name": row.get("name"),
-            "market": TushareService._to_exchange(row.get("ts_code", "")),
-            "industry": row.get("industry"),
-        })
-    return results
-
-
 def _normalize_numeric(value: object) -> float | None:
     if value is None or pd.isna(value):
         return None
@@ -112,7 +86,6 @@ async def search_stocks(
     items_by_code: dict[str, dict] = {}
 
     db_matches = _query_stock_matches(db, keyword, normalized_code, limit)
-    tushare_matches = await asyncio.to_thread(_query_tushare_matches, keyword, normalized_code, limit)
     for stock in db_matches:
         items_by_code[stock.code] = {
             "code": stock.code,
@@ -120,14 +93,6 @@ async def search_stocks(
             "market": stock.market,
             "industry": stock.industry,
         }
-
-    for item in tushare_matches:
-        existing = items_by_code.get(item["code"], {})
-        merged = dict(existing)
-        for key, value in item.items():
-            if value not in (None, ""):
-                merged[key] = value
-        items_by_code[item["code"]] = merged
 
     ranked_items = sorted(
         items_by_code.values(),
@@ -158,12 +123,13 @@ async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(
             exists=True,
         )
 
-    try:
-        stock = TushareService().sync_stock_to_db(db, code)
-    except Exception:
-        stock = None
+    if getattr(user, "role", "") == "admin":
+        try:
+            stock = TushareService().sync_stock_to_db(db, code)
+        except Exception:
+            stock = None
 
-    if stock:
+    if stock is not None:
         return StockResponse(
             code=stock.code,
             name=stock.name,

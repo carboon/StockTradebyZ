@@ -877,6 +877,8 @@ const diagnosisChartCache = new Map<string, KLineData>()
 const diagnosisChartCacheDays = new Map<string, number>()
 const requestControllers = new Map<string, AbortController>()
 let searchSequence = 0
+let activeKlineRequestKey = ''
+let activeFullKlineRequestKey = ''
 
 function beginRequest(key: string): AbortSignal {
   requestControllers.get(key)?.abort()
@@ -928,7 +930,9 @@ async function loadRouteStock(routeCode: string) {
 }
 
 onMounted(() => {
-  configStore.checkTushareStatus()
+  if (authStore.isAdmin) {
+    void configStore.checkTushareStatus()
+  }
   restoreDiagnosisState()
   applyMobileRouteChartPreference()
 
@@ -942,7 +946,9 @@ onMounted(() => {
 })
 
 onActivated(() => {
-  configStore.checkTushareStatus()
+  if (authStore.isAdmin) {
+    void configStore.checkTushareStatus()
+  }
   applyMobileRouteChartPreference()
   nextTick(() => {
     chartInstance?.resize()
@@ -983,7 +989,7 @@ function handleResize() {
 }
 
 async function searchStock(requestId: number, options: { autoRefreshHistory?: boolean } = {}) {
-  if (!configStore.tushareReady) {
+  if (authStore.isAdmin && !configStore.tushareReady) {
     ElMessage.warning('请先完成 Tushare 配置')
     return
   }
@@ -1142,13 +1148,12 @@ async function searchAndAnalyze() {
 async function runStockDiagnosis(autoAnalyze: boolean) {
   const requestId = ++searchSequence
 
-  // 如果状态还没加载过，先加载一次
-  if (!configStore.tushareStatus) {
+  // 管理员保留初始化状态提示；普通用户查询只走本地数据，不依赖 Tushare 状态接口。
+  if (authStore.isAdmin && !configStore.tushareStatus) {
     await configStore.checkTushareStatus()
   }
 
-  // 现在再检查初始化状态
-  if (!configStore.dataInitialized) {
+  if (authStore.isAdmin && !configStore.dataInitialized) {
     ElMessage.info('请先完成首次初始化')
     return
   }
@@ -1301,6 +1306,10 @@ watch(
 async function loadKlineData() {
   if (!stockCode.value) return
 
+  const requestKey = `${stockCode.value}:${chartDays.value}`
+  if (activeKlineRequestKey === requestKey) return
+  activeKlineRequestKey = requestKey
+
   const requestedDays = chartDays.value
   const signal = beginRequest('kline')
   try {
@@ -1341,6 +1350,9 @@ async function loadKlineData() {
     ElMessage.error(isInitializationPendingError(error) ? message : `加载K线数据失败: ${message}`)
   } finally {
     finishRequest('kline', signal)
+    if (activeKlineRequestKey === requestKey) {
+      activeKlineRequestKey = ''
+    }
   }
 }
 
@@ -1372,6 +1384,10 @@ function queueDiagnosisFullChartRefresh(code: string, requestedDays: number, cur
 }
 
 async function refreshDiagnosisFullChartInBackground(code: string, requestedDays: number) {
+  const requestKey = `${code}:${requestedDays}`
+  if (activeFullKlineRequestKey === requestKey) return
+  activeFullKlineRequestKey = requestKey
+
   const signal = beginRequest('klineExtended')
   try {
     const fullData = await apiStock.getKline(code, requestedDays, false, { signal, timeoutMs: 20000 })
@@ -1385,6 +1401,9 @@ async function refreshDiagnosisFullChartInBackground(code: string, requestedDays
     console.error('Failed to extend diagnosis kline:', error)
   } finally {
     finishRequest('klineExtended', signal)
+    if (activeFullKlineRequestKey === requestKey) {
+      activeFullKlineRequestKey = ''
+    }
   }
 }
 
@@ -1424,7 +1443,7 @@ async function handleHistoryPageChange(page: number) {
 let analysisPollingTimer: ReturnType<typeof setInterval> | null = null
 
 async function analyzeStock() {
-  if (!configStore.dataInitialized) {
+  if (authStore.isAdmin && !configStore.dataInitialized) {
     ElMessage.info('请先完成首次初始化')
     return
   }

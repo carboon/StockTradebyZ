@@ -11,13 +11,18 @@ import sys
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, IO
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session as DBSession
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - Linux/macOS production path uses fcntl.
+    fcntl = None
 
 # 项目根目录
 ROOT = Path(__file__).parent.parent.parent
@@ -144,12 +149,42 @@ if not _TEST_MODE:
     ensure_admin_user()
 
 
+def try_acquire_runtime_lock(name: str) -> IO[str] | None:
+    """Acquire a non-blocking process lock for singleton background services."""
+    lock_dir = ROOT / "data" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = (lock_dir / f"{name}.lock").open("w", encoding="utf-8")
+    if fcntl is None:
+        logger.warning("当前平台不支持 fcntl 文件锁，%s 将不具备跨进程单例保护", name)
+        return lock_file
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    lock_file.write(str(os.getpid()))
+    lock_file.truncate()
+    lock_file.flush()
+    return lock_file
+
+
+def release_runtime_lock(lock_file: IO[str] | None) -> None:
+    if lock_file is None:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage FastAPI startup/shutdown lifecycle without deprecated hooks."""
     logger.info("StockTrader API v%s 启动成功", app.version)
     logger.info("API 文档: http://%s:%s/docs", settings.host, settings.port)
     auto_update_scheduler: AutoDailyUpdateScheduler | None = None
+    auto_update_lock: IO[str] | None = None
     online_status_service = get_online_status_service()
 
     async def warm_stock_metadata_cache() -> None:
@@ -183,8 +218,12 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(warm_stock_metadata_cache())
         asyncio.create_task(warm_diagnosis_history_cache())
     if not _TEST_MODE and not DISABLE_AUTO_UPDATE_SCHEDULER:
-        auto_update_scheduler = AutoDailyUpdateScheduler(manager=manager)
-        auto_update_scheduler.start()
+        auto_update_lock = try_acquire_runtime_lock("auto_update_scheduler")
+        if auto_update_lock is not None:
+            auto_update_scheduler = AutoDailyUpdateScheduler(manager=manager)
+            auto_update_scheduler.start()
+        else:
+            logger.info("自动更新调度器已在其他 worker 中运行，本 worker 跳过启动")
     elif not _TEST_MODE and DISABLE_AUTO_UPDATE_SCHEDULER:
         logger.info("自动更新调度器已禁用（DISABLE_AUTO_UPDATE_SCHEDULER）")
 
@@ -193,12 +232,15 @@ async def lifespan(app: FastAPI):
         online_status_service.start()
         logger.info("在线状态管理服务已启动")
 
-    yield
-    if auto_update_scheduler is not None:
-        await auto_update_scheduler.stop()
-    if not _TEST_MODE:
-        await online_status_service.stop()
-    logger.info("StockTrader API 已关闭")
+    try:
+        yield
+    finally:
+        if auto_update_scheduler is not None:
+            await auto_update_scheduler.stop()
+        release_runtime_lock(auto_update_lock)
+        if not _TEST_MODE:
+            await online_status_service.stop()
+        logger.info("StockTrader API 已关闭")
 
 # 创建 FastAPI 应用
 app = FastAPI(

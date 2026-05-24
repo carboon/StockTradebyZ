@@ -1303,6 +1303,7 @@ import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import { buildSignalReturnChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
+import { mapWithConcurrency } from '@/utils/limitedConcurrency'
 import { useResponsive } from '@/composables/useResponsive'
 
 type DataTabKey = 'tomorrow-star' | 'current-hot'
@@ -1374,6 +1375,7 @@ const TOMORROW_STAR_LEGACY_CACHE_KEYS = [
   'stocktrade:tomorrow-star:cache:v10',
 ]
 const INCREMENTAL_POLL_INTERVAL_MS = 2000
+const HISTORY_FALLBACK_CONCURRENCY = 2
 let incrementalPollTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
 
@@ -2268,6 +2270,101 @@ function normalizeHistoryRows(
   return [...normalizedMap.values()].sort((a, b) => b.rawDate.localeCompare(a.rawDate))
 }
 
+function prioritizeHistoryDates(dates: string[], latest: string, pageSize: number): string[] {
+  const normalizedDates = dates.map(formatDateString).filter(Boolean)
+  const firstScreen = new Set(normalizedDates.slice(0, pageSize))
+  if (latest) firstScreen.add(latest)
+
+  return [
+    ...normalizedDates.filter((date) => firstScreen.has(date)),
+    ...normalizedDates.filter((date) => !firstScreen.has(date)),
+  ]
+}
+
+function createMissingHistoryRow(date: string, latest: string): HistoryRow {
+  const rawDate = formatDateString(date)
+  return {
+    date: rawDate,
+    rawDate,
+    count: '-',
+    pass: '-',
+    b1PassCount: '-',
+    consecutiveCandidateCount: '-',
+    tomorrowStarCount: '-',
+    status: 'missing',
+    analysisCount: '-',
+    errorMessage: null,
+    isLatest: rawDate === latest,
+  }
+}
+
+async function loadTomorrowStarFallbackHistory(dates: string[], signal: AbortSignal): Promise<HistoryRow[]> {
+  const prioritizedDates = prioritizeHistoryDates(dates, latestDate.value, historyPageSize.value)
+  const rows = await mapWithConcurrency(prioritizedDates, HISTORY_FALLBACK_CONCURRENCY, async (date) => {
+    try {
+      const [candidatesData, resultsData] = await Promise.all([
+        apiAnalysis.getCandidates(date, { signal }),
+        apiAnalysis.getResults(date, { signal }),
+      ])
+      const candidates = candidatesData.candidates || []
+      const results = resultsData.results || []
+      const passCount = results.filter((r) => r.signal_type === 'trend_start').length
+      const rawDate = formatDateString(date)
+
+      return {
+        date: rawDate,
+        rawDate,
+        count: candidates.length,
+        pass: passCount,
+        b1PassCount: '-',
+        consecutiveCandidateCount: '-',
+        tomorrowStarCount: '-',
+        status: 'success',
+        analysisCount: results.length,
+        errorMessage: null,
+        isLatest: rawDate === latestDate.value,
+      } satisfies HistoryRow
+    } catch {
+      return createMissingHistoryRow(date, latestDate.value)
+    }
+  })
+  return rows.sort((a, b) => b.rawDate.localeCompare(a.rawDate))
+}
+
+async function loadCurrentHotFallbackHistory(dates: string[], signal: AbortSignal): Promise<HistoryRow[]> {
+  const prioritizedDates = prioritizeHistoryDates(dates, currentHotLatestDate.value, historyPageSize.value)
+  const rows = await mapWithConcurrency(prioritizedDates, HISTORY_FALLBACK_CONCURRENCY, async (date) => {
+    try {
+      const [candidatesData, resultsData] = await Promise.all([
+        apiAnalysis.getCurrentHotCandidates(date, { signal }),
+        apiAnalysis.getCurrentHotResults(date, { signal }),
+      ])
+      const candidates = candidatesData.candidates || []
+      const results = resultsData.results || []
+      const passCount = results.filter((r) => r.signal_type === 'trend_start').length
+      const b1PassCount = candidates.filter((candidate) => candidate.b1_passed === true).length
+      const rawDate = formatDateString(date)
+
+      return {
+        date: rawDate,
+        rawDate,
+        count: candidates.length,
+        pass: passCount,
+        b1PassCount,
+        consecutiveCandidateCount: '-',
+        tomorrowStarCount: '-',
+        status: 'success',
+        analysisCount: results.length,
+        errorMessage: null,
+        isLatest: rawDate === currentHotLatestDate.value,
+      } satisfies HistoryRow
+    } catch {
+      return createMissingHistoryRow(date, currentHotLatestDate.value)
+    }
+  })
+  return rows.sort((a, b) => b.rawDate.localeCompare(a.rawDate))
+}
+
 async function loadData(skipLatestLoad: boolean = false) {
   if (loading.value) return
 
@@ -2293,47 +2390,7 @@ async function loadData(skipLatestLoad: boolean = false) {
     if (history.length > 0 || windowStatus) {
       historyData.value = normalizeHistoryRows(dates, history, windowStatus)
     } else {
-      const historyPromises = dates.map(async (date: string) => {
-        try {
-          const [candidatesData, resultsData] = await Promise.all([
-            apiAnalysis.getCandidates(date, { signal }),
-            apiAnalysis.getResults(date, { signal })
-          ])
-          const candidates = candidatesData.candidates || []
-          const results = resultsData.results || []
-          const passCount = results.filter((r) => r.signal_type === 'trend_start').length
-
-          return {
-            date: formatDateString(date),
-            rawDate: formatDateString(date),
-            count: candidates.length,
-            pass: passCount,
-            b1PassCount: '-',
-            consecutiveCandidateCount: '-',
-            tomorrowStarCount: '-',
-            status: 'success',
-            analysisCount: results.length,
-            errorMessage: null,
-            isLatest: formatDateString(date) === latestDate.value,
-          } satisfies HistoryRow
-        } catch {
-          return {
-            date: formatDateString(date),
-            rawDate: formatDateString(date),
-            count: '-',
-            pass: '-',
-            b1PassCount: '-',
-            consecutiveCandidateCount: '-',
-            tomorrowStarCount: '-',
-            status: 'missing',
-            analysisCount: '-',
-            errorMessage: null,
-            isLatest: formatDateString(date) === latestDate.value,
-          } satisfies HistoryRow
-        }
-      })
-
-      historyData.value = await Promise.all(historyPromises)
+      historyData.value = await loadTomorrowStarFallbackHistory(dates, signal)
       if (requestId !== loadDataRequestId) return
     }
 
@@ -2470,48 +2527,7 @@ async function loadCurrentHotData(skipLatestLoad: boolean = false) {
     if (history.length > 0 || windowStatus) {
       currentHotHistoryData.value = normalizeHistoryRows(dates, history, windowStatus)
     } else {
-      const historyPromises = dates.map(async (date: string) => {
-        try {
-          const [candidatesData, resultsData] = await Promise.all([
-            apiAnalysis.getCurrentHotCandidates(date, { signal }),
-            apiAnalysis.getCurrentHotResults(date, { signal }),
-          ])
-          const candidates = candidatesData.candidates || []
-          const results = resultsData.results || []
-          const passCount = results.filter((r) => r.signal_type === 'trend_start').length
-          const b1PassCount = candidates.filter((candidate) => candidate.b1_passed === true).length
-
-          return {
-            date: formatDateString(date),
-            rawDate: formatDateString(date),
-            count: candidates.length,
-            pass: passCount,
-            b1PassCount,
-            consecutiveCandidateCount: '-',
-            tomorrowStarCount: '-',
-            status: 'success',
-            analysisCount: results.length,
-            errorMessage: null,
-            isLatest: formatDateString(date) === currentHotLatestDate.value,
-          } satisfies HistoryRow
-        } catch {
-          return {
-            date: formatDateString(date),
-            rawDate: formatDateString(date),
-            count: '-',
-            pass: '-',
-            b1PassCount: '-',
-            consecutiveCandidateCount: '-',
-            tomorrowStarCount: '-',
-            status: 'missing',
-            analysisCount: '-',
-            errorMessage: null,
-            isLatest: formatDateString(date) === currentHotLatestDate.value,
-          } satisfies HistoryRow
-        }
-      })
-
-      currentHotHistoryData.value = await Promise.all(historyPromises)
+      currentHotHistoryData.value = await loadCurrentHotFallbackHistory(dates, signal)
       if (requestId !== currentHotLoadDataRequestId) return
     }
 
@@ -3022,7 +3038,7 @@ function stopIncrementalPolling() {
 }
 
 async function ensureFreshDataAndLoad(forceReload: boolean = false) {
-  if (!configStore.tushareReady) return
+  if (authStore.isAdmin && !configStore.tushareReady) return
   if (checkingFreshness.value || incrementalUpdate.value.running || loading.value) return
 
   const hasLoadedData = historyData.value.length > 0
@@ -3842,6 +3858,10 @@ async function checkForRefresh(forceLoad: boolean = false) {
 }
 
 async function refreshStatusAndRetry() {
+  if (!authStore.isAdmin) {
+    await ensureFreshDataAndLoad(true)
+    return
+  }
   await configStore.checkTushareStatus()
   if (configStore.dataInitialized) {
     await ensureFreshDataAndLoad(true)
@@ -3988,6 +4008,15 @@ function hydrateTomorrowStarCache() {
 }
 
 async function refreshAfterStatusReady(forceReload: boolean = false) {
+  if (!authStore.isAdmin) {
+    if (hydratedFromCache.value && !forceReload) {
+      await checkForRefresh(true)
+      return
+    }
+    await ensureFreshDataAndLoad(forceReload)
+    return
+  }
+
   try {
     await configStore.checkTushareStatus()
   } catch {
@@ -4006,7 +4035,9 @@ onMounted(() => {
 
   if (historyData.value.length === 0) {
     void loadData()
-    void configStore.checkTushareStatus().catch(() => undefined)
+    if (authStore.isAdmin) {
+      void configStore.checkTushareStatus().catch(() => undefined)
+    }
   } else {
     void refreshAfterStatusReady(false)
   }

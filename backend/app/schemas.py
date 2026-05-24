@@ -1093,6 +1093,15 @@ class HeartbeatResponse(BaseModel):
     message: str = "OK"
 
 
+class CsvImportResult(BaseModel):
+    """CSV 导入结果"""
+    total_rows: int
+    inserted_count: int = 0
+    updated_count: int = 0
+    skipped_count: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
 class UserListItem(BaseModel):
     """用户列表项（管理员用）"""
     id: int

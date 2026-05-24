@@ -9,7 +9,7 @@
       description="板块目录使用 sector_analysis_catalog，股票池使用 sector_analysis_pool。板块详情页按板块独立历史日期查看对应个股，不再固定展示最新当前热盘快照。"
     />
 
-    <div v-if="!configStore.dataInitialized" class="page-empty">
+    <div v-if="authStore.isAdmin && !configStore.dataInitialized" class="page-empty">
       <el-empty description="首次初始化尚未完成，板块分析暂不可用" :image-size="120">
         <el-button type="primary" @click="router.push('/update')">
           前往任务中心初始化
@@ -567,6 +567,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { apiAnalysis, isRequestCanceled } from '@/api'
 import { useConfigStore } from '@/store/config'
+import { useAuthStore } from '@/store/auth'
 import { useResponsive } from '@/composables/useResponsive'
 import type {
   CurrentHotSectorAnalysisResponse,
@@ -630,6 +631,7 @@ const candidatePageSize = 18
 const router = useRouter()
 const route = useRoute()
 const configStore = useConfigStore()
+const authStore = useAuthStore()
 const { isMobile } = useResponsive()
 
 const sectorLoading = ref(false)
@@ -1394,12 +1396,14 @@ watch(() => configStore.dataInitialized, async (ready, previous) => {
 onMounted(async () => {
   bindWindowResize()
 
-  await Promise.allSettled([
-    configStore.loadConfigs(),
-    configStore.checkTushareStatus(),
-  ])
+  if (authStore.isAdmin) {
+    await Promise.allSettled([
+      configStore.loadConfigs(),
+      configStore.checkTushareStatus(),
+    ])
+  }
 
-  if (configStore.dataInitialized) {
+  if (!authStore.isAdmin || configStore.dataInitialized) {
     await loadSectorAnalytics()
     await nextTick()
     await renderOverviewChart()
@@ -1408,7 +1412,7 @@ onMounted(async () => {
 
 onActivated(async () => {
   bindWindowResize()
-  if (configStore.dataInitialized) {
+  if (!authStore.isAdmin || configStore.dataInitialized) {
     await nextTick()
     await renderOverviewChart()
   }

@@ -815,7 +815,7 @@ def _build_environment_sections(
 @router.get("/status", response_model=DataStatusResponse)
 async def get_data_status(
     _rate_limit: None = Depends(status_api_rate_limit),
-    user=Depends(require_user)
+    admin=Depends(get_admin_user)
 ) -> DataStatusResponse:
     """获取数据更新状态（缓存 30 秒）"""
     # 尝试从缓存获取
@@ -845,7 +845,7 @@ async def get_data_status(
 
 
 @router.get("/data-freshness")
-async def get_data_freshness(user=Depends(require_user)) -> dict:
+async def get_data_freshness(admin=Depends(get_admin_user)) -> dict:
     """实时查询 Tushare 日线数据最新时效"""
     service = TushareService()
     return await asyncio.to_thread(service.get_data_freshness)
@@ -1142,7 +1142,7 @@ async def get_incremental_status(
 
 
 @router.get("/overview", response_model=TaskOverviewResponse)
-async def get_task_overview(db: Session = Depends(get_db), user=Depends(require_user)) -> TaskOverviewResponse:
+async def get_task_overview(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> TaskOverviewResponse:
     import time
 
     now = time.time()
@@ -1309,7 +1309,7 @@ async def get_running_tasks(
 async def get_task_environment(
     _rate_limit: None = Depends(status_api_rate_limit),
     db: Session = Depends(get_db),
-    user=Depends(require_user)
+    admin=Depends(get_admin_user)
 ) -> TaskEnvironmentResponse:
     tushare_service = TushareService()
     data_status = await _check_tushare_data_status(tushare_service)
@@ -1320,7 +1320,7 @@ async def get_task_environment(
 async def get_task_diagnostics(
     _rate_limit: None = Depends(status_api_rate_limit),
     db: Session = Depends(get_db),
-    user=Depends(require_user)
+    admin=Depends(get_admin_user)
 ) -> TaskDiagnosticsResponse:
     _cleanup_stale_active_tasks(db)
 

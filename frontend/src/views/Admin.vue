@@ -20,6 +20,37 @@
         </div>
       </template>
 
+      <div class="admin-data-actions" :class="{ 'admin-data-actions--mobile': isMobile }">
+        <div class="data-action-group">
+          <div class="data-action-group__title">用户信息</div>
+          <div class="data-action-group__buttons">
+            <el-button type="primary" plain @click="handleExportUsers">导出用户CSV</el-button>
+            <el-button :loading="userImporting" @click="triggerUserImport">导入用户CSV</el-button>
+          </div>
+        </div>
+        <div class="data-action-group">
+          <div class="data-action-group__title">重点观察信息</div>
+          <div class="data-action-group__buttons">
+            <el-button type="success" plain @click="handleExportWatchlist">导出观察CSV</el-button>
+            <el-button :loading="watchlistImporting" @click="triggerWatchlistImport">导入观察CSV</el-button>
+          </div>
+        </div>
+        <input
+          ref="userImportInput"
+          class="hidden-file-input"
+          type="file"
+          accept=".csv,text/csv"
+          @change="handleUserImportChange"
+        />
+        <input
+          ref="watchlistImportInput"
+          class="hidden-file-input"
+          type="file"
+          accept=".csv,text/csv"
+          @change="handleWatchlistImportChange"
+        />
+      </div>
+
       <template v-if="isMobile">
         <div v-if="filteredUsers.length" class="user-card-list">
           <el-card
@@ -240,6 +271,10 @@ import type { UserListItem, UsageStatsResponse } from '@/types'
 const users = ref<UserListItem[]>([])
 const searchQuery = ref('')
 const onlineFilter = ref<boolean | null>(null)
+const userImportInput = ref<HTMLInputElement | null>(null)
+const watchlistImportInput = ref<HTMLInputElement | null>(null)
+const userImporting = ref(false)
+const watchlistImporting = ref(false)
 const { isMobile } = useResponsive()
 
 const filteredUsers = computed(() => {
@@ -266,6 +301,89 @@ async function loadUsers() {
   try {
     users.value = await apiAuth.adminGetUsers()
   } catch { /* ignore */ }
+}
+
+function buildDownloadName(prefix: string): string {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return `${prefix}_${stamp}.csv`
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => window.URL.revokeObjectURL(url), 0)
+}
+
+function triggerUserImport() {
+  userImportInput.value?.click()
+}
+
+function triggerWatchlistImport() {
+  watchlistImportInput.value?.click()
+}
+
+async function handleExportUsers() {
+  try {
+    const blob = await apiAuth.adminExportUsers()
+    downloadBlob(blob, buildDownloadName('users_export'))
+    ElMessage.success('用户 CSV 已开始下载')
+  } catch (err: unknown) {
+    ElMessage.error(err instanceof Error ? err.message : '导出失败')
+  }
+}
+
+async function handleExportWatchlist() {
+  try {
+    const blob = await apiAuth.adminExportWatchlist()
+    downloadBlob(blob, buildDownloadName('watchlist_export'))
+    ElMessage.success('重点观察 CSV 已开始下载')
+  } catch (err: unknown) {
+    ElMessage.error(err instanceof Error ? err.message : '导出失败')
+  }
+}
+
+async function handleUserImportChange(event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const file = input?.files?.[0]
+  if (!file) return
+  userImporting.value = true
+  try {
+    const result = await apiAuth.adminImportUsers(file)
+    ElMessage.success(`用户导入完成：新增 ${result.inserted_count} 条，更新 ${result.updated_count} 条`)
+    await loadUsers()
+  } catch (err: unknown) {
+    ElMessage.error(err instanceof Error ? err.message : '用户导入失败')
+  } finally {
+    userImporting.value = false
+    if (input) {
+      input.value = ''
+    }
+  }
+}
+
+async function handleWatchlistImportChange(event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const file = input?.files?.[0]
+  if (!file) return
+  watchlistImporting.value = true
+  try {
+    const result = await apiAuth.adminImportWatchlist(file)
+    ElMessage.success(`重点观察导入完成：新增 ${result.inserted_count} 条，更新 ${result.updated_count} 条`)
+  } catch (err: unknown) {
+    ElMessage.error(err instanceof Error ? err.message : '重点观察导入失败')
+  } finally {
+    watchlistImporting.value = false
+    if (input) {
+      input.value = ''
+    }
+  }
 }
 
 // --- 编辑 ---
@@ -357,6 +475,39 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.admin-data-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.data-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(248, 250, 252, 0.95));
+}
+
+.data-action-group__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.data-action-group__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.hidden-file-input {
+  display: none;
 }
 
 .online-filter {
@@ -488,6 +639,14 @@ onMounted(() => {
 
   .header-controls {
     flex-direction: column;
+    width: 100%;
+  }
+
+  .admin-data-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .data-action-group__buttons :deep(.el-button) {
     width: 100%;
   }
 

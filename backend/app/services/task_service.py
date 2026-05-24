@@ -1120,6 +1120,8 @@ class TaskService:
             analysis_service.analyze_stock,
             code,
             params.get("reviewer", "quant"),
+            True,
+            bool(params.get("allow_remote_fetch", True)),
         )
         task.result_json = self._make_json_safe(result)
         task.task_stage = "analysis"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from sqlalchemy import func
@@ -38,6 +39,7 @@ def prewarm_latest_analysis_views(trade_date: str | None = None) -> dict[str, An
         "success": True,
         "trade_date": trade_date,
         "steps": {},
+        "timings": {},
         "failed": [],
     }
 
@@ -53,6 +55,7 @@ def prewarm_latest_analysis_views(trade_date: str | None = None) -> dict[str, An
         )
 
         def run_step(name: str, callback):
+            started_at = time.perf_counter()
             try:
                 value = callback()
                 result["steps"][name] = value
@@ -60,6 +63,8 @@ def prewarm_latest_analysis_views(trade_date: str | None = None) -> dict[str, An
                 logger.warning("视图预热失败: step=%s error=%s", name, exc)
                 result["success"] = False
                 result["failed"].append({"step": name, "error": str(exc)})
+            finally:
+                result["timings"][name] = round(max(0.0, time.perf_counter() - started_at), 3)
 
         run_step(
             "tomorrow_star_window",
@@ -116,4 +121,11 @@ def prewarm_latest_analysis_views(trade_date: str | None = None) -> dict[str, An
                     lambda: sector_service.get_sector_date_rows(sector_key=sector_key, pick_date=sector_date_text),
                 )
 
+    logger.info(
+        "视图预热完成 trade_date=%s success=%s failed=%s timings=%s",
+        trade_date,
+        result["success"],
+        len(result["failed"]),
+        result["timings"],
+    )
     return result

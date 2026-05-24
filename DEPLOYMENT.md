@@ -50,6 +50,11 @@ cp .env.example deploy/.env
 
 - `DATABASE_URL`
 - `BACKEND_CORS_ORIGINS`
+- `BACKEND_WORKERS`
+- `DB_POOL_SIZE`
+- `DB_MAX_OVERFLOW`
+- `DB_POOL_TIMEOUT`
+- `DB_POOL_RECYCLE`
 - `REDIS_PASSWORD`
 - `NGINX_PORT`
 - `NGINX_BASE_IMAGE`
@@ -140,6 +145,45 @@ NGINX_PORT=127.0.0.1:8080
 ```bash
 ./deploy/scripts/start.sh prod --build
 ```
+
+## 后端并发与数据库连接池
+
+后端镜像使用 `uvicorn backend.app.main:app` 启动，不额外引入 Gunicorn。可通过 `deploy/.env` 调整：
+
+```bash
+BACKEND_WORKERS=1
+DB_POOL_SIZE=10
+DB_MAX_OVERFLOW=10
+DB_POOL_TIMEOUT=30
+DB_POOL_RECYCLE=3600
+```
+
+连接上限估算：
+
+```text
+最大后端连接数 ~= BACKEND_WORKERS * (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+```
+
+默认值偏保守，兼容单 worker 部署。Mac mini M4 推荐从 `BACKEND_WORKERS=2` 开始；如果 CPU 仍有余量且 PostgreSQL 连接数稳定，再试 `3`。例如：
+
+```bash
+BACKEND_WORKERS=2
+DB_POOL_SIZE=8
+DB_MAX_OVERFLOW=8
+```
+
+应用内每日自动更新调度器会通过 `data/locks/auto_update_scheduler.lock` 做进程间单例保护；即使 `BACKEND_WORKERS>1`，也只会有一个 worker 启动调度器。
+
+压测建议：
+
+```bash
+./deploy/scripts/start.sh prod --build
+curl http://127.0.0.1:8000/health
+.venv/bin/python scripts/perf/http_api_load_test.py --scenario page-switch --concurrency 8 --duration 60
+docker exec -it stocktrade-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select count(*) from pg_stat_activity;"
+```
+
+每次只调整一个变量，观察后端日志、响应延迟和 PostgreSQL 活跃连接数；如果出现连接等待或超时，优先降低 `BACKEND_WORKERS`、`DB_POOL_SIZE` 或 `DB_MAX_OVERFLOW`。
 
 如果宿主机访问 Docker Hub 较慢，导致 `nginx:1.27-alpine` 拉取超时，可在 `deploy/.env` 中覆盖基础镜像：
 
