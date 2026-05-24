@@ -47,6 +47,16 @@ def build_freshness_cache_key() -> str:
     return "freshness:global"
 
 
+def build_tomorrow_star_dates_cache_key(window_size: int) -> str:
+    """构建明日之星日期列表缓存键"""
+    return f"tomorrow_star_dates:{window_size}"
+
+
+def build_current_hot_dates_cache_key(window_size: int) -> str:
+    """构建当前热点日期列表缓存键"""
+    return f"current_hot_dates:{window_size}"
+
+
 def cached_kline(ttl: int = 300):
     """K线数据缓存装饰器
 
@@ -150,6 +160,46 @@ def cached_stock_search(ttl: int = 600):
     return decorator
 
 
+def cached_tomorrow_star_dates(ttl: int = 180):
+    """明日之星日期列表缓存装饰器
+
+    Args:
+        ttl: 缓存时间（秒），默认 3 分钟
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> T:
+            cache_key = build_tomorrow_star_dates_cache_key(120)  # DEFAULT_WINDOW_SIZE
+            result = cache.get(cache_key)
+            if result is not None:
+                return result
+            result = await func(*args, **kwargs)
+            cache.set(cache_key, result, ttl)
+            return result
+        return wrapper
+    return decorator
+
+
+def cached_current_hot_dates(ttl: int = 180):
+    """当前热点日期列表缓存装饰器
+
+    Args:
+        ttl: 缓存时间（秒），默认 3 分钟
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> T:
+            cache_key = build_current_hot_dates_cache_key(120)  # DEFAULT_WINDOW_SIZE
+            result = cache.get(cache_key)
+            if result is not None:
+                return result
+            result = await func(*args, **kwargs)
+            cache.set(cache_key, result, ttl)
+            return result
+        return wrapper
+    return decorator
+
+
 def invalidate_stock_cache(code: str) -> None:
     """清除某只股票的相关缓存"""
     # 清除该股票所有 K线缓存，避免新增区间或返回模式后漏删
@@ -186,6 +236,10 @@ __all__ = [
     "cached_analysis_results",
     "cached_watchlist",
     "cached_stock_search",
+    "cached_tomorrow_star_dates",
+    "cached_current_hot_dates",
+    "build_tomorrow_star_dates_cache_key",
+    "build_current_hot_dates_cache_key",
     "invalidate_stock_cache",
     "invalidate_watchlist_cache",
     "invalidate_candidates_cache",

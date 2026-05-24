@@ -15,13 +15,17 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 import pandas as pd
 
 from app.api.cache_decorators import (
     build_candidates_cache_key,
     build_freshness_cache_key,
+    cached_tomorrow_star_dates,
+    cached_current_hot_dates,
+    build_tomorrow_star_dates_cache_key,
+    build_current_hot_dates_cache_key,
 )
 from app.api.deps import get_admin_user, require_user
 from app.api.rate_limit import single_analysis_rate_limit, history_generation_rate_limit
@@ -406,6 +410,7 @@ def ensure_analysis_read_available(db: Session) -> None:
 
 
 @router.get("/tomorrow-star/dates", response_model=TomorrowStarDatesResponse)
+@cached_tomorrow_star_dates(ttl=180)
 async def get_tomorrow_star_dates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
@@ -507,19 +512,19 @@ async def get_tomorrow_star_freshness(
     if cached_result is not None:
         return cached_result
 
-    latest_trade_date = (
-        await asyncio.to_thread(market_service.get_latest_trade_date)
-        if market_service.token
-        else None
-    )
-    latest_trade_data_ready = (
-        await asyncio.to_thread(TushareService().is_trade_date_data_ready, latest_trade_date)
-        if latest_trade_date and market_service.token
-        else None
-    )
-    local_latest_date = await asyncio.to_thread(market_service.get_local_latest_date)
+    latest_stock_daily_date = db.query(func.max(StockDaily.trade_date)).scalar()
+    local_latest_date = latest_stock_daily_date.isoformat() if latest_stock_daily_date else None
+    if local_latest_date is None:
+        local_latest_date = await asyncio.to_thread(market_service.get_local_latest_date)
     latest_candidate_date = await asyncio.to_thread(analysis_service.get_latest_candidate_date)
     latest_result_date = await asyncio.to_thread(analysis_service.get_latest_result_date)
+    latest_trade_date = (
+        market_service.get_cached_trade_date()
+        or local_latest_date
+        or latest_candidate_date
+        or latest_result_date
+    )
+    latest_trade_data_ready = None
     latest_candidate_count = 0
     latest_result_count = 0
 
@@ -581,6 +586,7 @@ async def get_tomorrow_star_freshness(
     result = {
         "latest_trade_date": latest_trade_date,
         "latest_trade_data_ready": latest_trade_data_ready,
+        "latest_trade_date_source": "local_cache",
         "local_latest_date": local_latest_date,
         "latest_candidate_date": latest_candidate_date,
         "latest_candidate_count": latest_candidate_count,
@@ -907,6 +913,7 @@ async def get_analysis_results(
 
 
 @router.get("/current-hot/dates", response_model=CurrentHotDatesResponse)
+@cached_current_hot_dates(ttl=180)
 async def get_current_hot_dates(
     db: Session = Depends(get_db),
     user=Depends(require_user),
@@ -1456,7 +1463,6 @@ async def analyze_stock(
     """
     from app.main import manager
 
-    await ensure_tushare_ready_if_configured_async()
     code = request.code.zfill(6)
 
     # 创建后台分析任务
@@ -1466,7 +1472,12 @@ async def analyze_stock(
         _raise_initialization_in_progress(active_full_task)
     result = await task_service.create_task(
         "single_analysis",
-        {"code": code, "reviewer": "quant", "trigger_source": "manual"}
+        {
+            "code": code,
+            "reviewer": "quant",
+            "trigger_source": "manual",
+            "allow_remote_fetch": getattr(user, "role", "") == "admin",
+        },
     )
 
     return {
@@ -1508,7 +1519,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
 
     # 获取股票信息，优先使用本地库，避免结果轮询时阻塞等待 Tushare。
     stock = db.query(Stock).filter(Stock.code == code).first()
-    if stock is None:
+    if stock is None and getattr(user, "role", "") == "admin":
         try:
             stock = TushareService().sync_stock_to_db(db, code)
         except Exception:
@@ -1606,7 +1617,7 @@ async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Dep
 async def generate_tomorrow_star(
     reviewer: str = Query(default="quant", description="评审者类型"),
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> dict:
     """手动生成明日之星"""
     await ensure_tushare_ready_async()
@@ -1732,8 +1743,13 @@ def _get_signal_return_benchmark_store() -> TushareMetadataStore | None:
 def _build_signal_return_benchmark_series(
     start_date: date,
     end_date: date,
+    *,
+    allow_remote_fetch: bool = True,
 ) -> tuple[Optional[SignalReturnBenchmark], dict[date, tuple[Optional[float], Optional[float]]]]:
     """获取大盘基准曲线与按日期索引的收益率。"""
+    if not allow_remote_fetch:
+        return None, {}
+
     store = _get_signal_return_benchmark_store()
     if store is None:
         return None, {}
@@ -2125,7 +2141,11 @@ async def get_signal_returns(
             "price_records": price_records,
         })
 
-    benchmark_meta, benchmark_points = _build_signal_return_benchmark_series(buy_date, benchmark_end_date)
+    benchmark_meta, benchmark_points = _build_signal_return_benchmark_series(
+        buy_date,
+        benchmark_end_date,
+        allow_remote_fetch=getattr(user, "role", "") == "admin",
+    )
 
     stock_returns = []
     for context in stock_contexts:
@@ -2233,7 +2253,7 @@ async def get_signal_returns(
 @router.get("/concepts/list", response_model=ConceptsResponse)
 async def get_concepts_list(
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> ConceptsResponse:
     """获取概念板块列表"""
     await ensure_tushare_ready_async()
@@ -2249,7 +2269,7 @@ async def get_concepts_list(
 async def get_stock_concepts(
     code: str,
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> StockConceptsResponse:
     """获取股票所属的概念板块"""
     await ensure_tushare_ready_async()
@@ -2276,7 +2296,7 @@ async def get_stock_concepts(
 async def get_stocks_concepts_batch(
     codes: str = Query(..., description="股票代码列表，逗号分隔"),
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> StockConceptsResponse:
     """批量获取股票所属的概念板块"""
     await ensure_tushare_ready_async()
@@ -2313,7 +2333,7 @@ async def get_stocks_concepts_batch(
 async def get_concept_members(
     concept_code: str,
     db: Session = Depends(get_db),
-    user=Depends(require_user),
+    admin=Depends(get_admin_user),
 ) -> ConceptMembersResponse:
     """获取概念板块的成分股"""
     await ensure_tushare_ready_async()
