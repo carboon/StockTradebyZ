@@ -474,6 +474,23 @@ class TomorrowStarWindowStatusResponse(BaseModel):
     history: List[TomorrowStarHistoryItem]
 
 
+class TomorrowStarAggregateResponse(BaseModel):
+    """明日之星聚合接口响应 - 一次返回首屏所需全部数据"""
+    # 日期窗口信息
+    dates: List[str]
+    history: List[TomorrowStarHistoryItem]
+    window_status: Optional[TomorrowStarWindowStatusResponse] = None
+
+    # 最新候选数据
+    candidates: Optional[CandidatesResponse] = None
+
+    # 最新分析结果
+    results: Optional[AnalysisResultResponse] = None
+
+    # 新鲜度状态
+    freshness: Optional[Dict[str, Any]] = None
+
+
 class CurrentHotHistoryItem(BaseModel):
     """当前热盘历史项"""
     pick_date: date_class
@@ -716,6 +733,28 @@ class WatchlistDerivedData(BaseModel):
     exit_plan: Optional[Dict[str, Any]] = None
 
 
+class WatchlistLightItem(BaseModel):
+    """观察列表轻量项（仅基础信息，不做重计算）"""
+    id: int
+    code: str
+    name: Optional[str] = None
+    add_reason: Optional[str] = None
+    entry_price: Optional[float] = None
+    entry_date: Optional[date_class] = None
+    position_ratio: Optional[float] = None
+    priority: int
+    is_active: bool
+    added_at: datetime
+
+
+class WatchlistLightResponse(BaseModel):
+    """观察列表轻量响应（支持分页）"""
+    items: List[WatchlistLightItem]
+    total: int
+    page: int
+    page_size: int
+
+
 class WatchlistItem(BaseModel):
     """观察列表项（阶段2：支持公共结果拼装）"""
     id: int
@@ -781,6 +820,22 @@ class WatchlistResponse(BaseModel):
     """观察列表响应"""
     items: List[WatchlistItem]
     total: int
+
+
+class WatchlistDetailResponse(BaseModel):
+    """观察项详情响应（完整分析结果）"""
+    id: int
+    code: str
+    name: Optional[str] = None
+    add_reason: Optional[str] = None
+    entry_price: Optional[float] = None
+    entry_date: Optional[date_class] = None
+    position_ratio: Optional[float] = None
+    priority: int
+    is_active: bool
+    added_at: datetime
+    analysis: Optional[WatchlistAnalysisResult] = None
+    derived: Optional[WatchlistDerivedData] = None
 
 
 # ==================== 任务调度 ====================
@@ -1320,6 +1375,35 @@ class SignalReturnAnalysisResponse(BaseModel):
 
 
 # ==================== 概念板块相关 ====================
+class CurrentHotAggregateResponse(BaseModel):
+    """当前热盘聚合首屏响应，一次返回前端所需全部数据。"""
+    # 历史摘要
+    dates: List[str] = Field(default_factory=list)
+    history: List[CurrentHotHistoryItem] = Field(default_factory=list)
+    latest_date: Optional[date_class] = None
+    # 候选列表
+    candidates: List[CurrentHotCandidateItem] = Field(default_factory=list)
+    candidates_total: int = 0
+    # 分析结果
+    results: List[CurrentHotAnalysisItem] = Field(default_factory=list)
+    results_total: int = 0
+    min_score_threshold: float = 4.0
+    # 板块分析
+    sectors: List[CurrentHotSectorSummaryItem] = Field(default_factory=list)
+    sector_top_keys: List[str] = Field(default_factory=list)
+    sector_dates: List[str] = Field(default_factory=list)
+    sector_history: List[CurrentHotSectorHistorySeries] = Field(default_factory=list)
+    sector_latest_date: Optional[date_class] = None
+    sector_previous_date: Optional[date_class] = None
+    sector_window_size: int = 0
+    # 风险环境
+    risk_regime: Optional[RiskRegimeSummary] = None
+    # 元信息
+    pick_date: Optional[date_class] = None
+    generated_at: Optional[str] = None
+    cache_hit: bool = False
+
+
 class ConceptInfo(BaseModel):
     """概念板块信息"""
     concept_code: str

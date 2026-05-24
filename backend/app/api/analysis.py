@@ -35,6 +35,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import Candidate, AnalysisResult, DailyB1Check, DailyB1CheckDetail, Stock, StockDaily, Task, CurrentHotAnalysisResult, CurrentHotCandidate
 from app.services.analysis_service import analysis_service
+from app.services.current_hot_aggregate_service import CurrentHotAggregateService
 from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysisService
 from app.services.current_hot_service import CurrentHotService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
@@ -52,12 +53,15 @@ from app.schemas import (
     CandidateItem,
     AnalysisResultResponse,
     AnalysisItem,
+    CurrentHotAggregateResponse,
     CurrentHotCandidateItem,
     CurrentHotCandidatesResponse,
     CurrentHotAnalysisItem,
     CurrentHotAnalysisResultResponse,
     CurrentHotDatesResponse,
     CurrentHotHistoryItem,
+    CurrentHotSectorHistorySeries,
+    CurrentHotSectorSummaryItem,
     CurrentHotSectorAnalysisResponse,
     CurrentHotIntradayAnalysisGenerateResponse,
     CurrentHotIntradayAnalysisPrefetchResponse,
@@ -393,7 +397,7 @@ async def get_tomorrow_star_dates(
 
 
 @router.get("/tomorrow-star/window-status", response_model=TomorrowStarWindowStatusResponse)
-async def get_tomorrow_star_window_status(
+def get_tomorrow_star_window_status(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> TomorrowStarWindowStatusResponse:
@@ -558,8 +562,421 @@ async def get_tomorrow_star_freshness(
     return result
 
 
+@router.get("/tomorrow-star/aggregate")
+def get_tomorrow_star_aggregate(
+    candidate_limit: int = 2000,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
+    """
+    聚合接口 - 一次返回首屏所需的全部数据。
+    包含：日期窗口 + 最新候选 + 最新分析结果 + 新鲜度状态。
+    """
+    ensure_analysis_read_available(db)
+
+    # --- 1) 日期窗口 ---
+    summary = TomorrowStarWindowService(db).get_window_status(window_size=TomorrowStarWindowService.DEFAULT_WINDOW_SIZE)
+    history_items = [
+        TomorrowStarHistoryItem(
+            pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
+            date=item["date"],
+            count=int(item.get("count", 0) or 0),
+            pass_count=int(item.get("pass_count", 0) or 0),
+            candidate_count=int(item.get("candidate_count", 0) or 0),
+            analysis_count=int(item.get("analysis_count", 0) or 0),
+            trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
+            tomorrow_star_count=int(item.get("tomorrow_star_count", 0) or 0),
+            status=item.get("status") or "missing",
+            error_message=item.get("error_message"),
+            is_latest=bool(item.get("is_latest")),
+            market_regime_blocked=bool(item.get("market_regime_blocked")),
+            market_regime_info=item.get("market_regime_info"),
+        )
+        for item in summary.items
+    ]
+    window_status_obj = TomorrowStarWindowStatusResponse(
+        window_size=summary.window_size,
+        latest_date=datetime.strptime(summary.latest_date, "%Y-%m-%d").date() if summary.latest_date else None,
+        ready_count=summary.ready_count,
+        missing_count=summary.missing_count,
+        running_count=summary.running_count,
+        failed_count=summary.failed_count,
+        pending_count=summary.pending_count,
+        has_running_task=False,
+        running_task_id=None,
+        items=history_items,
+        history=history_items,
+    )
+    dates_data = {
+        "dates": [item.date for item in history_items],
+        "history": [item.model_dump(mode="json") for item in history_items],
+        "window_status": window_status_obj.model_dump(mode="json"),
+    }
+
+    # --- 2) 最新候选 ---
+    from app.services.candidate_service import CandidateService
+    from app.models import TomorrowStarRun as _TSRun
+
+    candidates_data = None
+    try:
+        normalized_date = analysis_service._normalize_pick_date(None)
+        target_date = _parse_date_or_none(normalized_date)
+
+        # 检查市场环境阻断
+        if target_date:
+            run = db.query(_TSRun).filter(_TSRun.pick_date == target_date).first()
+            if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+                regime_info = run.meta_json.get("market_regime_info", {})
+                candidates_data = {
+                    "pick_date": str(target_date),
+                    "candidates": [],
+                    "total": 0,
+                    "status": "market_regime_blocked",
+                    "message": f"市场环境不佳: {regime_info.get('summary', '未知原因')}",
+                    "market_regime_info": {
+                        "passed": regime_info.get("passed", False),
+                        "summary": regime_info.get("summary", ""),
+                        "details": regime_info.get("details", []),
+                    },
+                }
+
+        if candidates_data is None:
+            persisted_pick_date, persisted_candidates = CandidateService(db).load_candidates(normalized_date, limit=candidate_limit)
+            if persisted_candidates:
+                try:
+                    response_pick_date = pd.Timestamp(persisted_pick_date).date() if persisted_pick_date else None
+                except Exception:
+                    response_pick_date = None
+                cand_items = []
+                for i, c in enumerate(persisted_candidates[:candidate_limit]):
+                    cand_items.append(
+                        CandidateItem(
+                            id=i,
+                            pick_date=response_pick_date,
+                            code=c["code"],
+                            name=c.get("name"),
+                            industry=c.get("industry"),
+                            strategy=c.get("strategy") or "b1",
+                            open_price=c.get("open"),
+                            close_price=c.get("close"),
+                            change_pct=c.get("change_pct"),
+                            turnover=float(c["turnover_n"]) if c.get("turnover_n") is not None else None,
+                            turnover_rate=c.get("turnover_rate"),
+                            volume_ratio=c.get("volume_ratio"),
+                            active_pool_rank=c.get("active_pool_rank"),
+                            b1_passed=c.get("b1_passed"),
+                            kdj_j=c.get("kdj_j"),
+                            consecutive_days=int(c.get("consecutive_days") or 1),
+                        ).model_dump(mode="json")
+                    )
+                candidates_data = {
+                    "pick_date": str(response_pick_date) if response_pick_date else None,
+                    "candidates": cand_items,
+                    "total": len(persisted_candidates),
+                    "status": "ok",
+                    "message": None,
+                }
+            else:
+                # 没有候选数据时检查市场环境
+                check_date = target_date
+                mkt_regime_info = None
+                if check_date:
+                    run = db.query(_TSRun).filter(_TSRun.pick_date == check_date).first()
+                    if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+                        ri = run.meta_json.get("market_regime_info", {})
+                        mkt_regime_info = {
+                            "passed": ri.get("passed", False),
+                            "summary": ri.get("summary", ""),
+                            "details": ri.get("details", []),
+                        }
+                if mkt_regime_info:
+                    candidates_data = {
+                        "pick_date": str(check_date) if check_date else None,
+                        "candidates": [],
+                        "total": 0,
+                        "status": "market_regime_blocked",
+                        "message": f"市场环境不佳: {mkt_regime_info['summary']}",
+                        "market_regime_info": mkt_regime_info,
+                    }
+                else:
+                    agg_running_task = (
+                        db.query(Task)
+                        .filter(
+                            Task.task_type.in_(["tomorrow_star", "full_update"]),
+                            Task.status.in_(["pending", "running"]),
+                        )
+                        .order_by(Task.created_at.desc())
+                        .first()
+                    )
+                    candidates_data = {
+                        "pick_date": str(check_date) if check_date else None,
+                        "candidates": [],
+                        "total": 0,
+                        "status": "not_ready",
+                        "message": "候选数据尚未生成，请稍后再试",
+                        "has_running_task": agg_running_task is not None,
+                        "running_task_id": agg_running_task.id if agg_running_task else None,
+                    }
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    # --- 3) 最新分析结果 ---
+    results_data = None
+    try:
+        results_target_date = None
+        normalized_date = analysis_service._normalize_pick_date(None)
+        if normalized_date:
+            try:
+                results_target_date = datetime.strptime(normalized_date, "%Y-%m-%d").date()
+            except ValueError:
+                results_target_date = None
+
+        if results_target_date is None:
+            latest_pick_date = (
+                db.query(AnalysisResult.pick_date)
+                .join(
+                    Candidate,
+                    and_(
+                        Candidate.pick_date == AnalysisResult.pick_date,
+                        Candidate.code == AnalysisResult.code,
+                    ),
+                )
+                .order_by(AnalysisResult.pick_date.desc())
+                .limit(1)
+                .scalar()
+            )
+            results_target_date = latest_pick_date
+
+        if results_target_date is not None:
+            run = db.query(TomorrowStarRun).filter(TomorrowStarRun.pick_date == results_target_date).first()
+            if run and run.meta_json and run.meta_json.get("market_regime_blocked"):
+                regime_info = run.meta_json.get("market_regime_info", {})
+                results_data = {
+                    "pick_date": str(results_target_date),
+                    "results": [],
+                    "total": 0,
+                    "min_score_threshold": 4.0,
+                    "status": "market_regime_blocked",
+                    "message": f"市场环境不佳: {regime_info.get('summary', '未知原因')}",
+                    "market_regime_info": {
+                        "passed": regime_info.get("passed", False),
+                        "summary": regime_info.get("summary", ""),
+                        "details": regime_info.get("details", []),
+                    },
+                }
+            else:
+                rows = (
+                    db.query(
+                        AnalysisResult,
+                        Stock.name,
+                        DailyB1Check.turnover_rate.label("b1_turnover_rate"),
+                        DailyB1Check.volume_ratio.label("b1_volume_ratio"),
+                        StockDaily.turnover_rate.label("daily_turnover_rate"),
+                        StockDaily.volume_ratio.label("daily_volume_ratio"),
+                        DailyB1CheckDetail,
+                    )
+                    .join(
+                        Candidate,
+                        and_(
+                            Candidate.pick_date == AnalysisResult.pick_date,
+                            Candidate.code == AnalysisResult.code,
+                        ),
+                    )
+                    .outerjoin(Stock, Stock.code == AnalysisResult.code)
+                    .outerjoin(
+                        DailyB1Check,
+                        (DailyB1Check.code == AnalysisResult.code)
+                        & (DailyB1Check.check_date == AnalysisResult.pick_date),
+                    )
+                    .outerjoin(
+                        DailyB1CheckDetail,
+                        (DailyB1CheckDetail.code == AnalysisResult.code)
+                        & (DailyB1CheckDetail.check_date == AnalysisResult.pick_date),
+                    )
+                    .outerjoin(
+                        StockDaily,
+                        (StockDaily.code == AnalysisResult.code)
+                        & (StockDaily.trade_date == AnalysisResult.pick_date),
+                    )
+                    .filter(AnalysisResult.pick_date == results_target_date)
+                    .order_by(
+                        AnalysisResult.total_score.desc().nullslast(),
+                        AnalysisResult.id.asc(),
+                    )
+                    .all()
+                )
+                result_items = []
+                for row, stock_name, b1_turnover_rate, b1_volume_ratio, daily_turnover_rate, daily_volume_ratio, detail in rows:
+                    prefilter_passed, prefilter_summary, prefilter_blocked_by = _extract_prefilter_fields(row.details_json)
+                    pullback_quality, pullback_negative_flags = _extract_pullback_fields(row.details_json)
+                    details_turnover_rate = row.details_json.get("turnover_rate") if isinstance(row.details_json, dict) else None
+                    details_volume_ratio = row.details_json.get("volume_ratio") if isinstance(row.details_json, dict) else None
+                    tomorrow_star_pass = _extract_tomorrow_star_pass(row.details_json)
+                    if tomorrow_star_pass is None:
+                        tomorrow_star_pass = _extract_tomorrow_star_pass_from_detail(detail)
+                    if tomorrow_star_pass is None:
+                        tomorrow_star_pass = _derive_analysis_tomorrow_star_pass(
+                            prefilter_passed=prefilter_passed,
+                            verdict=row.verdict,
+                            signal_type=row.signal_type,
+                        )
+                    result_items.append(
+                        AnalysisItem(
+                            id=row.id,
+                            pick_date=results_target_date,
+                            code=row.code,
+                            name=stock_name,
+                            reviewer=row.reviewer,
+                            verdict=row.verdict,
+                            total_score=_safe_json_float(row.total_score),
+                            signal_type=row.signal_type,
+                            comment=row.comment,
+                            turnover_rate=(
+                                _safe_json_float(details_turnover_rate)
+                                if details_turnover_rate is not None
+                                else (_safe_json_float(b1_turnover_rate) or _safe_json_float(daily_turnover_rate))
+                            ),
+                            volume_ratio=(
+                                _safe_json_float(details_volume_ratio)
+                                if details_volume_ratio is not None
+                                else (_safe_json_float(b1_volume_ratio) or _safe_json_float(daily_volume_ratio))
+                            ),
+                            tomorrow_star_pass=tomorrow_star_pass,
+                            prefilter_passed=prefilter_passed,
+                            prefilter_summary=prefilter_summary,
+                            prefilter_blocked_by=prefilter_blocked_by,
+                            pullback_quality=pullback_quality,
+                            pullback_negative_flags=pullback_negative_flags,
+                        ).model_dump(mode="json")
+                    )
+                result_items.sort(
+                    key=lambda item: (
+                        _signal_sort_priority(item.get("signal_type")),
+                        _sort_score_desc(item.get("total_score")),
+                        item.get("code", ""),
+                    )
+                )
+                results_data = {
+                    "pick_date": str(results_target_date),
+                    "results": result_items,
+                    "total": len(result_items),
+                    "min_score_threshold": 4.0,
+                }
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    # --- 4) 新鲜度状态 (精简版，直接内联计算) ---
+    from app.services.market_service import market_service as _ms, MarketService as _MS
+    _cleanup_stale_active_tasks(db)
+    latest_trade_date = _ms.get_latest_trade_date() if _ms.token else None
+    latest_trade_data_ready = (
+        TushareService().is_trade_date_data_ready(latest_trade_date)
+        if latest_trade_date and _ms.token
+        else None
+    )
+    local_latest_date = _ms.get_local_latest_date()
+    latest_candidate_date = analysis_service.get_latest_candidate_date()
+    latest_result_date = analysis_service.get_latest_result_date()
+    latest_candidate_count = 0
+    latest_result_count = 0
+    if latest_candidate_date:
+        try:
+            latest_candidate_count = int(
+                db.query(Candidate)
+                .filter(Candidate.pick_date == datetime.strptime(latest_candidate_date, "%Y-%m-%d").date())
+                .count()
+            )
+        except ValueError:
+            latest_candidate_count = 0
+    if latest_result_date:
+        try:
+            latest_result_count = int(
+                db.query(AnalysisResult)
+                .filter(AnalysisResult.pick_date == datetime.strptime(latest_result_date, "%Y-%m-%d").date())
+                .count()
+            )
+        except ValueError:
+            latest_result_count = 0
+    running_task = (
+        db.query(Task)
+        .filter(
+            Task.task_type.in_(["tomorrow_star", "full_update"]),
+            Task.status.in_(["pending", "running"]),
+        )
+        .order_by(Task.created_at.desc())
+        .first()
+    )
+    incremental_state = _MS.get_update_state()
+    needs_update = bool(
+        latest_trade_date and (
+            local_latest_date != latest_trade_date
+            or latest_candidate_date != latest_trade_date
+            or latest_result_date != latest_trade_date
+        )
+    )
+    freshness_version = "|".join([
+        str(latest_trade_date or ""),
+        str(local_latest_date or ""),
+        str(latest_candidate_date or ""),
+        str(latest_candidate_count),
+        str(latest_result_date or ""),
+        str(latest_result_count),
+        str(latest_trade_data_ready),
+        str(running_task.id if running_task else ""),
+        str(running_task.status if running_task else ""),
+        str(incremental_state.get("running", False)),
+        str(incremental_state.get("progress", 0)),
+    ])
+    freshness_data = {
+        "latest_trade_date": latest_trade_date,
+        "latest_trade_data_ready": latest_trade_data_ready,
+        "local_latest_date": local_latest_date,
+        "latest_candidate_date": latest_candidate_date,
+        "latest_candidate_count": latest_candidate_count,
+        "latest_result_date": latest_result_date,
+        "latest_result_count": latest_result_count,
+        "needs_update": needs_update,
+        "freshness_version": freshness_version,
+        "running_task_id": running_task.id if running_task else None,
+        "running_task_status": running_task.status if running_task else None,
+        "incremental_update": {
+            "status": incremental_state.get("status", "idle"),
+            "running": incremental_state.get("running", False),
+            "progress": incremental_state.get("progress", 0),
+            "current": incremental_state.get("current", 0),
+            "total": incremental_state.get("total", 0),
+            "current_code": incremental_state.get("current_code"),
+            "updated_count": incremental_state.get("updated_count", 0),
+            "skipped_count": incremental_state.get("skipped_count", 0),
+            "failed_count": incremental_state.get("failed_count", 0),
+            "started_at": incremental_state.get("started_at"),
+            "completed_at": incremental_state.get("completed_at"),
+            "eta_seconds": incremental_state.get("eta_seconds"),
+            "elapsed_seconds": incremental_state.get("elapsed_seconds", 0),
+            "resume_supported": incremental_state.get("resume_supported", True),
+            "initial_completed": incremental_state.get("initial_completed", 0),
+            "completed_in_run": incremental_state.get("completed_in_run", 0),
+            "checkpoint_path": incremental_state.get("checkpoint_path"),
+            "last_error": incremental_state.get("last_error"),
+            "message": incremental_state.get("message", ""),
+        },
+    }
+
+    return {
+        "dates": dates_data["dates"],
+        "history": dates_data["history"],
+        "window_status": dates_data["window_status"],
+        "candidates": candidates_data,
+        "results": results_data,
+        "freshness": freshness_data,
+    }
+
+
 @router.get("/tomorrow-star/candidates", response_model=CandidatesResponse)
-async def get_candidates(
+def get_candidates(
     date: Optional[str] = None,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -688,7 +1105,7 @@ async def get_candidates(
 
 
 @router.get("/tomorrow-star/results", response_model=AnalysisResultResponse)
-async def get_analysis_results(
+def get_analysis_results(
     date: Optional[str] = None,
     db: Session = Depends(get_db),
     user=Depends(require_user),
@@ -848,7 +1265,154 @@ async def get_analysis_results(
     )
 
 
-@router.get("/current-hot/dates", response_model=CurrentHotDatesResponse)
+@router.get(
+    "/current-hot/aggregate",
+    response_model=CurrentHotAggregateResponse,
+    summary="当前热盘聚合首屏接口（推荐）",
+    description=(
+        "一次请求返回首屏所需的全部数据：历史摘要 + 候选列表 + 分析结果 + 板块分析 + 风险环境。"
+        "使用 Redis/内存缓存，TTL 120s。"
+    ),
+)
+def get_current_hot_aggregate(
+    date: Optional[str] = Query(default=None, description="交易日，不传则取最新"),
+    candidates_limit: int = Query(default=200, ge=1, le=2000, description="候选/分析结果条数上限"),
+    sector_window_size: int = Query(default=CurrentHotService.DEFAULT_WINDOW_SIZE, ge=20, le=240, description="板块分析回看窗口"),
+    sector_top_n: int = Query(default=5, ge=1, le=12, description="板块 Top N"),
+    include_sectors: bool = Query(default=True, description="是否包含板块分析"),
+    force_refresh: bool = Query(default=False, description="强制刷新缓存"),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> CurrentHotAggregateResponse:
+    """当前热盘聚合首屏接口 -- 替代分别请求 dates/candidates/results/sectors。"""
+    ensure_analysis_read_available(db)
+    payload = CurrentHotAggregateService(db).get_aggregate(
+        pick_date=date,
+        candidates_limit=candidates_limit,
+        sector_window_size=sector_window_size,
+        sector_top_n=sector_top_n,
+        include_sectors=include_sectors,
+        force_refresh=force_refresh,
+    )
+
+    # -- history items --
+    history_items = [
+        CurrentHotHistoryItem(
+            pick_date=datetime.strptime(item["pick_date"], "%Y-%m-%d").date(),
+            date=item["date"],
+            candidate_count=int(item.get("candidate_count", 0) or 0),
+            analysis_count=int(item.get("analysis_count", 0) or 0),
+            trend_start_count=int(item.get("trend_start_count", 0) or 0),
+            b1_pass_count=int(item.get("b1_pass_count", 0) or 0),
+            consecutive_candidate_count=int(item.get("consecutive_candidate_count", 0) or 0),
+            pass_count=int(item.get("pass_count", 0) or 0),
+            status=item.get("status") or "missing",
+            error_message=item.get("error_message"),
+            is_latest=bool(item.get("is_latest")),
+        )
+        for item in payload.get("history", [])
+    ]
+
+    # -- candidate items --
+    candidate_items = [
+        CurrentHotCandidateItem(
+            id=item["id"],
+            pick_date=payload.get("pick_date"),
+            code=item["code"],
+            name=item.get("name"),
+            sector_names=item.get("sector_names") or [],
+            board_group=item.get("board_group"),
+            open_price=item.get("open_price"),
+            close_price=item.get("close_price"),
+            change_pct=item.get("change_pct"),
+            turnover=item.get("turnover"),
+            turnover_rate=item.get("turnover_rate"),
+            volume_ratio=item.get("volume_ratio"),
+            active_pool_rank=item.get("active_pool_rank"),
+            b1_passed=item.get("b1_passed"),
+            kdj_j=item.get("kdj_j"),
+            verdict=item.get("verdict"),
+            total_score=item.get("total_score"),
+            signal_type=item.get("signal_type"),
+            comment=item.get("comment"),
+            risk_flag=item.get("risk_flag"),
+            consecutive_days=int(item.get("consecutive_days") or 1),
+        )
+        for item in payload.get("candidates", [])
+    ]
+
+    # -- result items --
+    result_items = [
+        CurrentHotAnalysisItem(
+            id=item["id"],
+            pick_date=payload.get("pick_date"),
+            code=item["code"],
+            name=item.get("name"),
+            sector_names=item.get("sector_names") or [],
+            board_group=item.get("board_group"),
+            reviewer=item.get("reviewer"),
+            b1_passed=item.get("b1_passed"),
+            verdict=item.get("verdict"),
+            total_score=item.get("total_score"),
+            signal_type=item.get("signal_type"),
+            comment=item.get("comment"),
+            turnover_rate=item.get("turnover_rate"),
+            volume_ratio=item.get("volume_ratio"),
+            active_pool_rank=item.get("active_pool_rank"),
+            prefilter_passed=item.get("prefilter_passed"),
+            prefilter_summary=item.get("prefilter_summary"),
+            prefilter_blocked_by=item.get("prefilter_blocked_by"),
+            pullback_quality=item.get("pullback_quality"),
+            pullback_negative_flags=item.get("pullback_negative_flags"),
+            risk_flag=item.get("risk_flag"),
+        )
+        for item in payload.get("results", [])
+    ]
+
+    # -- sector items --
+    sector_items = [
+        CurrentHotSectorSummaryItem(**item)
+        for item in payload.get("sectors", [])
+    ]
+    sector_history_items = [
+        CurrentHotSectorHistorySeries(**item)
+        for item in payload.get("sector_history", [])
+    ]
+
+    latest_date_raw = payload.get("latest_date")
+    pick_date_raw = payload.get("pick_date")
+    sector_latest_raw = payload.get("sector_latest_date")
+    sector_previous_raw = payload.get("sector_previous_date")
+
+    return CurrentHotAggregateResponse(
+        dates=payload.get("dates", []),
+        history=history_items,
+        latest_date=datetime.strptime(latest_date_raw, "%Y-%m-%d").date() if latest_date_raw else None,
+        candidates=candidate_items,
+        candidates_total=int(payload.get("candidates_total", 0) or 0),
+        results=result_items,
+        results_total=int(payload.get("results_total", 0) or 0),
+        min_score_threshold=float(payload.get("min_score_threshold", 4.0) or 4.0),
+        sectors=sector_items,
+        sector_top_keys=payload.get("sector_top_keys", []),
+        sector_dates=payload.get("sector_dates", []),
+        sector_history=sector_history_items,
+        sector_latest_date=datetime.strptime(sector_latest_raw, "%Y-%m-%d").date() if isinstance(sector_latest_raw, str) else sector_latest_raw,
+        sector_previous_date=datetime.strptime(sector_previous_raw, "%Y-%m-%d").date() if isinstance(sector_previous_raw, str) else sector_previous_raw,
+        sector_window_size=int(payload.get("sector_window_size", 0) or 0),
+        risk_regime=payload.get("risk_regime"),
+        pick_date=datetime.strptime(str(pick_date_raw), "%Y-%m-%d").date() if pick_date_raw else None,
+        generated_at=payload.get("generated_at"),
+        cache_hit=bool(payload.get("cache_hit")),
+    )
+
+
+@router.get(
+    "/current-hot/dates",
+    response_model=CurrentHotDatesResponse,
+    deprecated=True,
+    description="已废弃：请使用 /current-hot/aggregate 一次获取全部数据。",
+)
 @cached_current_hot_dates(ttl=180)
 async def get_current_hot_dates(
     db: Session = Depends(get_db),
@@ -880,8 +1444,13 @@ async def get_current_hot_dates(
     )
 
 
-@router.get("/current-hot/candidates", response_model=CurrentHotCandidatesResponse)
-async def get_current_hot_candidates(
+@router.get(
+    "/current-hot/candidates",
+    response_model=CurrentHotCandidatesResponse,
+    deprecated=True,
+    description="已废弃：请使用 /current-hot/aggregate 一次获取全部数据。",
+)
+def get_current_hot_candidates(
     date: Optional[str] = None,
     limit: int = 200,
     db: Session = Depends(get_db),
@@ -924,8 +1493,13 @@ async def get_current_hot_candidates(
     )
 
 
-@router.get("/current-hot/results", response_model=CurrentHotAnalysisResultResponse)
-async def get_current_hot_results(
+@router.get(
+    "/current-hot/results",
+    response_model=CurrentHotAnalysisResultResponse,
+    deprecated=True,
+    description="已废弃：请使用 /current-hot/aggregate 一次获取全部数据。",
+)
+def get_current_hot_results(
     date: Optional[str] = None,
     db: Session = Depends(get_db),
     user=Depends(require_user),
@@ -968,8 +1542,13 @@ async def get_current_hot_results(
     )
 
 
-@router.get("/current-hot/sectors", response_model=CurrentHotSectorAnalysisResponse)
-async def get_current_hot_sector_analysis(
+@router.get(
+    "/current-hot/sectors",
+    response_model=CurrentHotSectorAnalysisResponse,
+    deprecated=True,
+    description="已废弃：请使用 /current-hot/aggregate 一次获取全部数据。",
+)
+def get_current_hot_sector_analysis(
     window_size: int = Query(CurrentHotService.DEFAULT_WINDOW_SIZE, ge=20, le=240),
     top_n: int = Query(5, ge=1, le=12),
     db: Session = Depends(get_db),
@@ -981,7 +1560,7 @@ async def get_current_hot_sector_analysis(
 
 
 @router.get("/sector-analysis/overview", response_model=CurrentHotSectorAnalysisResponse)
-async def get_sector_analysis_overview(
+def get_sector_analysis_overview(
     window_size: int = Query(SectorAnalysisService.DEFAULT_WINDOW_SIZE, ge=20, le=240),
     top_n: int = Query(5, ge=1, le=12),
     db: Session = Depends(get_db),
@@ -993,7 +1572,7 @@ async def get_sector_analysis_overview(
 
 
 @router.get("/sector-analysis/rows", response_model=SectorAnalysisRowsResponse)
-async def get_sector_analysis_rows(
+def get_sector_analysis_rows(
     sector_key: str = Query(..., description="板块标识"),
     date: Optional[str] = Query(default=None, description="交易日"),
     db: Session = Depends(get_db),
@@ -1039,18 +1618,22 @@ async def get_sector_analysis_rows(
 
 
 @router.post("/current-hot/generate")
-async def generate_current_hot(
+def generate_current_hot(
     date: Optional[str] = Query(default=None, description="交易日"),
     reviewer: str = Query(default="quant", description="评审者类型"),
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> dict:
-    await ensure_tushare_ready_async()
-    return CurrentHotService(db).generate_for_trade_date(date, reviewer=reviewer)
+    ensure_tushare_ready()
+    result = CurrentHotService(db).generate_for_trade_date(date, reviewer=reviewer)
+    # generate 成功后清除聚合缓存，确保后续请求拿到最新数据
+    if result.get("status") == "ok":
+        CurrentHotAggregateService.invalidate_cache()
+    return result
 
 
 @router.get("/current-hot/intraday/status")
-async def get_current_hot_intraday_status(
+def get_current_hot_intraday_status(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
@@ -1068,7 +1651,7 @@ async def get_current_hot_intraday_status(
 
 
 @router.get("/current-hot/intraday/data", response_model=CurrentHotIntradayAnalysisResponse)
-async def get_current_hot_intraday_data(
+def get_current_hot_intraday_data(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotIntradayAnalysisResponse:
@@ -1108,7 +1691,7 @@ async def prefetch_current_hot_intraday(
 
 
 @router.get("/intraday/status")
-async def get_intraday_analysis_status(
+def get_intraday_analysis_status(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
@@ -1126,7 +1709,7 @@ async def get_intraday_analysis_status(
 
 
 @router.get("/intraday/data", response_model=IntradayAnalysisResponse)
-async def get_intraday_analysis_data(
+def get_intraday_analysis_data(
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> IntradayAnalysisResponse:
@@ -1329,7 +1912,7 @@ async def get_history_status(
 
 
 @router.get("/diagnosis/{code}/history/{check_date}", response_model=DiagnosisHistoryDetailResponse)
-async def get_diagnosis_history_detail(
+def get_diagnosis_history_detail(
     code: str,
     check_date: str,
     user=Depends(require_user),
@@ -1426,7 +2009,7 @@ async def analyze_stock(
 
 
 @router.get("/diagnosis/{code}/result")
-async def get_analysis_result(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+def get_analysis_result(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """获取单股分析结果
 
     从最新的single_analysis任务中获取分析结果。
@@ -1833,7 +2416,7 @@ def _is_tomorrow_star(details_json: Optional[dict[str, Any]], verdict: Optional[
 
 
 @router.get("/signal-returns/{source}/{signal_type}/{pick_date}", response_model=SignalReturnAnalysisResponse)
-async def get_signal_returns(
+def get_signal_returns(
     source: str,
     signal_type: str,
     pick_date: str,
@@ -2185,7 +2768,7 @@ async def get_signal_returns(
 @router.get("/concepts/list", response_model=ConceptsResponse)
 async def get_concepts_list(
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> ConceptsResponse:
     """获取概念板块列表"""
     await ensure_tushare_ready_async()
@@ -2201,7 +2784,7 @@ async def get_concepts_list(
 async def get_stock_concepts(
     code: str,
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> StockConceptsResponse:
     """获取股票所属的概念板块"""
     await ensure_tushare_ready_async()
@@ -2228,7 +2811,7 @@ async def get_stock_concepts(
 async def get_stocks_concepts_batch(
     codes: str = Query(..., description="股票代码列表，逗号分隔"),
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> StockConceptsResponse:
     """批量获取股票所属的概念板块"""
     await ensure_tushare_ready_async()
@@ -2265,7 +2848,7 @@ async def get_stocks_concepts_batch(
 async def get_concept_members(
     concept_code: str,
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    user=Depends(require_user),
 ) -> ConceptMembersResponse:
     """获取概念板块的成分股"""
     await ensure_tushare_ready_async()

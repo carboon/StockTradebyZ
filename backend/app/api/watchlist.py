@@ -32,6 +32,9 @@ from app.schemas import (
     WatchlistAnalysisItem,
     WatchlistAnalysisResult,
     WatchlistDerivedData,
+    WatchlistLightItem,
+    WatchlistLightResponse,
+    WatchlistDetailResponse,
 )
 
 router = APIRouter()
@@ -386,8 +389,94 @@ def _build_watchlist_history_item(
     )
 
 
+@router.get("/light", response_model=WatchlistLightResponse)
+def get_watchlist_light(
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> WatchlistLightResponse:
+    """获取观察列表的轻量版本（仅基础信息，不做重计算，支持分页）
+
+    用于首屏快速渲染列表，用户点击/展开某条记录后再调用 detail 接口获取完整分析。
+    """
+    page = max(1, min(int(page), 1000))
+    page_size = max(1, min(int(page_size), 200))
+
+    service = WatchlistAnalysisService(db)
+    result = service.get_watchlist_light(user.id, page=page, page_size=page_size)
+
+    items = [
+        WatchlistLightItem(
+            id=item["id"],
+            code=item["code"],
+            name=item["name"],
+            add_reason=item["add_reason"],
+            entry_price=item["entry_price"],
+            entry_date=item["entry_date"],
+            position_ratio=item["position_ratio"],
+            priority=item["priority"],
+            is_active=item["is_active"],
+            added_at=item["added_at"],
+        )
+        for item in result["items"]
+    ]
+
+    return WatchlistLightResponse(
+        items=items,
+        total=result["total"],
+        page=result["page"],
+        page_size=result["page_size"],
+    )
+
+
+@router.get("/{item_id}/detail", response_model=WatchlistDetailResponse)
+def get_watchlist_item_detail(
+    item_id: int,
+    trade_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> WatchlistDetailResponse:
+    """获取单个观察项的完整详情（包含分析结果、支撑阻力、止盈止损计划）
+
+    用户点击/展开某条记录时调用，按需加载，避免列表首屏做重计算。
+    """
+    target_date: Optional[date_class] = None
+    if trade_date:
+        try:
+            target_date = date_class.fromisoformat(trade_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD 格式")
+
+    service = WatchlistAnalysisService(db)
+    result = service.get_watchlist_item_detail(user.id, item_id, trade_date=target_date)
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="观察项不存在")
+
+    detail = WatchlistDetailResponse(
+        id=result["id"],
+        code=result["code"],
+        name=result["name"],
+        add_reason=result["add_reason"],
+        entry_price=result["entry_price"],
+        entry_date=result["entry_date"],
+        position_ratio=result["position_ratio"],
+        priority=result["priority"],
+        is_active=result["is_active"],
+        added_at=result["added_at"],
+    )
+
+    if result.get("analysis"):
+        detail.analysis = WatchlistAnalysisResult(**result["analysis"])
+    if result.get("derived"):
+        detail.derived = WatchlistDerivedData(**result["derived"])
+
+    return detail
+
+
 @router.get("/", response_model=WatchlistResponse)
-async def get_watchlist(
+def get_watchlist(
     trade_date: Optional[str] = None,
     db: Session = Depends(get_db),
     user=Depends(require_user),
@@ -465,7 +554,7 @@ async def get_watchlist(
 
 
 @router.post("/", response_model=WatchlistItem)
-async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistItem:
+def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> WatchlistItem:
     """添加到当前用户的观察列表"""
     code = _normalize_watchlist_code(request.code)
     stock = _ensure_stock_exists(db, code, allow_remote_sync=getattr(user, "role", "") == "admin")
@@ -513,8 +602,26 @@ async def add_to_watchlist(request: WatchlistAddRequest, db: Session = Depends(g
     )
 
 
+@router.get("/check/{code}")
+def check_watchlist_status(
+    code: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> dict:
+    """轻量查询：某只股票是否在当前用户的观察列表中"""
+    normalized = _normalize_watchlist_code(code)
+    exists = db.query(
+        db.query(Watchlist).filter(
+            Watchlist.user_id == user.id,
+            Watchlist.code == normalized,
+            Watchlist.is_active == True,
+        ).exists()
+    ).scalar()
+    return {"in_watchlist": bool(exists)}
+
+
 @router.put("/{item_id}", response_model=WatchlistItem)
-async def update_watchlist_item(
+def update_watchlist_item(
     item_id: int,
     request: WatchlistUpdateRequest,
     db: Session = Depends(get_db),
@@ -561,7 +668,7 @@ async def update_watchlist_item(
 
 
 @router.delete("/{item_id}")
-async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """删除当前用户的观察列表项"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
@@ -576,7 +683,7 @@ async def delete_watchlist_item(item_id: int, db: Session = Depends(get_db), use
 
 
 @router.get("/{item_id}/analysis")
-async def get_watchlist_analysis(
+def get_watchlist_analysis(
     item_id: int,
     days: int = 5,
     db: Session = Depends(get_db),
@@ -663,7 +770,7 @@ async def get_watchlist_analysis(
 
 
 @router.post("/{item_id}/analyze")
-async def analyze_watchlist_item(
+def analyze_watchlist_item(
     item_id: int,
     db: Session = Depends(get_db),
     user=Depends(require_user),
@@ -831,7 +938,7 @@ async def analyze_watchlist_item(
 
 
 @router.get("/{item_id}/chart")
-async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
+def get_watchlist_chart(item_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> dict:
     """获取当前用户的观察股票 K线图数据"""
     w = db.query(Watchlist).filter(Watchlist.id == item_id, Watchlist.user_id == user.id).first()
     if not w:
@@ -842,7 +949,7 @@ async def get_watchlist_chart(item_id: int, db: Session = Depends(get_db), user=
     from app.schemas import KLineDataRequest
 
     kline_request = KLineDataRequest(code=w.code, days=120, include_weekly=True)
-    kline_data = await _get_kline_data_impl(kline_request, db)
+    kline_data = _get_kline_data_impl(kline_request, db)
 
     return {
         "code": w.code,

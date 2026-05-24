@@ -1,5 +1,0 @@
-ALTER TABLE candidates
-ADD COLUMN IF NOT EXISTS consecutive_days INTEGER NOT NULL DEFAULT 1;
-
-ALTER TABLE tomorrow_star_runs
-ADD COLUMN IF NOT EXISTS consecutive_candidate_count INTEGER NOT NULL DEFAULT 0;

@@ -832,21 +832,28 @@ import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, RiskFlagSummary, RiskRegimeSummary, StockSearchItem, WatchlistItem } from '@/types'
+import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, RiskFlagSummary, RiskRegimeSummary, StockSearchItem } from '@/types'
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
 import { useResponsive } from '@/composables/useResponsive'
 import { buildKLineChartOption, loadKLineChartRuntime, getAdvancedIndicators } from '@/utils/klineChart'
+import {
+  registerPoll,
+  startPoll,
+  stopPoll,
+  unregisterPoll,
+  activatePagePolls,
+  deactivatePagePolls,
+} from '@/composables/usePollingManager'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const configStore = useConfigStore()
 const { isMobile } = useResponsive()
-const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state:v2'
-const DIAGNOSIS_CHART_CACHE_KEY = 'stocktrade:diagnosis:chart-cache'
-const DIAGNOSIS_CHART_CACHE_TTL_MS = 30 * 60 * 1000
+const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state:v3'
+const DIAGNOSIS_CHART_CACHE_PREFIX = 'stocktrade:diagnosis:chart:'
 const DIAGNOSIS_INITIAL_CHART_DAYS = 60
 const DIAGNOSIS_HISTORY_WINDOW_DAYS = 120
 const READ_ONLY_ROUTE_SOURCES = new Set(['tomorrow-star', 'current-hot', 'midday-analysis'])
@@ -1011,6 +1018,43 @@ function applyMobileRouteChartPreference() {
   }
 }
 
+function getDiagnosisChartCacheKey(code: string): string {
+  return `${DIAGNOSIS_CHART_CACHE_PREFIX}${code}`
+}
+
+function loadDiagnosisChartCache(code: string): { data: KLineData, days: number } | null {
+  if (typeof window === 'undefined' || !code) return null
+  try {
+    const raw = sessionStorage.getItem(getDiagnosisChartCacheKey(code))
+    if (!raw) return null
+    const payload = JSON.parse(raw)
+    if (!payload || typeof payload !== 'object') return null
+    if (!payload.data || !Array.isArray(payload.data.daily)) return null
+    const days = Number(payload.days) || payload.data.daily.length || 0
+    return {
+      data: payload.data as KLineData,
+      days,
+    }
+  } catch {
+    sessionStorage.removeItem(getDiagnosisChartCacheKey(code))
+    return null
+  }
+}
+
+function setDiagnosisChartCache(code: string, data: KLineData, days: number) {
+  diagnosisChartCache.set(code, data)
+  diagnosisChartCacheDays.set(code, days)
+  if (typeof window === 'undefined' || !code) return
+  try {
+    sessionStorage.setItem(
+      getDiagnosisChartCacheKey(code),
+      JSON.stringify({ data, days }),
+    )
+  } catch {
+    // 忽略缓存写入失败，不影响主流程
+  }
+}
+
 function getRouteSource(): string {
   const source = route.query.source
   if (Array.isArray(source)) return source[0] || ''
@@ -1047,15 +1091,26 @@ onActivated(() => {
   if (authStore.isAdmin) {
     void configStore.checkTushareStatus()
   }
+  activatePagePolls('diagnosis')
   applyMobileRouteChartPreference()
-  nextTick(() => {
-    chartInstance?.resize()
-  })
 
   const routeCode = normalizeRouteCode(route.query.code)
   if (routeCode && routeCode !== stockCode.value) {
     void loadRouteStock(routeCode)
     return
+  }
+
+  // 图表在 deactivated 时已被 dispose，需要按需重建
+  if (stockCode.value && currentDiagnosisChartData.value) {
+    nextTick(() => {
+      if (chartRef.value) {
+        void renderChart(getDiagnosisDisplayChartData(currentDiagnosisChartData.value!, chartDays.value))
+      }
+    })
+  } else if (chartInstance) {
+    nextTick(() => {
+      chartInstance?.resize()
+    })
   }
 
   if (stockCode.value) {
@@ -1066,10 +1121,15 @@ onActivated(() => {
 
 onDeactivated(() => {
   searchSequence += 1
-  stopAnalysisPolling()
+  deactivatePagePolls('diagnosis')
   cancelDiagnosisPageRequests()
   refreshingHistory.value = false
   analyzing.value = false
+  // 释放图表实例，避免缓存页面持有大量 ECharts 资源
+  if (chartInstance) {
+    chartInstance.dispose()
+    chartInstance = null
+  }
 })
 
 onUnmounted(() => {
@@ -1078,7 +1138,7 @@ onUnmounted(() => {
     chartInstance.dispose()
   }
   window.removeEventListener('resize', handleResize)
-  stopAnalysisPolling()
+  unregisterPoll(ANALYSIS_POLL_KEY)
   cancelDiagnosisPageRequests()
 })
 
@@ -1135,12 +1195,12 @@ async function searchStock(requestId: number, options: { autoRefreshHistory?: bo
   tomorrowStarDates.value = []
   historyPage.value = 1
 
-  await loadStockInfo()
-  if (requestId !== searchSequence) return
-  await loadWatchlistStatus()
-  if (requestId !== searchSequence) return
-  // 加载 K线数据
-  await loadKlineData()
+  // loadStockInfo / loadWatchlistStatus / loadKlineData 无互相依赖，并行执行
+  const [,,] = await Promise.all([
+    loadStockInfo(),
+    loadWatchlistStatus(),
+    loadKlineData(),
+  ])
   if (requestId !== searchSequence) return
 
   // 加载历史检查记录
@@ -1292,9 +1352,8 @@ async function loadWatchlistStatus() {
 
   const signal = beginRequest('watchlistStatus')
   try {
-    const data = await apiWatchlist.getAll({ signal })
-    const items = data.items || []
-    isInWatchlist.value = items.some((item: WatchlistItem) => item.code === stockCode.value)
+    const data = await apiWatchlist.checkStatus(stockCode.value, { signal })
+    isInWatchlist.value = data.in_watchlist
   } catch (error) {
     if (isRequestCanceled(error)) return
     isInWatchlist.value = false
@@ -1437,7 +1496,8 @@ async function loadKlineData() {
     if (!data || cachedDays < initialDays) {
       data = await apiStock.getKline(stockCode.value, initialDays, false, { signal })
       cachedDays = initialDays
-      setDiagnosisChartCache(stockCode.value, data, initialDays)
+      diagnosisChartCache.set(stockCode.value, data)
+      diagnosisChartCacheDays.set(stockCode.value, initialDays)
     }
 
     // 使用全部数据计算高级指标，但只显示用户请求的天数
@@ -1526,7 +1586,6 @@ async function refreshDiagnosisFullChartInBackground(code: string, totalDays: nu
   const signal = beginRequest('klineExtended')
   try {
     const fullData = await apiStock.getKline(code, totalDays, false, { signal, timeoutMs: 20000 })
-    // 检查股票代码和用户选择的显示天数是否匹配
     const displayDays = chartDays.value
     if (stockCode.value !== code || fullData.daily.length < displayDays) return
 
@@ -1577,8 +1636,9 @@ async function handleHistoryPageChange(page: number) {
   await loadHistoryData(false)
 }
 
-// 分析任务轮询定时器
-let analysisPollingTimer: ReturnType<typeof setInterval> | null = null
+// 分析任务轮询 key（属于 diagnosis 页面）
+const ANALYSIS_POLL_KEY = 'diagnosis:analysisResult'
+const ANALYSIS_POLL_INTERVAL_MS = 3000
 
 async function analyzeStock() {
   if (authStore.isAdmin && !configStore.dataInitialized) {
@@ -1619,17 +1679,13 @@ function startAnalysisPolling() {
   // 立即检查一次
   checkAnalysisResult()
 
-  // 每2秒轮询一次
-  analysisPollingTimer = setInterval(() => {
-    checkAnalysisResult()
-  }, 2000)
+  // 注册并启动轮询（3秒间隔）
+  registerPoll(ANALYSIS_POLL_KEY, checkAnalysisResult, ANALYSIS_POLL_INTERVAL_MS)
+  startPoll(ANALYSIS_POLL_KEY)
 }
 
 function stopAnalysisPolling() {
-  if (analysisPollingTimer) {
-    clearInterval(analysisPollingTimer)
-    analysisPollingTimer = null
-  }
+  stopPoll(ANALYSIS_POLL_KEY)
 }
 
 async function checkAnalysisResult() {
@@ -1917,18 +1973,12 @@ function getB1SignalTagType(signalType?: string | null): string {
 function persistDiagnosisState() {
   if (typeof window === 'undefined') return
 
+  // Only persist lightweight UI state — heavy data is fetched via API
   const state = {
     searchForm: searchForm.value,
     stockCode: stockCode.value,
     stockName: stockName.value,
     chartDays: chartDays.value,
-    historyData: historyData.value,
-    trendStartDates: trendStartDates.value,
-    tomorrowStarDates: tomorrowStarDates.value,
-    analysisResult: analysisResult.value,
-    analysisRiskRegime: analysisRiskRegime.value,
-    isInWatchlist: isInWatchlist.value,
-    lastAutoHistoryRefreshAt: lastAutoHistoryRefreshAt.value,
   }
 
   sessionStorage.setItem(DIAGNOSIS_STATE_KEY, JSON.stringify(state))
@@ -1967,57 +2017,6 @@ function getDiagnosisDisplayChartData(data: KLineData, requestedDays: number): K
   }
 }
 
-function loadDiagnosisChartCache(code: string): { code: string; days: number; cachedAt: number; data: KLineData } | null {
-  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
-
-  const raw = window.localStorage.getItem(DIAGNOSIS_CHART_CACHE_KEY)
-  if (!raw) return null
-
-  try {
-    const cache = JSON.parse(raw) as Record<string, { code: string; days: number; cachedAt: number; data: KLineData }>
-    const entry = cache[code]
-    if (!entry) return null
-    if (!entry.cachedAt || Date.now() - entry.cachedAt > DIAGNOSIS_CHART_CACHE_TTL_MS) {
-      delete cache[code]
-      window.localStorage.setItem(DIAGNOSIS_CHART_CACHE_KEY, JSON.stringify(cache))
-      return null
-    }
-    return entry
-  } catch {
-    window.localStorage.removeItem(DIAGNOSIS_CHART_CACHE_KEY)
-    return null
-  }
-}
-
-function setDiagnosisChartCache(code: string, data: KLineData, days: number) {
-  diagnosisChartCache.set(code, data)
-  diagnosisChartCacheDays.set(code, days)
-
-  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
-
-  let cache: Record<string, { code: string; days: number; cachedAt: number; data: KLineData }> = {}
-  try {
-    cache = JSON.parse(window.localStorage.getItem(DIAGNOSIS_CHART_CACHE_KEY) || '{}')
-  } catch {
-    cache = {}
-  }
-
-  cache[code] = {
-    code,
-    days,
-    cachedAt: Date.now(),
-    data,
-  }
-
-  const trimmed = Object.values(cache)
-    .sort((a, b) => b.cachedAt - a.cachedAt)
-    .slice(0, 20)
-  window.localStorage.setItem(
-    DIAGNOSIS_CHART_CACHE_KEY,
-    JSON.stringify(Object.fromEntries(trimmed.map((entry) => [entry.code, entry])))
-  )
-}
-
 function restoreDiagnosisState() {
   if (typeof window === 'undefined') return
 
@@ -2026,6 +2025,7 @@ function restoreDiagnosisState() {
 
   try {
     const state = JSON.parse(raw)
+    // Restore lightweight UI state only
     searchForm.value = state.searchForm || { code: '' }
     stockCode.value = state.stockCode || ''
     stockName.value = state.stockName || ''

@@ -8,6 +8,7 @@ import type {
   CandidatesResponse,
   ConfigItem,
   ConfigResponse,
+  CurrentHotAggregateResponse,
   CurrentHotAnalysisResultsResponse,
   CurrentHotCandidatesResponse,
   CurrentHotDatesResponse,
@@ -49,6 +50,7 @@ import type {
   TaskRunningResponse,
   TaskResponse,
   TomorrowStarDatesResponse,
+  TomorrowStarAggregateResponse,
   TushareStatusResponse,
   TushareVerifyResponse,
   UsageStatsResponse,
@@ -57,7 +59,9 @@ import type {
   WatchlistAnalysisResponse,
   WatchlistAnalyzeResponse,
   WatchlistChartResponse,
+  WatchlistDetailResponse,
   WatchlistItem,
+  WatchlistLightResponse,
   WatchlistResponse,
   ConceptsResponse,
   StockConceptsResponse,
@@ -228,6 +232,10 @@ export const apiStock = {
 }
 
 export const apiAnalysis = {
+  // 聚合接口 - 一次返回首屏全部数据（日期+候选+结果+新鲜度）
+  getAggregate: (options?: RequestOptions) =>
+    api.get<never, TomorrowStarAggregateResponse>('/v1/analysis/tomorrow-star/aggregate', { ...withRequestOptions(options, TIMEOUTS.long), params: { candidate_limit: 2000 } }),
+
   // 获取明日之星数据新鲜度
   getFreshness: (options?: RequestOptions) => api.get<never, FreshnessResponse>('/v1/analysis/tomorrow-star/freshness', withRequestOptions(options, TIMEOUTS.short)),
 
@@ -249,6 +257,20 @@ export const apiAnalysis = {
   // 获取当前热盘历史日期
   getCurrentHotDates: (options?: RequestOptions) =>
     api.get<never, CurrentHotDatesResponse>('/v1/analysis/current-hot/dates', withRequestOptions(options, TIMEOUTS.short)),
+
+  // 当前热盘聚合首屏接口（推荐：一次获取 dates + candidates + results + sectors + risk_regime）
+  getCurrentHotAggregate: (params?: {
+    date?: string
+    candidates_limit?: number
+    sector_window_size?: number
+    sector_top_n?: number
+    include_sectors?: boolean
+    force_refresh?: boolean
+  }, options?: RequestOptions) =>
+    api.get<never, CurrentHotAggregateResponse>('/v1/analysis/current-hot/aggregate', {
+      ...withRequestOptions(options, TIMEOUTS.long),
+      params,
+    }),
 
   // 获取当前热盘候选列表
   getCurrentHotCandidates: (date?: string, options?: RequestOptions) =>
@@ -427,8 +449,23 @@ export const apiAnalysis = {
 }
 
 export const apiWatchlist = {
-  // 获取观察列表
+  // 获取观察列表（完整版，带分析结果）
   getAll: (options?: RequestOptions) => api.get<never, WatchlistResponse>('/v1/watchlist/', withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 获取观察列表的轻量版本（仅基础信息，不做重计算，支持分页）
+  getLight: (page: number = 1, pageSize: number = 50, options?: RequestOptions) =>
+    api.get<never, WatchlistLightResponse>('/v1/watchlist/light', {
+      ...withRequestOptions(options, TIMEOUTS.short),
+      params: { page, page_size: pageSize },
+    }),
+
+  // 获取单个观察项的完整详情（分析结果、支撑阻力、止盈止损计划）
+  getDetail: (id: number, options?: RequestOptions) =>
+    api.get<never, WatchlistDetailResponse>(`/v1/watchlist/${id}/detail`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 轻量查询：某只股票是否在观察列表中
+  checkStatus: (code: string, options?: RequestOptions) =>
+    api.get<never, { in_watchlist: boolean }>(`/v1/watchlist/check/${code}`, withRequestOptions(options, TIMEOUTS.short)),
 
   // 添加到观察列表
   add: (code: string, reason?: string, priority: number = 0, entry_price?: number, position_ratio?: number, entry_date?: string | null) =>

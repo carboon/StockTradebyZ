@@ -1041,7 +1041,7 @@ async def start_recent_120_rebuild(
 
 
 @router.get("/data-integrity/recent-120")
-async def check_recent_120_integrity(
+def check_recent_120_integrity(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> dict:
@@ -1050,7 +1050,7 @@ async def check_recent_120_integrity(
 
 
 @router.post("/data-integrity/revalidate-date")
-async def revalidate_trade_date(
+def revalidate_trade_date(
     trade_date: str = Query(..., description="交易日 YYYY-MM-DD"),
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
@@ -1064,7 +1064,7 @@ async def revalidate_trade_date(
 
 
 @router.get("/incremental-status")
-async def get_incremental_status(
+def get_incremental_status(
     db: Session = Depends(get_db),
     _rate_limit: None = Depends(status_api_rate_limit),
     user=Depends(require_user)
@@ -1274,7 +1274,7 @@ async def get_task_overview(db: Session = Depends(get_db), admin=Depends(get_adm
 
 
 @router.get("/running", response_model=TaskRunningResponse)
-async def get_running_tasks(
+def get_running_tasks(
     _rate_limit: None = Depends(status_api_rate_limit),
     db: Session = Depends(get_db),
     user=Depends(require_user)
@@ -1427,7 +1427,7 @@ async def get_task_diagnostics(
 
 
 @router.get("/", response_model=TaskListResponse)
-async def get_tasks(
+def get_tasks(
     status: Optional[str] = None,
     limit: int = 20,
     db: Session = Depends(get_db),
@@ -1456,7 +1456,7 @@ async def get_tasks(
 
 
 @router.get("/{task_id}/logs", response_model=TaskLogListResponse)
-async def get_task_logs(task_id: int, limit: int = 300, db: Session = Depends(get_db), user=Depends(require_user)) -> TaskLogListResponse:
+def get_task_logs(task_id: int, limit: int = 300, db: Session = Depends(get_db), user=Depends(require_user)) -> TaskLogListResponse:
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -1476,7 +1476,7 @@ async def get_task_logs(task_id: int, limit: int = 300, db: Session = Depends(ge
 
 
 @router.get("/{task_id}", response_model=TaskItem)
-async def get_task(task_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> TaskItem:
+def get_task(task_id: int, db: Session = Depends(get_db), user=Depends(require_user)) -> TaskItem:
     """获取任务详情"""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -1518,7 +1518,7 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db), admin=Depends
 
 
 @router.get("/{task_id}/resume-info")
-async def get_task_resume_info(
+def get_task_resume_info(
     task_id: int,
     db: Session = Depends(get_db),
     user=Depends(require_user)
@@ -1603,7 +1603,7 @@ async def resume_task(
 
 
 @router.delete("/clear")
-async def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
+def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """清空历史任务"""
     try:
         # 删除所有已完成的任务
@@ -1626,7 +1626,7 @@ async def clear_tasks(db: Session = Depends(get_db), admin=Depends(get_admin_use
 # ==================== 阶段3：区间增量更新 API ====================
 
 @router.get("/incremental/fill-status")
-async def get_incremental_fill_status(
+def get_incremental_fill_status(
     _rate_limit: None = Depends(status_api_rate_limit),
     user=Depends(require_user)
 ) -> dict:
@@ -1641,7 +1641,7 @@ async def get_incremental_fill_status(
 
 
 @router.post("/incremental/detect-gap")
-async def detect_data_gap(
+def detect_data_gap(
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user)
 ) -> dict:
@@ -1668,7 +1668,7 @@ async def detect_data_gap(
 
 
 @router.post("/incremental/fill-kline")
-async def fill_kline_gap(
+def fill_kline_gap(
     target_date: Optional[str] = None,
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user)
@@ -1709,7 +1709,7 @@ async def fill_kline_gap(
 
 
 @router.post("/incremental/fill-tomorrow-star")
-async def fill_tomorrow_star_gap(
+def fill_tomorrow_star_gap(
     target_date: Optional[str] = None,
     reviewer: str = "quant",
     db: Session = Depends(get_db),
@@ -1752,7 +1752,7 @@ async def fill_tomorrow_star_gap(
 
 
 @router.post("/incremental/fill-top5-diagnosis")
-async def fill_top5_diagnosis_gap(
+def fill_top5_diagnosis_gap(
     target_date: Optional[str] = None,
     reviewer: str = "quant",
     db: Session = Depends(get_db),
@@ -1796,7 +1796,7 @@ async def fill_top5_diagnosis_gap(
 
 
 @router.post("/incremental/fill-all")
-async def fill_all_gaps(
+def fill_all_gaps(
     target_date: Optional[str] = None,
     reviewer: str = "quant",
     db: Session = Depends(get_db),
@@ -1912,7 +1912,7 @@ async def refresh_admin_summary(
 # ==================== 阶段6：历史回溯相关 API ====================
 
 @router.get("/history-backfill/status/{code}")
-async def get_history_backfill_status(
+def get_history_backfill_status(
     code: str,
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
@@ -2019,7 +2019,7 @@ async def incremental_history_backfill(
 
 
 @router.get("/history-backfill/batch-status")
-async def get_batch_backfill_status(
+def get_batch_backfill_status(
     codes: str = Query(default="", description="股票代码列表，逗号分隔"),
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),

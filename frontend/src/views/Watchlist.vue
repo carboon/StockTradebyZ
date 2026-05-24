@@ -598,7 +598,7 @@ import { apiWatchlist, apiStock, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
 import { useAuthStore } from '@/store/auth'
-import type { ExitPlan, KLineData, WatchlistItem, WatchlistAnalysis } from '@/types'
+import type { ExitPlan, KLineData, WatchlistItem, WatchlistAnalysis, WatchlistLightItem } from '@/types'
 import type { ECharts } from 'echarts/core'
 import { buildKLineChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
 
@@ -615,8 +615,6 @@ const { isMobile } = useResponsive()
 const authStore = useAuthStore()
 const WATCHLIST_STATE_KEY_PREFIX = 'stocktrade:watchlist:state'
 const WATCHLIST_CACHE_TTL_MS = 5 * 60 * 1000
-const WATCHLIST_CHART_CACHE_KEY_PREFIX = 'stocktrade:watchlist:chart-cache:v2'
-const WATCHLIST_CHART_CACHE_TTL_MS = 30 * 60 * 1000
 const INITIAL_CHART_DAYS = 60
 const FULL_CHART_DAYS = 120
 const chartDayOptions = [30, 60, 120] as const
@@ -629,27 +627,11 @@ type WatchlistTrendState = {
 
 type WatchlistViewState = {
   selectedStockId: number | null
-  watchlist: WatchlistItem[]
-  analysisHistory: WatchlistAnalysis[]
-  trendData: WatchlistTrendState
   cachedAt: number
 }
-
-type WatchlistChartCacheEntry = {
-  code: string
-  days: number
-  cachedAt: number
-  data: KLineData
-}
-
-type WatchlistChartCacheMap = Record<string, WatchlistChartCacheEntry>
 
 function getWatchlistStateKey() {
   return `${WATCHLIST_STATE_KEY_PREFIX}:${authStore.user?.id || 'guest'}`
-}
-
-function getWatchlistChartCacheKey() {
-  return `${WATCHLIST_CHART_CACHE_KEY_PREFIX}:${authStore.user?.id || 'guest'}`
 }
 
 const watchlist = ref<WatchlistItem[]>([])
@@ -667,8 +649,10 @@ const watchlistChartDays = ref(120)
 const chartDataCache = new Map<string, KLineData>()
 const chartDataDaysCache = new Map<string, number>()
 const analysisCache = new Map<number, WatchlistAnalysis[]>()
+const detailCache = new Map<number, WatchlistItem>()
 const loadingChart = ref(false)
 const loadingAnalysis = ref(false)
+const loadingDetail = ref(false)
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: ECharts | null = null
@@ -767,16 +751,17 @@ function resetWatchlistViewState(options?: { clearStorageForUserId?: number | nu
   chartDataCache.clear()
   chartDataDaysCache.clear()
   analysisCache.clear()
+  detailCache.clear()
   isLoading.value = false
   isDataReady.value = false
   isHydratedFromCache.value = false
   isRefreshingList.value = false
   loadingChart.value = false
   loadingAnalysis.value = false
+  loadingDetail.value = false
   analyzing.value = false
   if (options && Object.prototype.hasOwnProperty.call(options, 'clearStorageForUserId')) {
     clearWatchlistState(options.clearStorageForUserId)
-    clearChartCache(options.clearStorageForUserId)
   }
 }
 
@@ -787,12 +772,22 @@ onMounted(async () => {
 })
 
 onActivated(async () => {
-  chartInstance?.resize()
-
   // 确保数据已加载，然后再恢复选中状态
   await ensureDataLoaded(!isHydratedFromCache.value)
   if (!selectedStock.value && watchlist.value.length > 0) {
     await restoreSelectedStock()
+  }
+
+  // 图表在 deactivated 时已被 dispose，需要按需重建
+  if (selectedStock.value && chartDataCache.has(selectedStock.value.code)) {
+    await nextTick()
+    if (chartRef.value) {
+      const data = chartDataCache.get(selectedStock.value.code)!
+      const displayData = getWatchlistDisplayChartData(data, watchlistChartDays.value)
+      await renderChart(displayData)
+    }
+  } else if (chartInstance) {
+    chartInstance.resize()
   }
 })
 
@@ -803,6 +798,11 @@ onDeactivated(() => {
   loadingAnalysis.value = false
   isLoading.value = false
   loadPromise = null
+  // 释放图表实例，避免缓存页面持有大量 ECharts 资源
+  if (chartInstance) {
+    chartInstance.dispose()
+    chartInstance = null
+  }
 })
 
 onUnmounted(() => {
@@ -864,10 +864,13 @@ async function ensureDataLoaded(forceRefresh: boolean = false) {
 async function loadWatchlist() {
   const signal = beginRequest('watchlist')
   try {
-    const data = await apiWatchlist.getAll({ signal })
+    // 使用轻量接口快速获取列表（不做分析重计算）
+    const data = await apiWatchlist.getLight(1, 200, { signal })
     const previousState = loadWatchlistState()
     const previousSelectedId = selectedStock.value?.id || previousState?.selectedStockId || null
-    watchlist.value = data.items || []
+
+    // 将轻量列表转换为 WatchlistItem 格式（不含 analysis/derived）
+    watchlist.value = (data.items || []).map(lightToItem)
     if (!watchlist.value.length) {
       selectedStock.value = null
       analysisHistory.value = []
@@ -906,18 +909,93 @@ async function loadWatchlist() {
   }
 }
 
+function lightToItem(light: WatchlistLightItem): WatchlistItem {
+  return {
+    id: light.id,
+    code: light.code,
+    name: light.name,
+    add_reason: light.add_reason,
+    entry_price: light.entry_price,
+    entry_date: light.entry_date,
+    position_ratio: light.position_ratio,
+    priority: light.priority,
+    is_active: light.is_active,
+    added_at: light.added_at,
+    analysis: null,
+    derived: null,
+  }
+}
+
+async function loadDetail(id: number) {
+  const signal = beginRequest('detail')
+  loadingDetail.value = true
+  try {
+    // 先检查缓存
+    if (detailCache.has(id)) {
+      const cached = detailCache.get(id)!
+      if (selectedStock.value?.id === id) {
+        selectedStock.value = cached
+      }
+      // 更新列表中的对应项
+      const idx = watchlist.value.findIndex((item) => item.id === id)
+      if (idx >= 0) {
+        watchlist.value[idx] = cached
+      }
+      loadingDetail.value = false
+      return
+    }
+
+    const detail = await apiWatchlist.getDetail(id, { signal })
+    const item: WatchlistItem = {
+      id: detail.id,
+      code: detail.code,
+      name: detail.name,
+      add_reason: detail.add_reason,
+      entry_price: detail.entry_price,
+      entry_date: detail.entry_date,
+      position_ratio: detail.position_ratio,
+      priority: detail.priority,
+      is_active: detail.is_active,
+      added_at: detail.added_at,
+      analysis: detail.analysis ?? null,
+      derived: detail.derived ?? null,
+    }
+
+    detailCache.set(id, item)
+
+    // 更新选中状态和列表
+    if (selectedStock.value?.id === id) {
+      selectedStock.value = item
+    }
+    const idx = watchlist.value.findIndex((w) => w.id === id)
+    if (idx >= 0) {
+      watchlist.value[idx] = item
+    }
+
+    persistWatchlistState()
+  } catch (error: any) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to load detail:', error)
+  } finally {
+    finishRequest('detail', signal)
+    loadingDetail.value = false
+  }
+}
+
 async function selectStock(row: WatchlistItem) {
   const requestId = ++selectionSequence
   cancelRequest('chart')
   cancelRequest('chartExtended')
   cancelRequest('analysis')
   cancelRequest('watchlistAnalyze')
+  cancelRequest('detail')
   selectedStock.value = row
   resetHistoryPagination()
   persistWatchlistState()
 
-  // 并行加载K线和分析数据
+  // 并行加载：详情（分析结果+支撑阻力+止盈止损）、K线、分析历史
   await Promise.all([
+    loadDetail(row.id),
     loadChart(row.code),
     loadAnalysis(row.id)
   ])
@@ -976,20 +1054,14 @@ async function loadChart(code: string) {
     let usedCachedData = Boolean(data)
 
     if (!data) {
-      const persistent = loadChartCache(code)
-      if (persistent) {
-        data = persistent.data
-        cachedDays = persistent.days
-        usedCachedData = true
-        chartDataCache.set(code, persistent.data)
-        chartDataDaysCache.set(code, persistent.days)
-      }
+      // No in-memory cache — fetch from API
     }
 
     if (!data) {
       data = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal, compact: true })
       cachedDays = INITIAL_CHART_DAYS
-      setChartCache(code, data, INITIAL_CHART_DAYS)
+      chartDataCache.set(code, data)
+      chartDataDaysCache.set(code, INITIAL_CHART_DAYS)
     }
 
     const displayData = getWatchlistDisplayChartData(data, requestedDays)
@@ -1022,7 +1094,8 @@ async function refreshInitialChartInBackground(code: string) {
     const latestData = await apiStock.getKline(code, INITIAL_CHART_DAYS, false, { signal, timeoutMs: 20000, compact: true })
     if (selectedStock.value?.code !== code) return
 
-    setChartCache(code, latestData, INITIAL_CHART_DAYS)
+    chartDataCache.set(code, latestData)
+    chartDataDaysCache.set(code, INITIAL_CHART_DAYS)
 
     if (watchlistChartDays.value > INITIAL_CHART_DAYS) {
       return
@@ -1052,7 +1125,8 @@ async function refreshFullChartInBackground(code: string, requestedDays: number)
     const fullData = await apiStock.getKline(code, FULL_CHART_DAYS, false, { signal, timeoutMs: 20000, compact: true })
     if (selectedStock.value?.code !== code || watchlistChartDays.value !== requestedDays) return
 
-    setChartCache(code, fullData, FULL_CHART_DAYS)
+    chartDataCache.set(code, fullData)
+    chartDataDaysCache.set(code, FULL_CHART_DAYS)
     const displayData = getWatchlistDisplayChartData(fullData, requestedDays)
     await renderChart(displayData)
     updateTrendDataFromChart(displayData)
@@ -1174,6 +1248,7 @@ async function saveEdit() {
       // 如果填写了持仓信息，自动触发分析
       if (hasNewData) {
         // 清除缓存
+        detailCache.delete(editForm.value.id)
         analysisCache.delete(editForm.value.id)
         await analyzeNow()
       }
@@ -1189,6 +1264,7 @@ async function removeStock(row: WatchlistItem) {
   try {
     await apiWatchlist.delete(row.id)
     // 清除缓存
+    detailCache.delete(row.id)
     analysisCache.delete(row.id)
     await loadWatchlist()
     if (selectedStock.value?.id === row.id) {
@@ -1210,6 +1286,7 @@ async function analyzeNow() {
   try {
     await apiWatchlist.analyze(selectedStock.value.id, { signal })
     // 清除缓存
+    detailCache.delete(selectedStock.value.id)
     analysisCache.delete(selectedStock.value.id)
     await loadAnalysis(selectedStock.value.id)
     persistWatchlistState()
@@ -1534,8 +1611,6 @@ async function restoreSelectedStock() {
     if (!target) return
 
     selectedStock.value = target
-    trendData.value = state.trendData || trendData.value
-    analysisHistory.value = state.analysisHistory || []
     await nextTick()
     queueDetailRefresh(target)
   } catch {
@@ -1546,11 +1621,9 @@ async function restoreSelectedStock() {
 function persistWatchlistState() {
   if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
 
+  // Only persist lightweight selection state — heavy data is fetched via API
   const state: WatchlistViewState = {
     selectedStockId: selectedStock.value?.id || null,
-    watchlist: watchlist.value,
-    analysisHistory: analysisHistory.value,
-    trendData: trendData.value,
     cachedAt: Date.now(),
   }
 
@@ -1561,14 +1634,10 @@ function hydrateWatchlistState() {
   const state = loadWatchlistState()
   if (!state) return
 
-  watchlist.value = state.watchlist || []
-  analysisHistory.value = state.analysisHistory || []
-  trendData.value = state.trendData || trendData.value
-  isDataReady.value = watchlist.value.length > 0
-  isHydratedFromCache.value = watchlist.value.length > 0
-
+  // Only restore the selected stock ID — data arrays are fetched via API
   if (state.selectedStockId) {
-    selectedStock.value = watchlist.value.find((item) => item.id === state.selectedStockId) || null
+    // We don't have the watchlist data yet, so we can't resolve the stock here.
+    // restoreSelectedStock() will handle this after data is loaded.
   }
 }
 
@@ -1597,63 +1666,10 @@ function clearWatchlistState(userIdToClear?: number | null) {
   window.localStorage.removeItem(key)
 }
 
-function clearChartCache(userIdToClear?: number | null) {
-  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
-  const key = userIdToClear != null ? `${WATCHLIST_CHART_CACHE_KEY_PREFIX}:${userIdToClear}` : getWatchlistChartCacheKey()
-  window.localStorage.removeItem(key)
-}
-
-function loadChartCache(code: string): WatchlistChartCacheEntry | null {
-  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return null
-  const raw = window.localStorage.getItem(getWatchlistChartCacheKey())
-  if (!raw) return null
-
-  try {
-    const cache = JSON.parse(raw) as WatchlistChartCacheMap
-    const entry = cache[code]
-    if (!entry) return null
-    if (!entry.cachedAt || Date.now() - entry.cachedAt > WATCHLIST_CHART_CACHE_TTL_MS) {
-      delete cache[code]
-      window.localStorage.setItem(getWatchlistChartCacheKey(), JSON.stringify(cache))
-      return null
-    }
-    return entry
-  } catch {
-    window.localStorage.removeItem(getWatchlistChartCacheKey())
-    return null
-  }
-}
-
-function setChartCache(code: string, data: KLineData, days: number) {
-  chartDataCache.set(code, data)
-  chartDataDaysCache.set(code, days)
-
-  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return
-
-  const nextEntry: WatchlistChartCacheEntry = {
-    code,
-    days,
-    cachedAt: Date.now(),
-    data,
-  }
-
-  let cache: WatchlistChartCacheMap = {}
-  try {
-    cache = JSON.parse(window.localStorage.getItem(getWatchlistChartCacheKey()) || '{}') as WatchlistChartCacheMap
-  } catch {
-    cache = {}
-  }
-
-  cache[code] = nextEntry
-  const trimmedEntries = Object.values(cache)
-    .sort((a, b) => b.cachedAt - a.cachedAt)
-    .slice(0, 12)
-  const trimmedCache = Object.fromEntries(trimmedEntries.map((entry) => [entry.code, entry]))
-  window.localStorage.setItem(getWatchlistChartCacheKey(), JSON.stringify(trimmedCache))
-}
-
 function queueDetailRefresh(target: WatchlistItem) {
   void nextTick(() => {
+    // 加载详情（分析结果+支撑阻力+止盈止损）
+    void loadDetail(target.id)
     void loadChart(target.code)
     if (analysisHistory.value.length === 0) {
       void loadAnalysis(target.id)

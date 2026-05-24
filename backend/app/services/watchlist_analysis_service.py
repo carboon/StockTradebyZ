@@ -194,6 +194,212 @@ class WatchlistAnalysisService:
         self.db = db
         self.exit_plan_service = ExitPlanService()
 
+    def get_watchlist_light(
+        self,
+        user_id: int,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        """
+        获取用户观察列表的轻量版本（仅基础信息，不做重计算）。
+
+        Args:
+            user_id: 用户ID
+            page: 页码（从1开始）
+            page_size: 每页数量
+
+        Returns:
+            {"items": [...], "total": int, "page": int, "page_size": int}
+        """
+        base_query = (
+            self.db.query(Watchlist, Stock)
+            .outerjoin(Stock, Watchlist.code == Stock.code)
+            .filter(Watchlist.user_id == user_id, Watchlist.is_active == True)
+        )
+
+        total = base_query.count()
+
+        items_query = (
+            base_query
+            .order_by(Watchlist.priority.desc(), Watchlist.added_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+
+        items = []
+        for w, stock in items_query.all():
+            items.append({
+                "id": w.id,
+                "code": w.code,
+                "name": stock.name if stock else None,
+                "add_reason": w.add_reason,
+                "entry_price": w.entry_price,
+                "entry_date": w.entry_date,
+                "position_ratio": w.position_ratio,
+                "priority": w.priority,
+                "is_active": w.is_active,
+                "added_at": w.added_at,
+            })
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def get_watchlist_item_detail(
+        self,
+        user_id: int,
+        item_id: int,
+        trade_date: Optional[date_class] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        获取单个观察项的完整详情（包含分析结果、支撑阻力、止盈止损计划）。
+
+        Args:
+            user_id: 用户ID
+            item_id: 观察项ID
+            trade_date: 指定交易日
+
+        Returns:
+            完整的观察项数据，如果不存在返回 None
+        """
+        w = (
+            self.db.query(Watchlist)
+            .filter(Watchlist.id == item_id, Watchlist.user_id == user_id, Watchlist.is_active == True)
+            .first()
+        )
+        if not w:
+            return None
+
+        stock = self.db.query(Stock).filter(Stock.code == w.code).first()
+
+        item = {
+            "id": w.id,
+            "code": w.code,
+            "name": stock.name if stock else None,
+            "add_reason": w.add_reason,
+            "entry_price": w.entry_price,
+            "entry_date": w.entry_date,
+            "position_ratio": w.position_ratio,
+            "priority": w.priority,
+            "is_active": w.is_active,
+            "added_at": w.added_at,
+        }
+
+        # 加载分析结果
+        analysis_map = self._load_analysis_map([w.code], trade_date)
+        levels_map = self._load_support_resistance_map([w.code])
+        analysis = analysis_map.get(w.code)
+
+        if analysis:
+            current_price = analysis.close_price
+            entry_price = w.entry_price
+            position_ratio = w.position_ratio
+
+            pnl = None
+            if entry_price and current_price:
+                pnl = current_price / entry_price - 1.0
+
+            item["analysis"] = {
+                "trade_date": analysis.trade_date.isoformat() if analysis.trade_date else None,
+                "close_price": analysis.close_price,
+                "verdict": analysis.verdict,
+                "score": analysis.score,
+                "signal_type": analysis.signal_type,
+                "b1_passed": analysis.b1_passed,
+                "kdj_j": analysis.kdj_j,
+                "zx_long_pos": analysis.zx_long_pos,
+                "weekly_ma_aligned": analysis.weekly_ma_aligned,
+                "volume_healthy": analysis.volume_healthy,
+            }
+
+            support_level, resistance_level = levels_map.get(w.code, (None, None))
+            history_df = self._load_exit_history_frame(w.code, end_date=analysis.trade_date)
+            entry_date = _resolve_watchlist_entry_date(w)
+            exit_plan = self.exit_plan_service.build_exit_plan(
+                code=w.code,
+                history_df=history_df,
+                entry_price=entry_price,
+                current_price=current_price,
+                entry_date=entry_date,
+                verdict=analysis.verdict,
+                signal_type=analysis.signal_type,
+            )
+
+            item["derived"] = {
+                "pnl": pnl,
+                "trend_outlook": _build_trend_outlook(
+                    analysis.verdict, analysis.signal_type, analysis.score
+                ),
+                "buy_action": _build_buy_action(
+                    analysis.verdict, analysis.signal_type, analysis.score
+                ),
+                "hold_action": _build_hold_action(
+                    analysis.verdict,
+                    analysis.signal_type,
+                    analysis.score,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                ),
+                "risk_level": _build_risk_level(
+                    analysis.verdict,
+                    analysis.signal_type,
+                    analysis.score,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    position_ratio=position_ratio,
+                ),
+                "recommendation": _build_recommendation(
+                    analysis.verdict,
+                    analysis.signal_type,
+                    analysis.score,
+                    current_price=current_price,
+                    entry_price=entry_price,
+                    position_ratio=position_ratio,
+                ),
+                "support_level": support_level,
+                "resistance_level": resistance_level,
+                "exit_plan": exit_plan,
+            }
+        else:
+            history_df = self._load_exit_history_frame(w.code, end_date=trade_date)
+            current_price = self._latest_close(history_df)
+            entry_price = w.entry_price
+            position_ratio = w.position_ratio
+            pnl = current_price / entry_price - 1.0 if entry_price and current_price else None
+            support_level, resistance_level = levels_map.get(w.code, (None, None))
+            exit_plan = self.exit_plan_service.build_exit_plan(
+                code=w.code,
+                history_df=history_df,
+                entry_price=entry_price,
+                current_price=current_price,
+                entry_date=_resolve_watchlist_entry_date(w),
+            )
+
+            item["analysis"] = None
+            item["derived"] = {
+                "pnl": pnl,
+                "trend_outlook": "neutral",
+                "buy_action": "wait",
+                "hold_action": "hold_cautious",
+                "risk_level": _build_risk_level(
+                    None,
+                    None,
+                    None,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    position_ratio=position_ratio,
+                ),
+                "recommendation": "暂无最新分析结果，先按成本价、最近K线和结构线管理持仓。",
+                "support_level": support_level,
+                "resistance_level": resistance_level,
+                "exit_plan": exit_plan,
+            }
+
+        return item
+
     def get_watchlist_with_analysis(
         self,
         user_id: int,

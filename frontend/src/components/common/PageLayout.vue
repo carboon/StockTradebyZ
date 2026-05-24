@@ -268,7 +268,7 @@
         <router-view v-slot="{ Component, route: currentRoute }">
           <div class="page-shell">
             <template v-if="currentRoute.meta.keepAlive">
-              <KeepAlive>
+              <KeepAlive :max="3">
                 <component :is="Component" />
               </KeepAlive>
             </template>
@@ -302,6 +302,14 @@ import {
   resolveSectorAnalysisCatalog,
 } from '@/utils/sectorAnalysis'
 import { useResponsive } from '@/composables/useResponsive'
+import {
+  registerPoll,
+  startPoll,
+  stopPoll,
+  unregisterPoll,
+  setActivePage,
+  updatePollInterval,
+} from '@/composables/usePollingManager'
 
 const SECTOR_ANALYSIS_MENU_GROUP_INDEX = 'sector-analysis-group'
 
@@ -330,8 +338,10 @@ const drawerVisible = ref(false)
 const refreshing = ref(false)
 const activeTasks = ref<Task[]>([])
 const incrementalStatus = ref<IncrementalUpdateStatus | null>(null)
-let progressPoller: ReturnType<typeof setInterval> | null = null
-let progressPollIntervalMs = 30000
+/** 全局任务状态轮询的 key */
+const TASK_STATUS_POLL_KEY = 'global:taskStatus'
+/** 当前轮询间隔（用于动态调整） */
+let taskStatusPollIntervalMs = 30000
 
 const sidebarWidth = computed(() => isCollapsed.value ? '64px' : '200px')
 const sectorCatalog = computed(() => resolveSectorAnalysisCatalog(configStore.configs.sector_analysis_catalog))
@@ -646,13 +656,13 @@ async function refreshHeaderProgress() {
     incrementalStatus.value = incrementalResp
     // 在任务中心页面使用高频轮询，其他页面使用低频轮询
     if (isUpdateRoute.value) {
-      progressPollIntervalMs = activeTasks.value.length > 0 || incrementalStatus.value?.running ? 5000 : 30000
+      taskStatusPollIntervalMs = activeTasks.value.length > 0 || incrementalStatus.value?.running ? 5000 : 30000
     } else {
       // 非任务中心页面：有任务时30秒，无任务时停止轮询
-      progressPollIntervalMs = (activeTasks.value.length > 0 || incrementalStatus.value?.running) ? 30000 : 0
+      taskStatusPollIntervalMs = (activeTasks.value.length > 0 || incrementalStatus.value?.running) ? 30000 : 0
     }
   } catch {
-    progressPollIntervalMs = Math.min(progressPollIntervalMs * 2, 120000)
+    taskStatusPollIntervalMs = Math.min(taskStatusPollIntervalMs * 2, 120000)
   }
 }
 
@@ -668,51 +678,47 @@ function shouldPollHeaderProgress() {
   return false // 没有任务时不轮询
 }
 
-function stopPoller() {
-  if (progressPoller) {
-    clearInterval(progressPoller)
-    progressPoller = null
+/** 根据当前状态决定是否启动/更新/停止全局轮询 */
+function syncGlobalPoller() {
+  if (!shouldPollHeaderProgress() || taskStatusPollIntervalMs <= 0) {
+    stopPoll(TASK_STATUS_POLL_KEY)
+    return
   }
-}
-
-// 根据是否有运行中的任务动态调整轮询间隔
-function startPoller() {
-  stopPoller()
-  if (!shouldPollHeaderProgress()) return
-  // 如果间隔为0，不启动轮询
-  if (progressPollIntervalMs <= 0) return
-  progressPoller = setInterval(() => {
-    void refreshHeaderProgress()
-  }, progressPollIntervalMs)
+  // 动态更新轮询间隔
+  updatePollInterval(TASK_STATUS_POLL_KEY, taskStatusPollIntervalMs)
+  startPoll(TASK_STATUS_POLL_KEY)
 }
 
 onMounted(() => {
+  // 注册全局任务轮询
+  registerPoll(TASK_STATUS_POLL_KEY, refreshHeaderProgress, taskStatusPollIntervalMs, { immediateFirstRun: false })
+
   // 只在已登录时启动轮询
   if (authStore.isAuthenticated) {
     if (authStore.isAdmin) {
       void configStore.loadConfigs().catch(() => undefined)
     }
     void refreshHeaderProgress()
-    startPoller()
+    syncGlobalPoller()
   }
 })
 
 onUnmounted(() => {
-  stopPoller()
+  unregisterPoll(TASK_STATUS_POLL_KEY)
 })
 
 // 监听登录状态变化
 watch(() => authStore.isAuthenticated, (isLoggedIn) => {
-  if (isLoggedIn && !progressPoller) {
+  if (isLoggedIn) {
     // 用户刚登录，启动轮询
     if (authStore.isAdmin) {
       void configStore.loadConfigs().catch(() => undefined)
     }
     void refreshHeaderProgress()
-    startPoller()
-  } else if (!isLoggedIn && progressPoller) {
+    syncGlobalPoller()
+  } else {
     // 用户已登出，停止轮询并清除数据
-    stopPoller()
+    stopPoll(TASK_STATUS_POLL_KEY)
     activeTasks.value = []
     incrementalStatus.value = null
   }
@@ -720,7 +726,7 @@ watch(() => authStore.isAuthenticated, (isLoggedIn) => {
 
 watch([() => activeTasks.value.length, () => incrementalStatus.value?.running, isUpdateRoute], () => {
   if (authStore.isAuthenticated) {
-    startPoller()
+    syncGlobalPoller()
   }
 })
 
@@ -743,8 +749,20 @@ watch(isTablet, (tablet) => {
   }
 }, { immediate: true })
 
-watch(() => route.path, () => {
+watch(() => route.path, (path) => {
   drawerVisible.value = false
+  // 通知轮询管理器当前活跃页面
+  if (path.startsWith('/tomorrow-star')) {
+    setActivePage('tomorrow-star')
+  } else if (path.startsWith('/diagnosis')) {
+    setActivePage('diagnosis')
+  } else if (path.startsWith('/update')) {
+    setActivePage('update')
+  } else if (path.startsWith('/sector-analysis')) {
+    setActivePage('sector-analysis')
+  } else if (path.startsWith('/watchlist')) {
+    setActivePage('watchlist')
+  }
 })
 </script>
 

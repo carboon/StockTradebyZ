@@ -692,6 +692,15 @@ export interface AnalysisResultsResponse {
   min_score_threshold: number
 }
 
+export interface TomorrowStarAggregateResponse {
+  dates: string[]
+  history: TomorrowStarHistoryItem[]
+  window_status?: TomorrowStarWindowStatusResponse | null
+  candidates: CandidatesResponse | null
+  results: AnalysisResultsResponse | null
+  freshness: FreshnessResponse | null
+}
+
 export interface CurrentHotAnalysisResultsResponse {
   pick_date?: string | null
   results: CurrentHotAnalysisResult[]
@@ -799,6 +808,47 @@ export interface CurrentHotSectorAnalysisResponse {
   top_sector_keys: string[]
   sectors: CurrentHotSectorSummaryItem[]
   history: CurrentHotSectorHistorySeries[]
+}
+
+/** 当前热盘聚合首屏响应 -- 一次返回全部数据 */
+export interface CurrentHotAggregateResponse {
+  // 历史摘要
+  dates: string[]
+  history: {
+    pick_date: string
+    date: string
+    candidate_count: number
+    analysis_count: number
+    trend_start_count: number
+    b1_pass_count: number
+    consecutive_candidate_count: number
+    pass_count: number
+    status: string
+    error_message?: string | null
+    is_latest: boolean
+  }[]
+  latest_date?: string | null
+  // 候选列表
+  candidates: CurrentHotCandidate[]
+  candidates_total: number
+  // 分析结果
+  results: CurrentHotAnalysisResult[]
+  results_total: number
+  min_score_threshold: number
+  // 板块分析
+  sectors: CurrentHotSectorSummaryItem[]
+  sector_top_keys: string[]
+  sector_dates: string[]
+  sector_history: CurrentHotSectorHistorySeries[]
+  sector_latest_date?: string | null
+  sector_previous_date?: string | null
+  sector_window_size: number
+  // 风险环境
+  risk_regime?: RiskRegimeSummary | null
+  // 元信息
+  pick_date?: string | null
+  generated_at?: string | null
+  cache_hit: boolean
 }
 
 export interface IntradayAnalysisStatusResponse {
@@ -932,6 +982,41 @@ export interface DiagnosisResultResponse {
 export interface WatchlistResponse {
   items: WatchlistItem[]
   total: number
+}
+
+export interface WatchlistLightItem {
+  id: number
+  code: string
+  name?: string
+  add_reason?: string
+  entry_price?: number | null
+  entry_date?: string | null
+  position_ratio?: number | null
+  priority: number
+  is_active: boolean
+  added_at: string
+}
+
+export interface WatchlistLightResponse {
+  items: WatchlistLightItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface WatchlistDetailResponse {
+  id: number
+  code: string
+  name?: string
+  add_reason?: string
+  entry_price?: number | null
+  entry_date?: string | null
+  position_ratio?: number | null
+  priority: number
+  is_active: boolean
+  added_at: string
+  analysis?: WatchlistAnalysisResult | null
+  derived?: WatchlistDerivedData | null
 }
 
 export interface WatchlistAnalysisResponse {

@@ -105,7 +105,7 @@ async def search_stocks(
 
 
 @router.get("/{code}", response_model=StockResponse)
-async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
+def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(require_user)) -> StockResponse:
     """获取股票基本信息"""
     code = code.zfill(6)
     stock = db.query(Stock).filter(Stock.code == code).first()
@@ -142,7 +142,7 @@ async def get_stock_info(code: str, db: Session = Depends(get_db), user=Depends(
 
 
 @router.post("/kline", response_model=KLineResponse)
-async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> KLineResponse:
+def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db), user=Depends(require_user)) -> KLineResponse:
     """获取 K线数据（纯数据库版本，带缓存）"""
     from app.api.cache_decorators import build_kline_cache_key
     from app.cache import cache
@@ -154,7 +154,7 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
             return JSONResponse(content=cached_result)
         return KLineResponse(**cached_result)
 
-    result = await _get_kline_data_impl(request, db)
+    result = _get_kline_data_impl(request, db)
     payload = result if request.compact else result.model_dump(mode="json")
     cache.set(cache_key, payload, ttl=300)
     if request.compact:
@@ -162,7 +162,7 @@ async def get_kline_data(request: KLineDataRequest, db: Session = Depends(get_db
     return result
 
 
-async def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineResponse:
+def _get_kline_data_impl(request: KLineDataRequest, db: Session) -> KLineResponse:
     code = request.code.zfill(6)
 
     try:

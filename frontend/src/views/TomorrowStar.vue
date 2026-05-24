@@ -1305,6 +1305,14 @@ import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/u
 import { buildSignalReturnChartOption, loadKLineChartRuntime } from '@/utils/klineChart'
 import { mapWithConcurrency } from '@/utils/limitedConcurrency'
 import { useResponsive } from '@/composables/useResponsive'
+import {
+  registerPoll,
+  startPoll,
+  stopPoll,
+  unregisterPoll,
+  activatePagePolls,
+  deactivatePagePolls,
+} from '@/composables/usePollingManager'
 
 type DataTabKey = 'tomorrow-star' | 'current-hot'
 type MiddaySourceKey = DataTabKey
@@ -1369,14 +1377,16 @@ let candidatesRequestId = 0
 let currentHotLoadDataRequestId = 0
 let currentHotCandidatesRequestId = 0
 const REFRESH_CHECK_INTERVAL_MS = 60_000
-const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v12'
+const TOMORROW_STAR_CACHE_KEY = 'stocktrade:tomorrow-star:cache:v13'
 const TOMORROW_STAR_LEGACY_CACHE_KEYS = [
+  'stocktrade:tomorrow-star:cache:v12',
   'stocktrade:tomorrow-star:cache:v11',
   'stocktrade:tomorrow-star:cache:v10',
 ]
-const INCREMENTAL_POLL_INTERVAL_MS = 2000
+const INCREMENTAL_POLL_INTERVAL_MS = 10_000
+/** 增量更新轮询的 key（属于 tomorrow-star 页面） */
+const INCREMENTAL_POLL_KEY = 'tomorrow-star:incremental'
 const HISTORY_FALLBACK_CONCURRENCY = 2
-let incrementalPollTimer: number | null = null
 const requestControllers = new Map<string, AbortController>()
 
 const loading = ref(false)
@@ -1593,7 +1603,8 @@ const activeLoadingLatest = computed(() => (isCurrentHotTab.value ? currentHotLo
 const activeCandidateLoading = computed(() => (
   isCurrentHotTab.value
     ? currentHotLoading.value || currentHotLoadingLatest.value
-    : loading.value || loadingLatest.value || checkingFreshness.value
+    // freshness 检查只做轻量后台探测，不再遮罩右侧内容
+    : loading.value || loadingLatest.value
 ))
 const activeCandidateTitle = computed(() => (
   isCurrentHotTab.value
@@ -2365,7 +2376,7 @@ async function loadCurrentHotFallbackHistory(dates: string[], signal: AbortSigna
   return rows.sort((a, b) => b.rawDate.localeCompare(a.rawDate))
 }
 
-async function loadData(skipLatestLoad: boolean = false) {
+async function loadData(_skipLatestLoad: boolean = false) {
   if (loading.value) return
 
   const requestId = ++loadDataRequestId
@@ -2374,12 +2385,12 @@ async function loadData(skipLatestLoad: boolean = false) {
   const previousViewingDate = viewingDate.value
   loading.value = true
   try {
-    const datesData = await apiAnalysis.getDates({ signal })
+    const aggData = await apiAnalysis.getAggregate({ signal })
     if (requestId !== loadDataRequestId) return
 
-    const dates = datesData.dates || []
-    const history = datesData.history || []
-    const windowStatus = datesData.window_status || null
+    const dates = aggData.dates || []
+    const history = aggData.history || []
+    const windowStatus = aggData.window_status || null
 
     if (dates.length > 0) {
       latestDate.value = formatDateString(windowStatus?.latest_date || dates[0])
@@ -2398,12 +2409,57 @@ async function loadData(skipLatestLoad: boolean = false) {
     lastRefreshCheckAt.value = Date.now()
     hydratedFromCache.value = false
 
+    // 从聚合响应中直接填充候选和分析结果
+    if (aggData.candidates && aggData.candidates.candidates && aggData.candidates.candidates.length > 0) {
+      latestCandidates.value = aggData.candidates.candidates
+      latestCandidatePage.value = 1
+      candidateSort.value = { prop: '', order: null }
+
+      if (aggData.candidates.pick_date) {
+        const newPickDate = formatDate(aggData.candidates.pick_date)
+        latestDataDate.value = newPickDate
+        viewingDate.value = newPickDate
+      } else {
+        latestDataDate.value = ''
+      }
+    } else {
+      latestCandidates.value = []
+      latestCandidatePage.value = 1
+      if (!aggData.candidates?.pick_date) {
+        latestDataDate.value = ''
+      }
+    }
+
+    if (aggData.results) {
+      latestAnalysisResults.value = aggData.results.results || []
+    } else {
+      latestAnalysisResults.value = []
+    }
+
+    // 缓存最新候选+结果
+    if (latestDataDate.value && (latestCandidates.value.length > 0 || latestAnalysisResults.value.length > 0)) {
+      candidatesCache.value.set(latestDataDate.value, {
+        candidates: latestCandidates.value,
+        results: latestAnalysisResults.value,
+        timestamp: Date.now(),
+      })
+    }
+
+    // 更新增量状态
+    if (aggData.freshness) {
+      freshnessVersion.value = aggData.freshness.freshness_version || ''
+      if (aggData.freshness.incremental_update) {
+        incrementalUpdate.value = aggData.freshness.incremental_update
+      }
+    }
+
     if (dates.length === 0) {
       selectedDate.value = null
       viewingDate.value = null
       latestCandidates.value = []
       latestAnalysisResults.value = []
       latestDataDate.value = ''
+      persistTomorrowStarCache()
       return
     }
 
@@ -2411,12 +2467,7 @@ async function loadData(skipLatestLoad: boolean = false) {
     selectedDate.value = hasPreviousSelectedDate ? previousSelectedDate : latestDate.value
 
     const hasPreviousViewingDate = !!previousViewingDate && historyData.value.some((item) => item.rawDate === previousViewingDate)
-    viewingDate.value = hasPreviousViewingDate ? previousViewingDate : latestDate.value
-
-    // 加载最新数据（右侧显示）- 根据 skipLatestLoad 参数决定是否跳过
-    if (!skipLatestLoad && requestId === loadDataRequestId) {
-      await loadLatestCandidates()
-    }
+    viewingDate.value = hasPreviousViewingDate ? previousViewingDate : (latestDataDate.value || latestDate.value)
 
     persistTomorrowStarCache()
   } catch (error: any) {
@@ -2429,78 +2480,6 @@ async function loadData(skipLatestLoad: boolean = false) {
     if (requestId === loadDataRequestId) {
       loading.value = false
     }
-  }
-}
-
-async function loadLatestCandidates() {
-  const requestId = ++candidatesRequestId
-  const signal = beginRequest('latestCandidates')
-  loadingLatest.value = true
-  try {
-    const candidatesData = await apiAnalysis.getCandidates(undefined, { signal })
-    if (requestId !== candidatesRequestId) return
-    const candidates = candidatesData.candidates || []
-    latestCandidates.value = candidates
-    latestCandidatePage.value = 1
-    candidateSort.value = { prop: '', order: null }
-
-    if (candidatesData.pick_date) {
-      const newPickDate = formatDate(candidatesData.pick_date)
-      latestDataDate.value = newPickDate
-      viewingDate.value = newPickDate
-
-      // 如果发现新的日期（与当前 latestDate 不同），刷新左侧历史列表
-      if (newPickDate && newPickDate !== latestDate.value) {
-        console.log(`检测到新日期 ${newPickDate}，刷新历史列表`)
-        // 传入 true 跳过重复的 loadLatestCandidates 调用，避免递归
-        await loadData(true)
-        if (requestId !== candidatesRequestId) return
-        // loadData 完成后，继续加载分析结果（因为上面 return 了，需要在这里加载）
-        try {
-          const resultsData = await apiAnalysis.getResults(undefined, { signal })
-          if (requestId !== candidatesRequestId) return
-          latestAnalysisResults.value = resultsData.results || []
-          // 缓存最新数据
-          candidatesCache.value.set(newPickDate, {
-            candidates,
-            results: resultsData.results || [],
-            timestamp: Date.now()
-          })
-        } catch {
-          latestAnalysisResults.value = []
-        }
-        persistTomorrowStarCache()
-        return
-      }
-    } else {
-      latestDataDate.value = ''
-    }
-
-    // 加载最新分析结果
-    try {
-      const resultsData = await apiAnalysis.getResults(undefined, { signal })
-      if (requestId !== candidatesRequestId) return
-      latestAnalysisResults.value = resultsData.results || []
-      // 缓存最新数据
-      if (latestDataDate.value) {
-        candidatesCache.value.set(latestDataDate.value, {
-          candidates,
-          results: resultsData.results || [],
-          timestamp: Date.now()
-        })
-      }
-    } catch {
-      latestAnalysisResults.value = []
-    }
-
-    persistTomorrowStarCache()
-  } catch (error) {
-    if (isRequestCanceled(error)) return
-    console.error('Failed to load latest candidates:', error)
-    ElMessage.error(getUserSafeErrorMessage(error, '加载最新候选股票失败'))
-  } finally {
-    finishRequest('latestCandidates', signal)
-    loadingLatest.value = false
   }
 }
 
@@ -3014,27 +2993,24 @@ async function checkIncrementalStatus() {
   }
 }
 
-function startIncrementalPolling() {
-  if (incrementalPollTimer) {
-    return
+async function incrementalPollCallback() {
+  await checkIncrementalStatus()
+
+  // 如果更新完成，停止轮询并刷新数据
+  if (!incrementalUpdate.value.running) {
+    stopIncrementalPolling()
+    await loadData()
   }
+}
 
-  incrementalPollTimer = window.setInterval(async () => {
-    await checkIncrementalStatus()
-
-    // 如果更新完成，停止轮询并刷新数据
-    if (!incrementalUpdate.value.running) {
-      stopIncrementalPolling()
-      await loadData()
-    }
-  }, INCREMENTAL_POLL_INTERVAL_MS)
+function startIncrementalPolling() {
+  // 注册（如果尚未注册）并启动
+  registerPoll(INCREMENTAL_POLL_KEY, incrementalPollCallback, INCREMENTAL_POLL_INTERVAL_MS)
+  startPoll(INCREMENTAL_POLL_KEY)
 }
 
 function stopIncrementalPolling() {
-  if (incrementalPollTimer) {
-    window.clearInterval(incrementalPollTimer)
-    incrementalPollTimer = null
-  }
+  stopPoll(INCREMENTAL_POLL_KEY)
 }
 
 async function ensureFreshDataAndLoad(forceReload: boolean = false) {
@@ -3055,61 +3031,52 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
 
   if (shouldSkipServerCheck) return
 
-  checkingFreshness.value = true
-  const signal = beginRequest('freshness')
-  try {
-    const freshness = await apiAnalysis.getFreshness({ signal })
-    lastRefreshCheckAt.value = Date.now()
-    const nextFreshnessVersion = freshness.freshness_version || ''
-    const freshnessChanged = freshnessVersion.value !== nextFreshnessVersion
+  // 如果有缓存数据且不是强制刷新，先做轻量级新鲜度检查
+  if (!forceReload && hasLoadedData && !missingVisibleRightPanelData) {
+    checkingFreshness.value = true
+    const signal = beginRequest('freshness')
+    try {
+      const freshness = await apiAnalysis.getFreshness({ signal })
+      lastRefreshCheckAt.value = Date.now()
+      const nextFreshnessVersion = freshness.freshness_version || ''
 
-    // 更新增量更新状态
-    if (freshness.incremental_update) {
-      incrementalUpdate.value = freshness.incremental_update
-      if (freshness.incremental_update.running) {
-        startIncrementalPolling()
+      // 更新增量更新状态
+      if (freshness.incremental_update) {
+        incrementalUpdate.value = freshness.incremental_update
+        if (freshness.incremental_update.running) {
+          startIncrementalPolling()
+        }
       }
-    }
 
-    if (
-      !forceReload
-      && hydratedFromCache.value
-      && !missingVisibleRightPanelData
-      && freshnessVersion.value
-      && nextFreshnessVersion
-      && freshnessVersion.value === nextFreshnessVersion
-    ) {
+      // 新鲜度未变且已有数据，直接返回
+      if (
+        hydratedFromCache.value
+        && freshnessVersion.value
+        && nextFreshnessVersion
+        && freshnessVersion.value === nextFreshnessVersion
+      ) {
+        checkingFreshness.value = false
+        return
+      }
+
+      freshnessVersion.value = nextFreshnessVersion
+
+      // 增量更新正在运行时不重新加载
+      if (freshness.incremental_update?.running) {
+        checkingFreshness.value = false
+        return
+      }
+    } catch (error: any) {
+      if (isRequestCanceled(error)) return
+      console.error('Failed to check freshness:', error)
+    } finally {
+      finishRequest('freshness', signal)
       checkingFreshness.value = false
-      return
     }
-
-    freshnessVersion.value = nextFreshnessVersion
-    persistTomorrowStarCache()
-
-    if (freshness.incremental_update?.running) {
-      checkingFreshness.value = false
-      return
-    }
-
-    if (
-      forceReload
-      || !hydratedFromCache.value
-      || freshnessChanged
-      || historyData.value.length === 0
-      || missingVisibleRightPanelData
-    ) {
-      await checkForRefresh(true)
-    }
-  } catch (error: any) {
-    if (isRequestCanceled(error)) return
-    console.error('Failed to ensure tomorrow-star freshness:', error)
-    if (historyData.value.length === 0) {
-      await loadData()
-    }
-  } finally {
-    finishRequest('freshness', signal)
-    checkingFreshness.value = false
   }
+
+  // 需要刷新数据 - 使用聚合接口一次加载全部
+  await loadData()
 }
 
 async function loadMiddayData(forceRefresh: boolean = false) {
@@ -3430,14 +3397,6 @@ function toFiniteNumber(value?: number | string | null): number | null {
     return Number.isFinite(parsed) ? parsed : null
   }
   return null
-}
-
-function hasCandidateMarketMetrics(candidates: Array<Candidate | CurrentHotCandidate>): boolean {
-  if (candidates.length === 0) return true
-  return candidates.some((candidate) => (
-    toFiniteNumber(candidate.turnover_rate) !== null
-    || toFiniteNumber(candidate.volume_ratio) !== null
-  ))
 }
 
 function formatDate(date: string | Date): string {
@@ -3837,24 +3796,8 @@ async function checkForRefresh(forceLoad: boolean = false) {
   const now = Date.now()
   if (!forceLoad && now - lastRefreshCheckAt.value < REFRESH_CHECK_INTERVAL_MS) return
 
-  lastRefreshCheckAt.value = now
-
-  const signal = beginRequest('datesCheck')
-  try {
-    const datesData = await apiAnalysis.getDates({ signal })
-    const dates = datesData.dates || []
-    const history = datesData.history || []
-    const nextSignature = buildHistorySignature(dates, history)
-
-    if (forceLoad || historyData.value.length === 0 || nextSignature !== lastHistorySignature.value) {
-      await loadData()
-    }
-  } catch (error) {
-    if (isRequestCanceled(error)) return
-    console.error('Failed to check tomorrow-star freshness:', error)
-  } finally {
-    finishRequest('datesCheck', signal)
-  }
+  // 直接用聚合接口刷新，避免额外的 getDates 请求
+  await loadData()
 }
 
 async function refreshStatusAndRetry() {
@@ -3871,10 +3814,9 @@ async function refreshStatusAndRetry() {
 function persistTomorrowStarCache() {
   if (typeof window === 'undefined') return
 
+  // Only persist lightweight UI filter/pagination state.
+  // Heavy data (candidates, analysisResults, historyData, etc.) is fetched via API on mount.
   const payload = {
-    historyData: historyData.value,
-    latestCandidates: latestCandidates.value,
-    latestAnalysisResults: latestAnalysisResults.value,
     selectedDate: selectedDate.value,
     viewingDate: viewingDate.value,
     latestDate: latestDate.value,
@@ -3883,11 +3825,7 @@ function persistTomorrowStarCache() {
     latestCandidatePage: latestCandidatePage.value,
     candidateSort: candidateSort.value,
     selectedTomorrowStarIndustries: selectedTomorrowStarIndustries.value,
-    lastHistorySignature: lastHistorySignature.value,
     freshnessVersion: freshnessVersion.value,
-    currentHotHistoryData: currentHotHistoryData.value,
-    currentHotLatestCandidates: currentHotLatestCandidates.value,
-    currentHotAnalysisResults: currentHotAnalysisResults.value,
     currentHotSelectedDate: currentHotSelectedDate.value,
     currentHotViewingDate: currentHotViewingDate.value,
     currentHotLatestDate: currentHotLatestDate.value,
@@ -3896,7 +3834,6 @@ function persistTomorrowStarCache() {
     currentHotCandidatePage: currentHotCandidatePage.value,
     currentHotAnalysisPage: currentHotAnalysisPage.value,
     currentHotCandidateSort: currentHotCandidateSort.value,
-    currentHotLastHistorySignature: currentHotLastHistorySignature.value,
     currentHotBoardFilter: currentHotBoardFilter.value,
     currentHotRiskFilter: currentHotRiskFilter.value,
     cachedAt: Date.now(),
@@ -3915,23 +3852,8 @@ function hydrateTomorrowStarCache() {
 
   try {
     const payload = JSON.parse(raw)
-    historyData.value = (payload.historyData || []).map((item: any) => ({
-      ...item,
-      rawDate: formatDateString(item.rawDate || item.date || ''),
-      date: formatDateString(item.rawDate || item.date || ''),
-      status: normalizeHistoryStatus(item.status),
-      b1PassCount: typeof item.b1PassCount === 'number' ? item.b1PassCount : '-',
-      consecutiveCandidateCount: typeof item.consecutiveCandidateCount === 'number' ? item.consecutiveCandidateCount : '-',
-      tomorrowStarCount: typeof item.tomorrowStarCount === 'number' ? item.tomorrowStarCount : '-',
-      analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
-      errorMessage: item.errorMessage || null,
-      isLatest: Boolean(item.isLatest),
-    }))
-    latestCandidates.value = payload.latestCandidates || []
-    if (!hasCandidateMarketMetrics(latestCandidates.value)) {
-      latestCandidates.value = []
-    }
-    latestAnalysisResults.value = payload.latestAnalysisResults || []
+
+    // Restore lightweight UI state only — heavy data is fetched via API
     selectedDate.value = payload.selectedDate || null
     viewingDate.value = payload.viewingDate || null
     latestDate.value = payload.latestDate || ''
@@ -3944,25 +3866,7 @@ function hydrateTomorrowStarCache() {
         .map((item: unknown) => String(item || '').trim())
         .filter((item: string) => item.length > 0)
       : []
-    lastHistorySignature.value = payload.lastHistorySignature || ''
     freshnessVersion.value = payload.freshnessVersion || ''
-    currentHotHistoryData.value = (payload.currentHotHistoryData || []).map((item: any) => ({
-      ...item,
-      rawDate: formatDateString(item.rawDate || item.date || ''),
-      date: formatDateString(item.rawDate || item.date || ''),
-      status: normalizeHistoryStatus(item.status),
-      b1PassCount: typeof item.b1PassCount === 'number' ? item.b1PassCount : '-',
-      consecutiveCandidateCount: typeof item.consecutiveCandidateCount === 'number' ? item.consecutiveCandidateCount : '-',
-      tomorrowStarCount: typeof item.tomorrowStarCount === 'number' ? item.tomorrowStarCount : '-',
-      analysisCount: typeof item.analysisCount === 'number' ? item.analysisCount : '-',
-      errorMessage: item.errorMessage || null,
-      isLatest: Boolean(item.isLatest),
-    }))
-    currentHotLatestCandidates.value = payload.currentHotLatestCandidates || []
-    if (!hasCandidateMarketMetrics(currentHotLatestCandidates.value)) {
-      currentHotLatestCandidates.value = []
-    }
-    currentHotAnalysisResults.value = payload.currentHotAnalysisResults || []
     currentHotSelectedDate.value = payload.currentHotSelectedDate || null
     currentHotViewingDate.value = payload.currentHotViewingDate || null
     currentHotLatestDate.value = payload.currentHotLatestDate || ''
@@ -3971,35 +3875,13 @@ function hydrateTomorrowStarCache() {
     currentHotCandidatePage.value = Math.max(1, Number(payload.currentHotCandidatePage) || 1)
     currentHotAnalysisPage.value = Math.max(1, Number(payload.currentHotAnalysisPage) || 1)
     currentHotCandidateSort.value = normalizeCandidateSortState(payload.currentHotCandidateSort)
-    currentHotLastHistorySignature.value = payload.currentHotLastHistorySignature || ''
     currentHotBoardFilter.value = payload.currentHotBoardFilter || 'all'
     currentHotRiskFilter.value = payload.currentHotRiskFilter || 'all'
 
-    // 防止旧缓存把某一天的右侧结果挂到另一日期上。
-    if (
-      viewingDate.value
-      && latestDataDate.value
-      && viewingDate.value !== latestDataDate.value
-    ) {
-      latestCandidates.value = []
-      latestAnalysisResults.value = []
-      latestCandidatePage.value = 1
-    }
-
-    if (
-      currentHotViewingDate.value
-      && currentHotLatestDataDate.value
-      && currentHotViewingDate.value !== currentHotLatestDataDate.value
-    ) {
-      currentHotLatestCandidates.value = []
-      currentHotAnalysisResults.value = []
-      currentHotCandidatePage.value = 1
-      currentHotAnalysisPage.value = 1
-    }
-
-    hydratedFromCache.value = historyData.value.length > 0 || latestCandidates.value.length > 0
-    currentHotHydratedFromCache.value = currentHotHistoryData.value.length > 0 || currentHotLatestCandidates.value.length > 0
-    currentHotLoaded.value = currentHotHydratedFromCache.value
+    // Data arrays are NOT restored from cache — they will be fetched from API
+    hydratedFromCache.value = false
+    currentHotHydratedFromCache.value = false
+    currentHotLoaded.value = false
   } catch {
     if (cacheKey) {
       sessionStorage.removeItem(cacheKey)
@@ -4050,8 +3932,18 @@ onMounted(() => {
 })
 
 onActivated(() => {
-  void refreshAfterStatusReady()
-  void checkIncrementalStatus()
+  // 通知轮询管理器本页面已激活，恢复属于本页面的轮询
+  activatePagePolls('tomorrow-star')
+
+  // 从其他页面返回时，若内存中已有主数据，则优先复用当前视图，
+  // 只做轻量状态检查，避免右侧列表反复重拉造成“又刷新了一次”的体感。
+  const hasPrimaryData = historyData.value.length > 0 || latestCandidates.value.length > 0
+  if (hasPrimaryData) {
+    void checkIncrementalStatus()
+  } else {
+    void refreshAfterStatusReady()
+    void checkIncrementalStatus()
+  }
   if (activeTab.value === 'midday-analysis' && canUseMiddayAnalysis.value) {
     void loadMiddayData(true)
   } else if (activeTab.value === 'current-hot') {
@@ -4117,7 +4009,7 @@ watch(signalReturnDialogVisible, (visible) => {
 })
 
 onDeactivated(() => {
-  stopIncrementalPolling()
+  deactivatePagePolls('tomorrow-star')
   cancelAllPageRequests()
   loading.value = false
   loadingLatest.value = false
@@ -4126,7 +4018,7 @@ onDeactivated(() => {
 })
 
 onUnmounted(() => {
-  stopIncrementalPolling()
+  unregisterPoll(INCREMENTAL_POLL_KEY)
   cancelAllPageRequests()
   window.removeEventListener('resize', handleWindowResize)
   disposeSignalReturnChart()

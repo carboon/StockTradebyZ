@@ -169,6 +169,25 @@ def _daily_b1_signal_type_migration_satisfied(inspector: Any) -> bool:
     )
 
 
+def _user_login_tracking_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_column(inspector, "users", "last_login_at")
+        and _has_column(inspector, "users", "is_online")
+        and _has_table(inspector, "user_sessions")
+        and _has_index(inspector, "user_sessions", "ix_user_sessions_user_id_login_at")
+        and _has_index(inspector, "user_sessions", "ix_user_sessions_login_at")
+    )
+
+
+def _user_session_last_activity_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_table(inspector, "user_sessions")
+        and _has_column(inspector, "user_sessions", "last_activity_at")
+        and _has_column(inspector, "user_sessions", "updated_at")
+        and _has_index(inspector, "user_sessions", "ix_user_sessions_last_activity_at")
+    )
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
@@ -183,6 +202,8 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_stock_active_pool_ranks.sql": _active_pool_rank_migration_satisfied,
     "add_watchlist_entry_date.sql": _watchlist_entry_date_migration_satisfied,
     "add_b1_signal_type.sql": _daily_b1_signal_type_migration_satisfied,
+    "add_user_login_tracking.sql": _user_login_tracking_migration_satisfied,
+    "add_user_session_last_activity.sql": _user_session_last_activity_migration_satisfied,
 }
 
 

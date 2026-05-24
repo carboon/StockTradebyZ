@@ -127,3 +127,76 @@ def test_apply_startup_sql_migrations_skips_tomorrow_star_run_meta_json_when_pre
     result = apply_startup_sql_migrations(engine, migrations_dir)
 
     assert result["skipped"] == ["tomorrow_star_run_meta_json.sql"]
+
+
+def test_apply_startup_sql_migrations_skips_user_login_tracking_when_schema_already_satisfied(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "add_user_login_tracking.sql").write_text(
+        "SELECT definitely_invalid_sql;",
+        encoding="utf-8",
+    )
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE users ("
+                "id INTEGER PRIMARY KEY, "
+                "username TEXT NOT NULL, "
+                "last_login_at TIMESTAMP NULL, "
+                "is_online BOOLEAN DEFAULT 0"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE user_sessions ("
+                "id INTEGER PRIMARY KEY, "
+                "user_id INTEGER NOT NULL, "
+                "login_at TIMESTAMP NOT NULL, "
+                "logout_at TIMESTAMP NULL, "
+                "ip_address TEXT NULL, "
+                "user_agent TEXT NULL, "
+                "created_at TIMESTAMP NULL"
+                ")"
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_user_sessions_user_id_login_at ON user_sessions (user_id, login_at)"))
+        conn.execute(text("CREATE INDEX ix_user_sessions_login_at ON user_sessions (login_at)"))
+
+    result = apply_startup_sql_migrations(engine, migrations_dir)
+
+    assert result["skipped"] == ["add_user_login_tracking.sql"]
+
+
+def test_apply_startup_sql_migrations_skips_user_session_last_activity_when_schema_already_satisfied(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "add_user_session_last_activity.sql").write_text(
+        "SELECT definitely_invalid_sql;",
+        encoding="utf-8",
+    )
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE user_sessions ("
+                "id INTEGER PRIMARY KEY, "
+                "user_id INTEGER NOT NULL, "
+                "login_at TIMESTAMP NOT NULL, "
+                "last_activity_at TIMESTAMP NOT NULL, "
+                "logout_at TIMESTAMP NULL, "
+                "ip_address TEXT NULL, "
+                "user_agent TEXT NULL, "
+                "created_at TIMESTAMP NULL, "
+                "updated_at TIMESTAMP NULL"
+                ")"
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_user_sessions_last_activity_at ON user_sessions (last_activity_at)"))
+
+    result = apply_startup_sql_migrations(engine, migrations_dir)
+
+    assert result["skipped"] == ["add_user_session_last_activity.sql"]

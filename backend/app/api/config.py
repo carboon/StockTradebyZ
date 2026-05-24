@@ -80,7 +80,7 @@ def _resolve_runtime_config_value(db: Session, key: str) -> str:
 
 
 @router.get("/", response_model=ConfigResponse)
-async def get_configs(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> ConfigResponse:
+def get_configs(db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> ConfigResponse:
     """获取所有配置"""
     # 同时从数据库和环境变量读取
     configs = {}
@@ -105,7 +105,7 @@ async def get_configs(db: Session = Depends(get_db), admin=Depends(get_admin_use
 
 
 @router.put("/", response_model=ConfigItem)
-async def update_config(config: ConfigUpdate, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> ConfigItem:
+def update_config(config: ConfigUpdate, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> ConfigItem:
     """更新配置"""
     config_key = str(config.key).strip()
     config_value = str(config.value)
@@ -134,7 +134,7 @@ async def verify_tushare(request: TushareVerifyRequest, admin=Depends(get_admin_
 
 
 @router.post("/save-env")
-async def save_env(config: dict, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
+def save_env(config: dict, db: Session = Depends(get_db), admin=Depends(get_admin_user)) -> dict:
     """保存环境变量到 .env 文件"""
     env_file = DEPLOY_ENV_FILE
     env_file.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +195,7 @@ async def save_env(config: dict, db: Session = Depends(get_db), admin=Depends(ge
 
 
 @router.get("/reload")
-async def reload_config(admin=Depends(get_admin_user)) -> dict:
+def reload_config(admin=Depends(get_admin_user)) -> dict:
     """重新加载配置"""
     get_settings.cache_clear()
     return {"status": "ok", "message": "配置已重新加载"}
