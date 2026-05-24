@@ -1280,7 +1280,8 @@ class CurrentHotService:
         pick_date: Optional[str] = None,
         limit: int = 200,
         *,
-        include_risk_regime: bool = True,
+        include_risk_regime: bool = False,
+        include_risk_flags: bool = False,
     ) -> dict[str, Any]:
         target_date = self._normalize_trade_date(pick_date) or self.get_latest_pick_date()
         if target_date is None:
@@ -1362,33 +1363,34 @@ class CurrentHotService:
 
         recent_trade_metrics = self._load_recent_trade_metrics([item["code"] for item in items], target_date)
         sector_story_context = self._build_sector_story_context(items)
-        risk_service = SpeculativeRiskService(self.db)
-        for item in items:
-            item_context = item_context_by_code.get(item["code"], {})
-            recent_metrics = recent_trade_metrics.get(item["code"], {})
-            sector_context = sector_story_context.get(item["code"], {})
-            item["risk_flag"] = risk_service.evaluate(
-                code=item["code"],
-                name=item.get("name"),
-                industry=item_context.get("industry"),
-                sector_names=item.get("sector_names") or [],
-                change_pct=item.get("change_pct"),
-                turnover_rate=item.get("turnover_rate"),
-                volume_ratio=item.get("volume_ratio"),
-                active_pool_rank=item.get("active_pool_rank"),
-                b1_passed=item.get("b1_passed"),
-                verdict=item.get("verdict"),
-                total_score=item.get("total_score"),
-                signal_type=item.get("signal_type"),
-                prefilter_passed=item_context.get("prefilter_passed"),
-                pullback_negative_flags=item_context.get("pullback_negative_flags") or [],
-                recent_limit_up_days=recent_metrics.get("recent_limit_up_days"),
-                recent_runup_pct=recent_metrics.get("recent_runup_pct"),
-                sector_breadth=sector_context.get("sector_breadth"),
-                sector_avg_change_pct=sector_context.get("sector_avg_change_pct"),
-                isolated_spike=sector_context.get("isolated_spike"),
-                sector_focus_name=sector_context.get("sector_focus_name"),
-            )
+        if include_risk_flags or include_risk_regime:
+            risk_service = SpeculativeRiskService(self.db)
+            for item in items:
+                item_context = item_context_by_code.get(item["code"], {})
+                recent_metrics = recent_trade_metrics.get(item["code"], {})
+                sector_context = sector_story_context.get(item["code"], {})
+                item["risk_flag"] = risk_service.evaluate(
+                    code=item["code"],
+                    name=item.get("name"),
+                    industry=item_context.get("industry"),
+                    sector_names=item.get("sector_names") or [],
+                    change_pct=item.get("change_pct"),
+                    turnover_rate=item.get("turnover_rate"),
+                    volume_ratio=item.get("volume_ratio"),
+                    active_pool_rank=item.get("active_pool_rank"),
+                    b1_passed=item.get("b1_passed"),
+                    verdict=item.get("verdict"),
+                    total_score=item.get("total_score"),
+                    signal_type=item.get("signal_type"),
+                    prefilter_passed=item_context.get("prefilter_passed"),
+                    pullback_negative_flags=item_context.get("pullback_negative_flags") or [],
+                    recent_limit_up_days=recent_metrics.get("recent_limit_up_days"),
+                    recent_runup_pct=recent_metrics.get("recent_runup_pct"),
+                    sector_breadth=sector_context.get("sector_breadth"),
+                    sector_avg_change_pct=sector_context.get("sector_avg_change_pct"),
+                    isolated_spike=sector_context.get("isolated_spike"),
+                    sector_focus_name=sector_context.get("sector_focus_name"),
+                )
         items.sort(
             key=lambda item: (
                 self._signal_sort_priority(item.get("signal_type")),
@@ -1411,7 +1413,8 @@ class CurrentHotService:
         self,
         pick_date: Optional[str] = None,
         *,
-        include_risk_regime: bool = True,
+        include_risk_regime: bool = False,
+        include_risk_flags: bool = False,
     ) -> dict[str, Any]:
         target_date = self._normalize_trade_date(pick_date) or self.get_latest_pick_date()
         if target_date is None:
@@ -1495,33 +1498,34 @@ class CurrentHotService:
 
         recent_trade_metrics = self._load_recent_trade_metrics([item["code"] for item in items], target_date)
         sector_story_context = self._build_sector_story_context(items)
-        risk_service = SpeculativeRiskService(self.db)
-        for item in items:
-            item_context = item_context_by_code.get(item["code"], {})
-            recent_metrics = recent_trade_metrics.get(item["code"], {})
-            sector_context = sector_story_context.get(item["code"], {})
-            item["risk_flag"] = risk_service.evaluate(
-                code=item["code"],
-                name=item.get("name"),
-                industry=item_context.get("industry"),
-                sector_names=item.get("sector_names") or [],
-                change_pct=item.get("change_pct"),
-                turnover_rate=item.get("turnover_rate"),
-                volume_ratio=item.get("volume_ratio"),
-                active_pool_rank=item.get("active_pool_rank"),
-                b1_passed=item.get("b1_passed"),
-                verdict=item.get("verdict"),
-                total_score=item.get("total_score"),
-                signal_type=item.get("signal_type"),
-                prefilter_passed=item_context.get("prefilter_passed"),
-                pullback_negative_flags=item_context.get("pullback_negative_flags") or [],
-                recent_limit_up_days=recent_metrics.get("recent_limit_up_days"),
-                recent_runup_pct=recent_metrics.get("recent_runup_pct"),
-                sector_breadth=sector_context.get("sector_breadth"),
-                sector_avg_change_pct=sector_context.get("sector_avg_change_pct"),
-                isolated_spike=sector_context.get("isolated_spike"),
-                sector_focus_name=sector_context.get("sector_focus_name"),
-            )
+        if include_risk_flags or include_risk_regime:
+            risk_service = SpeculativeRiskService(self.db)
+            for item in items:
+                item_context = item_context_by_code.get(item["code"], {})
+                recent_metrics = recent_trade_metrics.get(item["code"], {})
+                sector_context = sector_story_context.get(item["code"], {})
+                item["risk_flag"] = risk_service.evaluate(
+                    code=item["code"],
+                    name=item.get("name"),
+                    industry=item_context.get("industry"),
+                    sector_names=item.get("sector_names") or [],
+                    change_pct=item.get("change_pct"),
+                    turnover_rate=item.get("turnover_rate"),
+                    volume_ratio=item.get("volume_ratio"),
+                    active_pool_rank=item.get("active_pool_rank"),
+                    b1_passed=item.get("b1_passed"),
+                    verdict=item.get("verdict"),
+                    total_score=item.get("total_score"),
+                    signal_type=item.get("signal_type"),
+                    prefilter_passed=item_context.get("prefilter_passed"),
+                    pullback_negative_flags=item_context.get("pullback_negative_flags") or [],
+                    recent_limit_up_days=recent_metrics.get("recent_limit_up_days"),
+                    recent_runup_pct=recent_metrics.get("recent_runup_pct"),
+                    sector_breadth=sector_context.get("sector_breadth"),
+                    sector_avg_change_pct=sector_context.get("sector_avg_change_pct"),
+                    isolated_spike=sector_context.get("isolated_spike"),
+                    sector_focus_name=sector_context.get("sector_focus_name"),
+                )
         items.sort(
             key=lambda item: (
                 self._signal_sort_priority(item.get("signal_type")),
