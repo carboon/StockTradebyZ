@@ -21,6 +21,8 @@ ENV/
 htmlcov/
 
 # Frontend
+node_modules/
+.npm-cache/
 frontend/node_modules/
 frontend/dist/
 frontend/.env.local
