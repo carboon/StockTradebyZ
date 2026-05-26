@@ -67,7 +67,7 @@ class SectorAnalysisService:
         pool = self._load_pool()
         sectors = list(catalog.get("sectors") or [])
         entries_by_sector: dict[str, list[SectorPoolEntry]] = {}
-        code_to_sector_names: dict[str, set[str]] = defaultdict(set)
+        code_to_sector_names: dict[str, list[str]] = defaultdict(list)
         code_to_name: dict[str, str] = {}
 
         for sector in sectors:
@@ -93,7 +93,8 @@ class SectorAnalysisService:
                         board_group=self.current_hot_service.get_board_group(code),
                     )
                 )
-                code_to_sector_names[code].add(sector_name)
+                if sector_name not in code_to_sector_names[code]:
+                    code_to_sector_names[code].append(sector_name)
                 code_to_name.setdefault(code, stock_name)
             entries_by_sector[sector_key] = bucket_entries
 
@@ -101,13 +102,13 @@ class SectorAnalysisService:
             CurrentHotPoolEntry(
                 code=code,
                 name=code_to_name.get(code, code),
-                primary_sector=sorted(sector_names)[0],
-                sector_names=sorted(sector_names),
+                primary_sector=sector_names[0],
+                sector_names=list(sector_names),
                 board_group=self.current_hot_service.get_board_group(code),
             )
             for code, sector_names in sorted(code_to_sector_names.items())
         ]
-        return sectors, entries_by_sector, {code: sorted(names) for code, names in code_to_sector_names.items()}, unique_entries
+        return sectors, entries_by_sector, {code: list(names) for code, names in code_to_sector_names.items()}, unique_entries
 
     def _get_or_create_run(
         self,

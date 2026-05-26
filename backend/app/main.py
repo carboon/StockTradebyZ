@@ -62,7 +62,7 @@ from app.config import settings
 from sqlalchemy import text
 
 from app.database import engine, Base, get_db, SessionLocal
-from app.api import auth, config, stock, analysis, watchlist, tasks
+from app.api import analysis, auth, config, concept_memory, custom_concepts, stock, tasks, watchlist
 from app.schema_migrations import apply_startup_sql_migrations
 from app.services.auto_update_service import AutoDailyUpdateScheduler
 from app.services.online_status_service import get_online_status_service
@@ -314,6 +314,8 @@ if data_dir.exists():
 app.include_router(config.router, prefix="/api/v1/config", tags=["配置管理"])
 app.include_router(stock.router, prefix="/api/v1/stock", tags=["股票数据"])
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["分析"])
+app.include_router(custom_concepts.router, prefix="/api/v1/custom-concepts", tags=["自定义概念"])
+app.include_router(concept_memory.router, prefix="/api/v1/concept-memory", tags=["概念记忆库"])
 app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["重点观察"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["任务调度"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["认证"])

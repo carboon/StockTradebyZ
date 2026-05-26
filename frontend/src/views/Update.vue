@@ -817,7 +817,7 @@
               </div>
               <div class="detail-item">
                 <span class="detail-label">流动性池</span>
-                <span class="detail-value">Top 2000</span>
+                <span class="detail-value">Top 3000</span>
               </div>
             </div>
           </el-card>

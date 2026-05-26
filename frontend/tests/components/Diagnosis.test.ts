@@ -46,6 +46,7 @@ vi.mock('echarts/components', () => ({
   DataZoomComponent: {},
   GridComponent: {},
   LegendComponent: {},
+  MarkPointComponent: {},
   TooltipComponent: {},
 }))
 
@@ -66,7 +67,7 @@ vi.mock('@/api', () => ({
     getKline: vi.fn(),
   },
   apiWatchlist: {
-    getAll: vi.fn(),
+    checkStatus: vi.fn(),
     add: vi.fn(),
   },
   apiConfig: {
@@ -220,7 +221,7 @@ describe('Diagnosis.vue', () => {
     vi.mocked(apiStock.getKline)
       .mockResolvedValueOnce(mockKline as any)
       .mockResolvedValue(mockFullKline as any)
-    vi.mocked(apiWatchlist.getAll).mockResolvedValue({ items: [] } as any)
+    vi.mocked(apiWatchlist.checkStatus).mockResolvedValue({ in_watchlist: false } as any)
     vi.mocked(apiWatchlist.add).mockResolvedValue({} as any)
     vi.mocked(apiAnalysis.getDiagnosisHistory).mockResolvedValue({ name: '浦发银行', history: mockHistory, total: mockHistory.length } as any)
     vi.mocked(apiAnalysis.getHistoryStatus).mockResolvedValue({ generating: false, needs_refresh: false } as any)
@@ -242,6 +243,8 @@ describe('Diagnosis.vue', () => {
     const wrapper = mountComponent()
     await flushPromises()
 
+    wrapper.vm.authStore.user = { id: 1, role: 'admin' }
+    await wrapper.vm.configStore.checkTushareStatus()
     wrapper.vm.searchForm.code = '600000'
     await wrapper.vm.searchAndAnalyze()
 
@@ -259,8 +262,8 @@ describe('Diagnosis.vue', () => {
     await flushPromises()
 
     expect(apiStock.getInfo).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
-    expect(apiWatchlist.getAll).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.any(AbortSignal) }))
-    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 60, false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiWatchlist.checkStatus).toHaveBeenCalledWith('600000', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiStock.getKline).toHaveBeenNthCalledWith(1, '600000', 300, false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(apiAnalysis.getDiagnosisHistory).toHaveBeenCalledWith(
       '600000',
       120,
@@ -352,14 +355,10 @@ describe('Diagnosis.vue', () => {
     )
   })
 
-  it('uses persistent diagnosis chart cache before requesting the full 120-day chart', async () => {
-    window.localStorage.setItem('stocktrade:diagnosis:chart-cache', JSON.stringify({
-      '600000': {
-        code: '600000',
-        days: 60,
-        cachedAt: Date.now(),
-        data: mockKline,
-      },
+  it('requests indicator buffer days when the persistent diagnosis chart cache is too short', async () => {
+    window.sessionStorage.setItem('stocktrade:diagnosis:chart:600000', JSON.stringify({
+      data: mockKline,
+      days: 60,
     }))
 
     const wrapper = mountComponent()
@@ -369,18 +368,14 @@ describe('Diagnosis.vue', () => {
     await wrapper.vm.searchAndAnalyze()
     await flushPromises()
 
-    expect(apiStock.getKline).toHaveBeenCalledWith('600000', 120, false, expect.objectContaining({ timeoutMs: 20000 }))
+    expect(apiStock.getKline).toHaveBeenCalledWith('600000', 300, false, expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('renders the selected chart window from cache when switching days', async () => {
-    const cachedKline = buildKline(60)
-    window.localStorage.setItem('stocktrade:diagnosis:chart-cache', JSON.stringify({
-      '600000': {
-        code: '600000',
-        days: 60,
-        cachedAt: Date.now(),
-        data: cachedKline,
-      },
+    const cachedKline = buildKline(160)
+    window.sessionStorage.setItem('stocktrade:diagnosis:chart:600000', JSON.stringify({
+      data: cachedKline,
+      days: 160,
     }))
 
     const wrapper = mountComponent()
@@ -431,6 +426,44 @@ describe('Diagnosis.vue', () => {
 
     expect(apiWatchlist.add).toHaveBeenCalledWith('600000', '诊断结论:PASS | 评分:4.8')
     expect(ElMessage.success).toHaveBeenCalled()
+  })
+
+  it('uses the compact desktop analysis layout and removes the extra chart control row', async () => {
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    wrapper.vm.stockCode = '600000'
+    wrapper.vm.analysisResult = {
+      score: 4.8,
+      b1_passed: true,
+      b1_signal_type: 'trend_start',
+      verdict: 'PASS',
+      in_active_pool: true,
+      active_pool_rank: 3,
+      turnover_rate: 8.2,
+      volume_ratio: 1.6,
+      comment: '结构良好，量能配合正常。',
+      kdj_j: 45.2,
+      zx_long_pos: true,
+      weekly_ma_aligned: true,
+      volume_healthy: true,
+      scores: {
+        trend_structure: 4.5,
+        price_position: 4.0,
+        volume_behavior: 5.0,
+        previous_abnormal_move: 3.5,
+      },
+      trend_reasoning: '趋势向上',
+      position_reasoning: '位置合理',
+      volume_reasoning: '量能健康',
+      abnormal_move_reasoning: '历史异动可控',
+    }
+    await nextTick()
+
+    expect(wrapper.find('.chart-series-controls').exists()).toBe(false)
+    expect(wrapper.find('.chart-section--sticky').exists()).toBe(true)
+    expect(wrapper.find('.analysis-summary-strip').exists()).toBe(true)
+    expect(wrapper.findAll('.b1-detail-grid .detail-card')).toHaveLength(4)
   })
 
   it('routes users to the task center when initialization is required', async () => {

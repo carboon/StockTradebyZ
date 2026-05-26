@@ -50,7 +50,7 @@
     <!-- 分析结果 -->
     <template v-if="stockCode">
       <!-- K线图 -->
-      <div class="chart-section">
+      <div class="chart-section chart-section--sticky">
           <el-card class="chart-card">
             <template #header>
               <div class="card-header">
@@ -107,60 +107,7 @@
                   </div>
                 </div>
               </div>
-            </template>
-            <!-- 图表系列控制 -->
-            <div class="chart-series-controls">
-              <el-tooltip effect="dark" placement="top">
-                <template #content>
-                  <div class="control-tooltip">
-                    <strong>MA5均线：</strong><br/>
-                    5日简单移动平均线，反映短期价格趋势，<br/>
-                    对价格变化较为敏感，适合捕捉短期波动。
-                  </div>
-                </template>
-                <el-checkbox v-model="chartSeriesVisibility.ma5" @change="refreshChart">MA5</el-checkbox>
-              </el-tooltip>
-              <el-tooltip effect="dark" placement="top">
-                <template #content>
-                  <div class="control-tooltip">
-                    <strong>MA10均线：</strong><br/>
-                    10日简单移动平均线，平衡短期与中期趋势，<br/>
-                    是判断短期买卖点的重要参考线。
-                  </div>
-                </template>
-                <el-checkbox v-model="chartSeriesVisibility.ma10" @change="refreshChart">MA10</el-checkbox>
-              </el-tooltip>
-              <el-tooltip effect="dark" placement="top">
-                <template #content>
-                  <div class="control-tooltip">
-                    <strong>MA20均线：</strong><br/>
-                    20日简单移动平均线，也称月线，<br/>
-                    是中期趋势的重要参考，股价站稳20日均线通常意味着中期趋势向好。
-                  </div>
-                </template>
-                <el-checkbox v-model="chartSeriesVisibility.ma20" @change="refreshChart">MA20</el-checkbox>
-              </el-tooltip>
-              <el-tooltip effect="dark" placement="top">
-                <template #content>
-                  <div class="control-tooltip">
-                    <strong>MA60均线：</strong><br/>
-                    60日简单移动平均线，也称季线，<br/>
-                    反映长期趋势，是判断牛熊转换的重要参考。
-                  </div>
-                </template>
-                <el-checkbox v-model="chartSeriesVisibility.ma60" @change="refreshChart">MA60</el-checkbox>
-              </el-tooltip>
-              <el-tooltip effect="dark" placement="top">
-                <template #content>
-                  <div class="control-tooltip">
-                    <strong>成交量：</strong><br/>
-                    成交量反映市场参与度和资金流向，<br/>
-                    健康的上涨需要成交量的配合，放量上涨缩量下跌通常是强势特征。
-                  </div>
-                </template>
-                <el-checkbox v-model="chartSeriesVisibility.volume" @change="refreshChart">成交量</el-checkbox>
-              </el-tooltip>
-            </div>
+          </template>
             <div ref="chartRef" class="chart-container" />
             <!-- 偏离率显示 -->
             <div v-if="advancedIndicatorsData" class="deviation-info">
@@ -259,6 +206,15 @@
                     </el-tag>
                   </div>
                   <div class="metric-card">
+                    <span class="metric-label">
+                      趋势判断
+                      <el-tooltip raw-content content="PASS: 趋势启动，建议关注<br/>WATCH: 结构偏多，继续观察<br/>FAIL: 条件不足，暂不关注" placement="top">
+                        <el-icon class="info-icon"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                    <span class="metric-value">{{ analysisResult.verdict || '-' }}</span>
+                  </div>
+                  <div class="metric-card">
                     <span class="metric-label">B1信号类型</span>
                     <el-tag :type="getB1SignalTagType(analysisResult.b1_signal_type)" size="small">
                       {{ getB1SignalLabel(analysisResult.b1_signal_type) }}
@@ -284,35 +240,9 @@
                   </div>
                 </div>
 
-                <div class="analysis-item">
-                  <span class="label">当前评分</span>
-                  <el-tag :type="getScoreType(analysisResult.score)" size="large">
-                    {{ analysisResult.score != null ? analysisResult.score.toFixed(1) : '-' }}
-                  </el-tag>
-                </div>
-
-                <div class="analysis-item">
-                  <span class="label">B1检查</span>
-                  <el-tag :type="analysisResult.b1_passed ? 'success' : 'danger'">
-                    {{ analysisResult.b1_passed ? '通过' : '未通过' }}
-                  </el-tag>
-                </div>
-
-                <div class="analysis-item">
-                  <span class="label">B1信号类型</span>
-                  <el-tag :type="getB1SignalTagType(analysisResult.b1_signal_type)" size="small">
-                    {{ getB1SignalLabel(analysisResult.b1_signal_type) }}
-                  </el-tag>
-                </div>
-
-                <div class="analysis-item">
-                  <span class="label">
-                    趋势判断
-                    <el-tooltip raw-content content="PASS: 趋势启动，建议关注<br/>WATCH: 结构偏多，继续观察<br/>FAIL: 条件不足，暂不关注" placement="top">
-                      <el-icon class="info-icon"><InfoFilled /></el-icon>
-                    </el-tooltip>
-                  </span>
-                  <span class="value">{{ analysisResult.verdict || '-' }}</span>
+                <div class="analysis-summary-strip">
+                  <span class="analysis-summary-strip__label">评分明细摘要</span>
+                  <p class="analysis-summary-strip__text">{{ analysisResult.comment || '暂无补充说明' }}</p>
                 </div>
               </template>
 
@@ -386,6 +316,39 @@
                     {{ reason }}
                   </li>
                 </ul>
+              </div>
+
+              <div class="analysis-risk-panel analysis-risk-panel--ai">
+                <div class="analysis-risk-panel__header">
+                  <span class="analysis-risk-panel__title">AI 板块与消息分析</span>
+                  <div class="analysis-risk-panel__actions">
+                    <el-button size="small" type="primary" :loading="stockAiAnalyzing" @click="runStockAiAnalysis">
+                      AI 分析
+                    </el-button>
+                  </div>
+                </div>
+                <p class="analysis-risk-panel__summary">
+                  {{ stockAiSummary }}
+                </p>
+                <div v-if="stockAiAnalysisResult" class="analysis-risk-panel__meta">
+                  <span>板块均涨 {{ formatRatioPct(stockAiSectorAvgChange) }}</span>
+                  <span>置信 {{ formatAiConfidence(stockAiConfidence) }}</span>
+                  <span>{{ stockAiAnalysisResult.provider }}</span>
+                </div>
+                <div v-if="stockAiAnalysisResult" class="ai-analysis-grid">
+                  <div>
+                    <strong>三大利好</strong>
+                    <ul class="analysis-risk-panel__reasons">
+                      <li v-for="item in stockAiBullishItems" :key="item">{{ item }}</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <strong>三大利空</strong>
+                    <ul class="analysis-risk-panel__reasons">
+                      <li v-for="item in stockAiBearishItems" :key="item">{{ item }}</li>
+                    </ul>
+                  </div>
+                </div>
               </div>
 
               <el-divider />
@@ -476,47 +439,49 @@
                   <div class="section-header">
                     <h5>B1检查详情</h5>
                   </div>
-                  <div class="detail-item">
-                    <span class="detail-label">
-                      KDJ-J
-                      <el-tooltip raw-content content="KDJ指标中的J值<br/>反映价格超买超卖状态<br/>J值低于0表示超卖<br/>高于100表示超买<br/>B1策略寻找J值处于低位的股票" placement="top">
-                        <el-icon class="info-icon"><InfoFilled /></el-icon>
-                      </el-tooltip>
-                    </span>
-                    <span class="detail-value">{{ analysisResult.kdj_j != null ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
-                  </div>
-                  <div class="detail-item">
-                    <span class="detail-label">
-                      知行线多头
-                      <el-tooltip raw-content content="知行线是特殊均线系统<br/>当短期线上穿长期线时<br/>表示趋势转多<br/>股价处于上升通道" placement="top">
-                        <el-icon class="info-icon"><InfoFilled /></el-icon>
-                      </el-tooltip>
-                    </span>
-                    <el-tag :type="analysisResult.zx_long_pos ? 'success' : 'info'" size="small">
-                      {{ analysisResult.zx_long_pos ? '是' : '否' }}
-                    </el-tag>
-                  </div>
-                  <div class="detail-item">
-                    <span class="detail-label">
-                      周线多头
-                      <el-tooltip raw-content content="周线级别均线呈多头排列<br/>短期均线>中期均线>长期均线<br/>表示中期趋势向上<br/>股票处于稳健上涨阶段" placement="top">
-                        <el-icon class="info-icon"><InfoFilled /></el-icon>
-                      </el-tooltip>
-                    </span>
-                    <el-tag :type="analysisResult.weekly_ma_aligned ? 'success' : 'info'" size="small">
-                      {{ analysisResult.weekly_ma_aligned ? '是' : '否' }}
-                    </el-tag>
-                  </div>
-                  <div class="detail-item">
-                    <span class="detail-label">
-                      量能健康
-                      <el-tooltip raw-content content="成交量处于合理水平<br/>既不过度萎缩(缺乏人气)<br/>也不过度放大(可能透支)<br/>健康的量能配合价格上涨<br/>是持续上涨的基础" placement="top">
-                        <el-icon class="info-icon"><InfoFilled /></el-icon>
-                      </el-tooltip>
-                    </span>
-                    <el-tag :type="analysisResult.volume_healthy ? 'success' : 'info'" size="small">
-                      {{ analysisResult.volume_healthy ? '是' : '否' }}
-                    </el-tag>
+                  <div class="b1-detail-grid">
+                    <div class="detail-card">
+                      <span class="detail-label">
+                        KDJ-J
+                        <el-tooltip raw-content content="KDJ指标中的J值<br/>反映价格超买超卖状态<br/>J值低于0表示超卖<br/>高于100表示超买<br/>B1策略寻找J值处于低位的股票" placement="top">
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
+                        </el-tooltip>
+                      </span>
+                      <span class="detail-value">{{ analysisResult.kdj_j != null ? analysisResult.kdj_j.toFixed(1) : '-' }}</span>
+                    </div>
+                    <div class="detail-card">
+                      <span class="detail-label">
+                        知行线多头
+                        <el-tooltip raw-content content="知行线是特殊均线系统<br/>当短期线上穿长期线时<br/>表示趋势转多<br/>股价处于上升通道" placement="top">
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
+                        </el-tooltip>
+                      </span>
+                      <el-tag :type="analysisResult.zx_long_pos ? 'success' : 'info'" size="small">
+                        {{ analysisResult.zx_long_pos ? '是' : '否' }}
+                      </el-tag>
+                    </div>
+                    <div class="detail-card">
+                      <span class="detail-label">
+                        周线多头
+                        <el-tooltip raw-content content="周线级别均线呈多头排列<br/>短期均线>中期均线>长期均线<br/>表示中期趋势向上<br/>股票处于稳健上涨阶段" placement="top">
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
+                        </el-tooltip>
+                      </span>
+                      <el-tag :type="analysisResult.weekly_ma_aligned ? 'success' : 'info'" size="small">
+                        {{ analysisResult.weekly_ma_aligned ? '是' : '否' }}
+                      </el-tag>
+                    </div>
+                    <div class="detail-card">
+                      <span class="detail-label">
+                        量能健康
+                        <el-tooltip raw-content content="成交量处于合理水平<br/>既不过度萎缩(缺乏人气)<br/>也不过度放大(可能透支)<br/>健康的量能配合价格上涨<br/>是持续上涨的基础" placement="top">
+                          <el-icon class="info-icon"><InfoFilled /></el-icon>
+                        </el-tooltip>
+                      </span>
+                      <el-tag :type="analysisResult.volume_healthy ? 'success' : 'info'" size="small">
+                        {{ analysisResult.volume_healthy ? '是' : '否' }}
+                      </el-tag>
+                    </div>
                   </div>
                 </div>
 
@@ -832,7 +797,7 @@ import { Search, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { apiAnalysis, apiStock, apiWatchlist, isRequestCanceled } from '@/api'
 import { ElMessage } from 'element-plus'
 import type { ECharts, EChartsCoreOption } from 'echarts/core'
-import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, RiskFlagSummary, RiskRegimeSummary, StockSearchItem } from '@/types'
+import type { B1Check, DiagnosisHistoryDetailResponse, KLineData, RiskFlagSummary, RiskRegimeSummary, StockAiAnalysisResponse, StockSearchItem } from '@/types'
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
 import { getUserSafeErrorMessage, isInitializationPendingError } from '@/utils/userFacingErrors'
@@ -862,20 +827,13 @@ const searchForm = ref({ code: '' })
 const stockCode = ref('')
 const chartDays = ref(180)
 
-// 图表系列显示控制（趋势分界和短期动能通过 ECharts 图例控制）
-const chartSeriesVisibility = ref({
-  ma5: true,
-  ma10: true,
-  ma20: true,
-  ma60: false,
-  volume: true,
-})
-
 const chartRef = ref<HTMLElement>()
 const analyzing = ref(false)
 const refreshingHistory = ref(false)
 const addingToWatchlist = ref(false)
 const isInWatchlist = ref(false)
+const stockAiAnalyzing = ref(false)
+const stockAiAnalysisResult = ref<StockAiAnalysisResponse | null>(null)
 
 type DiagnosisViewResult = {
   score?: number
@@ -917,6 +875,17 @@ const historyDetailData = ref<DiagnosisHistoryDetailResponse | null>(null)
 const analysisResult = ref<DiagnosisViewResult | null>(null)
 const analysisRiskFlag = computed(() => analysisResult.value?.risk_flag || null)
 const analysisRiskRegime = ref<RiskRegimeSummary | null>(null)
+const stockAiPayload = computed(() => stockAiAnalysisResult.value?.result || {})
+const stockAiSummary = computed(() => String(stockAiPayload.value.summary || '点击 AI 分析，查看板块均涨、上下游关联、近期消息与利多利空。'))
+const stockAiSectorAvgChange = computed(() => {
+  const value = stockAiPayload.value.sector_view?.avg_change_pct ?? stockAiAnalysisResult.value?.context?.sector?.avg_change_pct
+  return typeof value === 'number' ? value / 100 : null
+})
+const stockAiConfidence = computed(() => (
+  typeof stockAiPayload.value.confidence === 'number' ? stockAiPayload.value.confidence : null
+))
+const stockAiBullishItems = computed(() => Array.isArray(stockAiPayload.value.top_bullish) ? stockAiPayload.value.top_bullish.slice(0, 3) : [])
+const stockAiBearishItems = computed(() => Array.isArray(stockAiPayload.value.top_bearish) ? stockAiPayload.value.top_bearish.slice(0, 3) : [])
 const stockName = ref('')
 const currentDiagnosisChartData = ref<KLineData | null>(null)
 const lastAutoHistoryRefreshAt = ref<Record<string, number>>({})
@@ -1168,6 +1137,7 @@ async function searchStock(requestId: number, options: { autoRefreshHistory?: bo
   cancelRequest('historyStatus')
   cancelRequest('analyze')
   cancelRequest('analyzeResult')
+  cancelRequest('stockAiAnalysis')
   stopAnalysisPolling()
 
   let matchedStock: DiagnosisSearchSuggestion | null = null
@@ -1191,6 +1161,7 @@ async function searchStock(requestId: number, options: { autoRefreshHistory?: bo
   stockName.value = matchedStock.name || ''
   searchForm.value.code = stockCode.value
   analysisResult.value = null
+  stockAiAnalysisResult.value = null
   trendStartDates.value = []
   tomorrowStarDates.value = []
   historyPage.value = 1
@@ -1437,11 +1408,6 @@ function selectChartDays(days: number) {
   void loadKlineData()
 }
 
-function refreshChart() {
-  if (!currentDiagnosisChartData.value) return
-  void renderChart(currentDiagnosisChartData.value, chartDays.value)
-}
-
 watch(
   [historyData, trendStartDates],
   () => {
@@ -1535,12 +1501,7 @@ async function renderChart(fullData: KLineData, displayDays: number = 180) {
   // 截取需要显示的数据
   const displayData = getDiagnosisDisplayChartData(fullData, displayDays)
 
-  // 根据可见性配置构建 MA 列表
-  const movingAverages: Array<'ma5' | 'ma10' | 'ma20' | 'ma60'> = []
-  if (chartSeriesVisibility.value.ma5) movingAverages.push('ma5')
-  if (chartSeriesVisibility.value.ma10) movingAverages.push('ma10')
-  if (chartSeriesVisibility.value.ma20) movingAverages.push('ma20')
-  if (chartSeriesVisibility.value.ma60) movingAverages.push('ma60')
+  const movingAverages: Array<'ma5' | 'ma10' | 'ma20' | 'ma60'> = ['ma5', 'ma10', 'ma20', 'ma60']
 
   const option: EChartsCoreOption = buildKLineChartOption({
     data: displayData,
@@ -1551,7 +1512,7 @@ async function renderChart(fullData: KLineData, displayDays: number = 180) {
     showAdvancedIndicators: true,  // 始终显示高级指标，通过 ECharts 图例控制
     showTrendBoundary: true,  // 始终显示趋势分界线
     showMomentumLine: true,  // 始终显示短期动能线
-    showVolume: chartSeriesVisibility.value.volume,
+    showVolume: true,
   })
 
   // 获取高级指标数据（偏离率）- 使用完整数据计算
@@ -1669,6 +1630,23 @@ async function analyzeStock() {
     ElMessage.error(isInitializationPendingError(error) ? message : `提交分析任务失败: ${message}`)
     analyzing.value = false
     finishRequest('analyze', signal)
+  }
+}
+
+async function runStockAiAnalysis() {
+  if (!stockCode.value) return
+  stockAiAnalyzing.value = true
+  const signal = beginRequest('stockAiAnalysis')
+  try {
+    stockAiAnalysisResult.value = await apiAnalysis.analyzeStockWithAi(stockCode.value, { signal })
+    ElMessage.success('AI 分析完成')
+    persistDiagnosisState()
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    ElMessage.error(getUserSafeErrorMessage(error, 'AI 分析失败'))
+  } finally {
+    stockAiAnalyzing.value = false
+    finishRequest('stockAiAnalysis', signal)
   }
 }
 
@@ -1979,6 +1957,7 @@ function persistDiagnosisState() {
     stockCode: stockCode.value,
     stockName: stockName.value,
     chartDays: chartDays.value,
+    stockAiAnalysisResult: stockAiAnalysisResult.value,
   }
 
   sessionStorage.setItem(DIAGNOSIS_STATE_KEY, JSON.stringify(state))
@@ -2035,6 +2014,7 @@ function restoreDiagnosisState() {
     tomorrowStarDates.value = state.tomorrowStarDates || []
     analysisResult.value = state.analysisResult || null
     analysisRiskRegime.value = state.analysisRiskRegime || null
+    stockAiAnalysisResult.value = state.stockAiAnalysisResult || null
     isInWatchlist.value = Boolean(state.isInWatchlist)
     lastAutoHistoryRefreshAt.value = state.lastAutoHistoryRefreshAt || {}
     applyMobileRouteChartPreference()
@@ -2099,11 +2079,17 @@ function normalizeRouteCode(code: unknown): string {
   }
 
   .chart-section {
-    margin-bottom: 20px;
+    margin-bottom: 14px;
+
+    &.chart-section--sticky {
+      position: sticky;
+      top: 12px;
+      z-index: 12;
+    }
   }
 
   .analysis-section {
-    margin-bottom: 20px;
+    margin-bottom: 16px;
   }
 
   .chart-card {
@@ -2255,58 +2241,17 @@ function normalizeRouteCode(code: unknown): string {
 
     .chart-container {
       flex: 1;
-      min-height: 520px;
-      height: 580px;
-    }
-
-    .chart-series-controls {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      align-items: center;
-      gap: 12px;
-      padding: 8px 16px;
-      margin-bottom: 8px;
-      background: rgba(40, 40, 40, 0.6);
-      border-radius: 6px;
-      border: 1px solid #333;
-
-      :deep(.el-checkbox) {
-        margin: 0;
-        margin-right: 4px;
-
-        .el-checkbox__label {
-          font-size: 12px;
-          color: #ccc;
-        }
-
-        .el-checkbox__input.is-checked + .el-checkbox__label {
-          color: #fff;
-        }
-
-        .el-checkbox__inner {
-          background-color: rgba(255, 255, 255, 0.1);
-          border-color: #555;
-
-          &:hover {
-            border-color: #666;
-          }
-        }
-
-        .el-checkbox__input.is-checked .el-checkbox__inner {
-          background-color: #409eff;
-          border-color: #409eff;
-        }
-      }
+      min-height: 380px;
+      height: clamp(380px, calc(100vh - 290px), 480px);
     }
 
     .deviation-info {
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 40px;
-      padding: 12px 20px;
-      margin-top: 8px;
+      gap: 32px;
+      padding: 10px 20px;
+      margin-top: 0;
       border-top: 1px solid #333;
       background: linear-gradient(180deg, #2a2a2a 0%, #1f1f1f 100%);
 
@@ -2364,15 +2309,15 @@ function normalizeRouteCode(code: unknown): string {
     .analysis-content {
       .analysis-metric-grid {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
         gap: 10px;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
       }
 
       .metric-card {
         display: grid;
-        gap: 6px;
-        padding: 12px;
+        gap: 4px;
+        padding: 10px 12px;
         border: 1px solid #e5edf5;
         border-radius: 12px;
         background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
@@ -2387,6 +2332,29 @@ function normalizeRouteCode(code: unknown): string {
         font-size: 18px;
         font-weight: 700;
         color: #0f172a;
+      }
+
+      .analysis-summary-strip {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 10px;
+        padding: 10px 12px;
+        border: 1px solid #e0ebf5;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #f8fbff 0%, #f3f7fb 100%);
+
+        &__label {
+          font-size: 12px;
+          font-weight: 600;
+          color: #5b6f86;
+        }
+
+        &__text {
+          margin: 0;
+          color: #475569;
+          font-size: 13px;
+          line-height: 1.6;
+        }
       }
 
       .analysis-summary-grid {
@@ -2508,6 +2476,35 @@ function normalizeRouteCode(code: unknown): string {
         }
       }
 
+      .analysis-risk-panel--ai {
+        border-color: #bbf7d0;
+        background: linear-gradient(180deg, #f0fdf4 0%, #f8fafc 100%);
+
+        .analysis-risk-panel__title,
+        .analysis-risk-panel__meta {
+          color: #166534;
+        }
+
+        .analysis-risk-panel__summary,
+        .analysis-risk-panel__reasons {
+          color: #14532d;
+        }
+      }
+
+      .ai-analysis-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 4px;
+
+        strong {
+          display: block;
+          margin-bottom: 6px;
+          color: #166534;
+          font-size: 13px;
+        }
+      }
+
       .collapse-title {
         font-weight: 600;
         color: #303133;
@@ -2517,30 +2514,42 @@ function normalizeRouteCode(code: unknown): string {
         margin: 8px 0;
       }
 
-      .analysis-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 6px 0;
-        border-bottom: 1px solid #f0f0f0;
-
-        &:last-of-type {
-          border-bottom: none;
-        }
-
-        .label {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          color: var(--color-text-secondary);
-        }
-
-        .value {
-          font-weight: 500;
-        }
+      .info-icon {
+        font-size: 14px;
+        color: var(--color-info);
+        cursor: help;
       }
 
       .b1-details {
+        .b1-detail-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 10px;
+        }
+
+        .detail-card {
+          display: grid;
+          gap: 10px;
+          padding: 10px 12px;
+          border: 1px solid #e5edf5;
+          border-radius: 12px;
+          background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+        }
+
+        .detail-label {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 13px;
+          color: #64748b;
+        }
+
+        .detail-value {
+          font-size: 18px;
+          font-weight: 700;
+          color: #0f172a;
+        }
+
         .section-header {
           margin-bottom: 8px;
 
@@ -2575,12 +2584,6 @@ function normalizeRouteCode(code: unknown): string {
             display: flex;
             align-items: center;
             gap: 4px;
-          }
-
-          .info-icon {
-            font-size: 14px;
-            color: var(--color-info);
-            cursor: help;
           }
         }
       }
@@ -2631,10 +2634,10 @@ function normalizeRouteCode(code: unknown): string {
         }
 
         .score-summary {
-          margin: 0 0 10px 0;
+          margin: 0 0 8px 0;
           padding: 8px 12px;
           background-color: #f5f7fa;
-          border-radius: 4px;
+          border-radius: 10px;
           font-size: 13px;
           color: #606266;
           line-height: 1.5;
@@ -2642,14 +2645,14 @@ function normalizeRouteCode(code: unknown): string {
 
         .score-grid {
           display: grid;
-          grid-template-columns: 1fr 1fr;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
           gap: 10px;
-          margin-bottom: 10px;
+          margin-bottom: 8px;
 
           .score-item {
-            padding: 8px;
+            padding: 10px;
             background-color: #fafafa;
-            border-radius: 4px;
+            border-radius: 10px;
             border-left: 3px solid #e4e7ed;
 
             &:nth-child(1) { border-left-color: #409eff; }
@@ -2852,6 +2855,11 @@ function normalizeRouteCode(code: unknown): string {
 
     .chart-section {
       margin-bottom: 16px;
+
+      &.chart-section--sticky {
+        position: static;
+        top: auto;
+      }
     }
 
     .chart-card {
@@ -2943,10 +2951,6 @@ function normalizeRouteCode(code: unknown): string {
           grid-template-columns: 1fr;
         }
 
-        .analysis-item {
-          gap: 12px;
-        }
-
         .score-details {
           .score-grid {
             grid-template-columns: 1fr;
@@ -2995,14 +2999,6 @@ function normalizeRouteCode(code: unknown): string {
       }
     }
 
-    .chart-series-controls {
-      gap: 8px;
-      padding: 6px 12px;
-
-      :deep(.el-checkbox .el-checkbox__label) {
-        font-size: 11px;
-      }
-    }
   }
 }
 

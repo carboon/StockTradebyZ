@@ -33,6 +33,7 @@ vi.mock('@/api', () => ({
     saveEnv: vi.fn(),
   },
   apiAnalysis: {
+    getAggregate: vi.fn(),
     getFreshness: vi.fn(),
     getDates: vi.fn(),
     getCandidates: vi.fn(),
@@ -83,9 +84,9 @@ function mockStatus({ initialized = true } = {}) {
 }
 
 const latestCandidates = [
-  { code: '600000', name: '浦发银行', industry: '银行', kdj_j: 25, close_price: 10.5, turnover_rate: 1.2, volume_ratio: 1.1 },
-  { code: '000001', name: '平安银行', industry: '银行', kdj_j: 12, close_price: 12.2, turnover_rate: 0.8, volume_ratio: 0.9 },
-  { code: '002222', name: '福晶科技', industry: '元器件', kdj_j: 18, close_price: 22.2, turnover_rate: 2.3, volume_ratio: 1.4 },
+  { code: '600000', name: '浦发银行', industry: '银行', sector_names: ['银行', '大金融'], kdj_j: 25, close_price: 10.5, turnover_rate: 1.2, volume_ratio: 1.1 },
+  { code: '000001', name: '平安银行', industry: '银行', sector_names: ['银行'], kdj_j: 12, close_price: 12.2, turnover_rate: 0.8, volume_ratio: 0.9 },
+  { code: '002222', name: '福晶科技', industry: '元器件', sector_names: ['元器件', '军工电子'], kdj_j: 18, close_price: 22.2, turnover_rate: 2.3, volume_ratio: 1.4 },
 ]
 
 const latestResults = [
@@ -177,6 +178,40 @@ function mountComponent({ isAdmin = true } = {}) {
   })
 }
 
+function buildTomorrowStarAggregate(overrides: Record<string, unknown> = {}) {
+  return {
+    dates: ['2024-01-15', '2024-01-14'],
+    history: [
+      { date: '2024-01-15', count: 2, pass: 1 },
+      { date: '2024-01-14', count: 1, pass: 0 },
+    ],
+    candidates: {
+      pick_date: '2024-01-15',
+      candidates: latestCandidates,
+      total: latestCandidates.length,
+    },
+    results: {
+      pick_date: '2024-01-15',
+      results: latestResults,
+      total: latestResults.length,
+      min_score_threshold: 4,
+    },
+    freshness: {
+      latest_trade_date: '2024-01-15',
+      latest_trade_data_ready: false,
+      local_latest_date: '2024-01-15',
+      latest_candidate_date: '2024-01-15',
+      latest_result_date: '2024-01-15',
+      needs_update: false,
+      freshness_version: 'v1',
+      running_task_id: null,
+      running_task_status: null,
+      incremental_update: buildIncrementalStatus(),
+    },
+    ...overrides,
+  }
+}
+
 describe('TomorrowStar.vue', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -193,6 +228,7 @@ describe('TomorrowStar.vue', () => {
         { date: '2024-01-14', count: 1, pass: 0 },
       ],
     } as any)
+    vi.mocked(apiAnalysis.getAggregate).mockResolvedValue(buildTomorrowStarAggregate() as any)
     vi.mocked(apiAnalysis.getCandidates).mockResolvedValue({
       pick_date: '2024-01-15',
       candidates: latestCandidates,
@@ -318,24 +354,38 @@ describe('TomorrowStar.vue', () => {
     expect(wrapper.vm.latestCandidates).toHaveLength(3)
     expect(wrapper.vm.latestAnalysisResults).toHaveLength(4)
     expect(wrapper.vm.latestDate).toBe('2024-01-15')
-    expect(apiAnalysis.getCandidates).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
-    expect(apiAnalysis.getResults).toHaveBeenCalledWith(undefined, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(apiAnalysis.getAggregate).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('builds tomorrow-star industry chips and filters candidates by selected industries', async () => {
     const wrapper = mountComponent()
     await flushPromises()
 
-    expect(wrapper.vm.tomorrowStarIndustryOptions).toEqual([
-      { name: '银行', count: 2 },
-      { name: '元器件', count: 1 },
-    ])
+    expect(Object.fromEntries(
+      wrapper.vm.tomorrowStarIndustryOptions.map((item: { name: string, count: number }) => [item.name, item.count])
+    )).toEqual({
+      银行: 2,
+      大金融: 1,
+      元器件: 1,
+      军工电子: 1,
+    })
 
-    wrapper.vm.toggleTomorrowStarIndustry('元器件')
+    wrapper.vm.toggleTomorrowStarIndustry('军工电子')
     await flushPromises()
 
     expect(wrapper.vm.activeTotalLatestCandidates).toBe(1)
     expect(wrapper.vm.activeDisplayLatestCandidates.map((item: { code: string }) => item.code)).toEqual(['002222'])
+    expect(wrapper.vm.getCandidateIndustryLabel(wrapper.vm.activeDisplayLatestCandidates[0])).toBe('军工电子 / 元器件')
+
+    wrapper.vm.clearTomorrowStarIndustryFilter()
+    await flushPromises()
+
+    wrapper.vm.toggleTomorrowStarIndustry('大金融')
+    await flushPromises()
+
+    expect(wrapper.vm.activeTotalLatestCandidates).toBe(1)
+    expect(wrapper.vm.activeDisplayLatestCandidates.map((item: { code: string }) => item.code)).toEqual(['600000'])
+    expect(wrapper.vm.getCandidateIndustryLabel(wrapper.vm.activeDisplayLatestCandidates[0])).toBe('大金融 / 银行')
 
     wrapper.vm.clearTomorrowStarIndustryFilter()
     await flushPromises()
@@ -344,7 +394,7 @@ describe('TomorrowStar.vue', () => {
   })
 
   it('shows market regime explanation when tomorrow-star candidates are blocked by market conditions', async () => {
-    vi.mocked(apiAnalysis.getDates).mockResolvedValue({
+    vi.mocked(apiAnalysis.getAggregate).mockResolvedValue(buildTomorrowStarAggregate({
       dates: ['2024-01-15'],
       history: [
         {
@@ -362,16 +412,18 @@ describe('TomorrowStar.vue', () => {
           },
         },
       ],
-    } as any)
-    vi.mocked(apiAnalysis.getCandidates).mockResolvedValue({
-      candidates: [],
-      total: 0,
-    } as any)
-    vi.mocked(apiAnalysis.getResults).mockResolvedValue({
-      results: [],
-      total: 0,
-      min_score_threshold: 4,
-    } as any)
+      candidates: {
+        pick_date: '2024-01-15',
+        candidates: [],
+        total: 0,
+      },
+      results: {
+        pick_date: '2024-01-15',
+        results: [],
+        total: 0,
+        min_score_threshold: 4,
+      },
+    }) as any)
 
     const wrapper = mountComponent()
     await flushPromises()

@@ -21,7 +21,11 @@ class RiskRegimeAIService:
     def __init__(self, db: Session):
         self.db = db
         self.tushare_service = TushareService()
-        self.deepseek_service = DeepSeekService()
+        self.deepseek_service = DeepSeekService(api_key=self._load_deepseek_api_key())
+
+    def _load_deepseek_api_key(self) -> str:
+        value = self.db.query(Config.value).filter(Config.key == "deepseek_api_key").scalar()
+        return str(value or "").strip()
 
     def is_enabled(self) -> bool:
         value = self.db.query(Config.value).filter(Config.key == self.ENABLED_CONFIG_KEY).scalar()

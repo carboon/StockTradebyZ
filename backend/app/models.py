@@ -154,6 +154,24 @@ class IntradayAnalysisSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class ClosingAnalysisReport(Base):
+    """收盘分析日报。"""
+    __tablename__ = "closing_analysis_reports"
+    __table_args__ = (
+        UniqueConstraint("trade_date", name="uq_closing_analysis_reports_trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    source_data_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    generated_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    force_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class CurrentHotRun(Base):
     """当前热盘按交易日的构建状态表"""
     __tablename__ = "current_hot_runs"
@@ -348,6 +366,171 @@ class SectorAnalysisResult(Base):
     volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CustomConcept(Base):
+    """自定义概念定义表"""
+    __tablename__ = "custom_concepts"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_custom_concepts_name"),
+        Index("ix_custom_concepts_status_updated_at", "status", "updated_at"),
+        Index("ix_custom_concepts_last_refreshed_at", "last_refreshed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    chain_hint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft", index=True)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
+    source_config_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    last_refreshed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CustomConceptAlias(Base):
+    """自定义概念别名表"""
+    __tablename__ = "custom_concept_aliases"
+    __table_args__ = (
+        UniqueConstraint("concept_id", "alias", name="uq_custom_concept_aliases_concept_alias"),
+        Index("ix_custom_concept_aliases_alias", "alias"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    concept_id: Mapped[int] = mapped_column(Integer, ForeignKey("custom_concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    alias: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CustomConceptRelatedSector(Base):
+    """自定义概念关联官方板块表"""
+    __tablename__ = "custom_concept_related_sectors"
+    __table_args__ = (
+        UniqueConstraint(
+            "concept_id",
+            "sector_name",
+            "sector_source",
+            name="uq_custom_concept_related_sectors_concept_name_source",
+        ),
+        Index("ix_custom_concept_related_sectors_sector_name", "sector_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    concept_id: Mapped[int] = mapped_column(Integer, ForeignKey("custom_concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    sector_source: Mapped[str] = mapped_column(String(32), nullable=False, default="tushare_concept")
+    sector_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    sector_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CustomConceptRun(Base):
+    """自定义概念 AI 汇聚运行记录表"""
+    __tablename__ = "custom_concept_runs"
+    __table_args__ = (
+        Index("ix_custom_concept_runs_concept_created_at", "concept_id", "created_at"),
+        Index("ix_custom_concept_runs_status_created_at", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    concept_id: Mapped[int] = mapped_column(Integer, ForeignKey("custom_concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    matched_stock_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_context_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class CustomConceptStockTag(Base):
+    """自定义概念股票标签表"""
+    __tablename__ = "custom_concept_stock_tags"
+    __table_args__ = (
+        UniqueConstraint("concept_id", "stock_code", name="uq_custom_concept_stock_tags_concept_code"),
+        Index("ix_custom_concept_stock_tags_code", "stock_code"),
+        Index("ix_custom_concept_stock_tags_chain_position", "concept_id", "chain_position"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    concept_id: Mapped[int] = mapped_column(Integer, ForeignKey("custom_concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("custom_concept_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    stock_code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    relevance_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    chain_position: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    role_tags_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="ai")
+    is_manual: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ConceptMemoryEntry(Base):
+    """概念记忆库条目表"""
+    __tablename__ = "concept_memory_entries"
+    __table_args__ = (
+        Index("ix_concept_memory_entries_keyword_updated_at", "keyword", "updated_at"),
+        Index("ix_concept_memory_entries_status_updated_at", "status", "updated_at"),
+        Index("ix_concept_memory_entries_source_type", "source_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    keyword: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    category: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    source_name: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft", index=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_fixed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tags_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    related_stock_codes_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_refreshed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ConceptMemoryRun(Base):
+    """概念记忆库运行记录表"""
+    __tablename__ = "concept_memory_runs"
+    __table_args__ = (
+        Index("ix_concept_memory_runs_entry_created_at", "entry_id", "created_at"),
+        Index("ix_concept_memory_runs_run_type_created_at", "run_type", "created_at"),
+        Index("ix_concept_memory_runs_status_created_at", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entry_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("concept_memory_entries.id", ondelete="CASCADE"), nullable=True, index=True)
+    run_type: Mapped[str] = mapped_column(String(20), nullable=False, default="query")
+    query_text: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    input_context_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    matched_entry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    matched_news_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class DailyB1Check(Base):
@@ -737,7 +920,7 @@ class StockActivePoolRank(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
     code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
-    top_m: Mapped[int] = mapped_column(Integer, nullable=False, default=2000)
+    top_m: Mapped[int] = mapped_column(Integer, nullable=False, default=3000)
     n_turnover_days: Mapped[int] = mapped_column(Integer, nullable=False, default=43)
     turnover_n: Mapped[float] = mapped_column(Float, nullable=False)
     active_pool_rank: Mapped[int] = mapped_column(Integer, nullable=False)

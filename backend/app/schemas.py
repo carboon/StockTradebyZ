@@ -126,6 +126,7 @@ class CandidateItem(BaseModel):
     code: str
     name: Optional[str] = None
     industry: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
     strategy: Optional[str] = None
     open_price: Optional[float] = None
     close_price: Optional[float] = None
@@ -434,6 +435,112 @@ class CurrentHotIntradayAnalysisPrefetchResponse(BaseModel):
     downloaded_count: int = 0
 
 
+class ClosingSectorFlowItem(BaseModel):
+    """收盘分析板块资金流项"""
+    sector_name: str
+    net_mf_amount: float
+
+
+class ClosingMarketOverview(BaseModel):
+    """收盘分析大盘概览"""
+    trend: str
+    trade_date: Optional[date_class] = None
+    previous_trade_date: Optional[date_class] = None
+    avg_change_pct: Optional[float] = None
+    up_count: int = 0
+    down_count: int = 0
+    flat_count: int = 0
+    total_count: int = 0
+    summary: Optional[str] = None
+
+
+class ClosingSectorFlow(BaseModel):
+    """收盘分析板块资金流"""
+    inflow_top3: List[ClosingSectorFlowItem] = Field(default_factory=list)
+    outflow_top3: List[ClosingSectorFlowItem] = Field(default_factory=list)
+
+
+class ClosingCandidateMoveItem(BaseModel):
+    """收盘分析候选股涨跌项"""
+    code: str
+    name: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
+    base_close: Optional[float] = None
+    latest_close: Optional[float] = None
+    change_pct: float
+    source_pick_date: date_class
+
+
+class ClosingCandidateMoveBucket(BaseModel):
+    """收盘分析候选股回看分组"""
+    label: str
+    source_pick_date: date_class
+    rising: List[ClosingCandidateMoveItem] = Field(default_factory=list)
+    falling: List[ClosingCandidateMoveItem] = Field(default_factory=list)
+
+
+class ClosingTomorrowPredictionItem(BaseModel):
+    """收盘分析明日预测项"""
+    rank: Optional[int] = None
+    code: str
+    name: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
+    b1_score: Optional[float] = None
+    b1_passed: Optional[bool] = None
+    b1_comment: Optional[str] = None
+    signal_type: Optional[str] = None
+    verdict: Optional[str] = None
+    close_price: Optional[float] = None
+    change_pct: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    sector_net_mf_amount: Optional[float] = None
+    sector_3d_net_mf_amount: Optional[float] = None
+    local_score: Optional[float] = None
+    local_reasons: List[str] = Field(default_factory=list)
+    ai_score: Optional[float] = None
+    bullish_news: List[str] = Field(default_factory=list)
+    negative_news: List[str] = Field(default_factory=list)
+    ai_comment: Optional[str] = None
+    decision_reason: Optional[str] = None
+
+
+class ClosingTomorrowPrediction(BaseModel):
+    """收盘分析明日预测"""
+    trade_date: Optional[date_class] = None
+    status: Optional[str] = None
+    message: Optional[str] = None
+    preselected: List[ClosingTomorrowPredictionItem] = Field(default_factory=list)
+    selected: List[ClosingTomorrowPredictionItem] = Field(default_factory=list)
+    sector_flow_history: List[Dict[str, Any]] = Field(default_factory=list)
+    ai: Optional[Dict[str, Any]] = None
+
+
+class ClosingAnalysisStatusResponse(BaseModel):
+    latest_data_date: Optional[date_class] = None
+    report_trade_date: Optional[date_class] = None
+    has_report: bool = False
+    can_generate: bool = False
+    status: str
+    message: str
+
+
+class ClosingAnalysisReportResponse(BaseModel):
+    id: Optional[int] = None
+    has_report: bool = False
+    generated: bool = False
+    status: Optional[str] = None
+    message: Optional[str] = None
+    trade_date: Optional[date_class] = None
+    source_data_date: Optional[date_class] = None
+    generated_at: Optional[datetime] = None
+    force_generated: bool = False
+    market: Optional[ClosingMarketOverview] = None
+    sector_flow: Optional[ClosingSectorFlow] = None
+    candidate_buckets: List[ClosingCandidateMoveBucket] = Field(default_factory=list)
+    tomorrow_prediction: Optional[ClosingTomorrowPrediction] = None
+
+
 class TomorrowStarHistoryItem(BaseModel):
     """明日之星历史窗口项"""
     pick_date: date_class
@@ -703,6 +810,16 @@ class DiagnosisResponse(BaseModel):
     analysis: Dict[str, Any]
     risk_regime: Optional[RiskRegimeSummary] = None
     kline_data: Optional[Dict[str, Any]] = None
+
+
+class StockAiAnalysisResponse(BaseModel):
+    """单股 AI 分析响应"""
+    code: str
+    name: Optional[str] = None
+    provider: str
+    model: Optional[str] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
+    result: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ==================== 重点观察 ====================
@@ -1437,3 +1554,279 @@ class ConceptMembersResponse(BaseModel):
     concept_name: Optional[str] = None
     members: List[Dict[str, Any]]
     total: int
+
+
+class CustomConceptRunItem(BaseModel):
+    """自定义概念运行记录"""
+    id: int
+    status: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    prompt_version: str
+    candidate_count: int = 0
+    matched_stock_count: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+
+class OfficialConceptMatchItem(BaseModel):
+    """召回命中的官方概念板块"""
+    concept_code: str
+    concept_name: str
+    score: int
+    matched_terms: List[str] = Field(default_factory=list)
+
+
+class CustomConceptUpsertRequest(BaseModel):
+    """创建或更新自定义概念"""
+    name: str
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    chain_hint: Optional[str] = None
+    aliases: List[str] = Field(default_factory=list)
+    related_sectors: List[str] = Field(default_factory=list)
+    status: str = "draft"
+
+
+class CustomConceptSummaryItem(BaseModel):
+    """自定义概念摘要"""
+    id: int
+    name: str
+    display_name: str
+    description: Optional[str] = None
+    chain_hint: Optional[str] = None
+    status: str
+    prompt_version: str
+    aliases: List[str] = Field(default_factory=list)
+    related_sectors: List[str] = Field(default_factory=list)
+    tag_count: int = 0
+    last_refreshed_at: Optional[datetime] = None
+    updated_at: datetime
+    latest_run: Optional[CustomConceptRunItem] = None
+
+
+class CustomConceptListResponse(BaseModel):
+    """自定义概念列表"""
+    concepts: List[CustomConceptSummaryItem]
+    total: int
+
+
+class CustomConceptDetailResponse(CustomConceptSummaryItem):
+    """自定义概念详情"""
+    recent_runs: List[CustomConceptRunItem] = Field(default_factory=list)
+
+
+class CustomConceptStockTagItem(BaseModel):
+    """自定义概念股票标签"""
+    stock_code: str
+    stock_name: Optional[str] = None
+    industry: Optional[str] = None
+    relevance_score: Optional[float] = None
+    confidence: Optional[float] = None
+    chain_position: str
+    role_tags: List[str] = Field(default_factory=list)
+    reason: Optional[str] = None
+    matched_source_concepts: List[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class CustomConceptStockTagsResponse(BaseModel):
+    """自定义概念股票标签列表"""
+    concept_id: int
+    concept_name: str
+    stocks: List[CustomConceptStockTagItem]
+    total: int
+
+
+class StockCustomConceptItem(BaseModel):
+    """单只股票关联的自定义概念"""
+    concept_id: int
+    concept_name: str
+    concept_display_name: str
+    relevance_score: Optional[float] = None
+    confidence: Optional[float] = None
+    chain_position: str
+    role_tags: List[str] = Field(default_factory=list)
+    reason: Optional[str] = None
+    updated_at: datetime
+
+
+class StockCustomConceptsResponse(BaseModel):
+    """单只股票关联的自定义概念列表"""
+    code: str
+    concepts: List[StockCustomConceptItem]
+    total: int
+
+
+class CustomConceptRefreshResponse(BaseModel):
+    """自定义概念刷新结果"""
+    concept_id: int
+    concept_name: str
+    run: CustomConceptRunItem
+    official_matches: List[OfficialConceptMatchItem] = Field(default_factory=list)
+    stocks_saved: int = 0
+    concept_summary: Optional[str] = None
+    industry_chain_definition: Optional[str] = None
+
+
+class CandidateConceptMatchRequestItem(BaseModel):
+    """候选股票概念匹配输入项"""
+    code: str
+    name: Optional[str] = None
+    industry: Optional[str] = None
+    sector_names: List[str] = Field(default_factory=list)
+    signal_type: Optional[str] = None
+    total_score: Optional[float] = None
+    comment: Optional[str] = None
+
+
+class CandidateConceptMatchRequest(BaseModel):
+    """候选股票概念匹配请求"""
+    query: str
+    candidates: List[CandidateConceptMatchRequestItem] = Field(default_factory=list)
+    force_refresh: bool = False
+    async_refresh: bool = False
+
+
+class CandidateConceptMatchItem(BaseModel):
+    """候选股票概念匹配结果"""
+    code: str
+    name: Optional[str] = None
+    industry: Optional[str] = None
+    relevance_score: Optional[float] = None
+    confidence: Optional[float] = None
+    chain_position: str
+    role_tags: List[str] = Field(default_factory=list)
+    reason: Optional[str] = None
+
+
+class CandidateConceptMatchResponse(BaseModel):
+    """候选股票概念匹配响应"""
+    query: str
+    concept_id: int
+    concept_name: str
+    cache_hit: bool = False
+    source: str
+    data_updated_at: Optional[datetime] = None
+    refresh_scheduled: bool = False
+    total_candidates: int
+    matched_count: int
+    matches: List[CandidateConceptMatchItem] = Field(default_factory=list)
+
+
+class ConceptQuerySuggestionItem(BaseModel):
+    """概念检索历史联想项"""
+    query: str
+    label: str
+    source: str
+    updated_at: Optional[datetime] = None
+
+
+class ConceptQuerySuggestionsResponse(BaseModel):
+    """概念检索历史联想响应"""
+    items: List[ConceptQuerySuggestionItem] = Field(default_factory=list)
+    total: int
+
+
+class ConceptMemoryEntryItem(BaseModel):
+    """概念记忆库条目"""
+    id: int
+    keyword: str
+    title: str
+    content: str
+    category: Optional[str] = None
+    source_type: str
+    source_name: Optional[str] = None
+    source_url: Optional[str] = None
+    status: str
+    priority: int
+    is_fixed: bool
+    tags: List[str] = Field(default_factory=list)
+    related_stock_codes: List[str] = Field(default_factory=list)
+    summary: Optional[str] = None
+    evidence: Optional[Dict[str, Any]] = None
+    prompt_version: Optional[str] = None
+    last_refreshed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConceptMemoryRunItem(BaseModel):
+    """概念记忆库运行记录"""
+    id: int
+    entry_id: Optional[int] = None
+    run_type: str
+    query_text: Optional[str] = None
+    status: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    prompt_version: Optional[str] = None
+    matched_entry_count: int = 0
+    matched_news_count: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+
+class ConceptMemoryUpsertRequest(BaseModel):
+    """概念记忆库条目保存请求"""
+    keyword: str
+    title: str
+    content: str
+    category: Optional[str] = None
+    source_type: str = "manual"
+    source_name: Optional[str] = None
+    source_url: Optional[str] = None
+    status: str = "draft"
+    priority: int = 0
+    is_fixed: bool = False
+    tags: List[str] = Field(default_factory=list)
+    related_stock_codes: List[str] = Field(default_factory=list)
+
+
+class ConceptMemoryListResponse(BaseModel):
+    """概念记忆库列表响应"""
+    entries: List[ConceptMemoryEntryItem] = Field(default_factory=list)
+    total: int = 0
+    stats: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConceptMemoryDetailResponse(ConceptMemoryEntryItem):
+    """概念记忆库详情响应"""
+    recent_runs: List[ConceptMemoryRunItem] = Field(default_factory=list)
+
+
+class ConceptMemoryRefreshResponse(BaseModel):
+    """概念记忆库刷新响应"""
+    entry_id: int
+    keyword: str
+    run: ConceptMemoryRunItem
+    matched_news_count: int = 0
+    matched_official_concepts: List[dict[str, Any]] = Field(default_factory=list)
+    matched_memory_entries: List[dict[str, Any]] = Field(default_factory=list)
+    ai_summary: Optional[str] = None
+    ai_keywords: List[str] = Field(default_factory=list)
+    ai_related_stock_codes: List[str] = Field(default_factory=list)
+
+
+class ConceptMemoryComposeRequest(BaseModel):
+    """概念记忆库上下文组装请求"""
+    query: str
+    use_ai: bool = True
+    force_refresh: bool = False
+    max_entries: int = 8
+    max_news: int = 10
+
+
+class ConceptMemoryComposeResponse(BaseModel):
+    """概念记忆库上下文组装响应"""
+    query: str
+    cache_hit: bool = False
+    source: str
+    context_text: str
+    matched_entries: List[ConceptMemoryEntryItem] = Field(default_factory=list)
+    matched_news: List[Dict[str, Any]] = Field(default_factory=list)
+    matched_official_concepts: List[Dict[str, Any]] = Field(default_factory=list)
+    ai_result: Optional[Dict[str, Any]] = None
+    run: Optional[ConceptMemoryRunItem] = None

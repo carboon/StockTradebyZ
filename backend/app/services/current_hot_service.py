@@ -1278,7 +1278,7 @@ class CurrentHotService:
     def load_candidates(
         self,
         pick_date: Optional[str] = None,
-        limit: int = 200,
+        limit: int = 3000,
         *,
         include_risk_regime: bool = False,
         include_risk_flags: bool = False,
@@ -1804,7 +1804,7 @@ class CurrentHotService:
             .outerjoin(Stock, Stock.code == StockActivePoolRank.code)
             .filter(
                 StockActivePoolRank.trade_date == trade_date,
-                StockActivePoolRank.top_m == 2000,
+                StockActivePoolRank.top_m == 3000,
                 StockActivePoolRank.n_turnover_days == 43,
                 StockActivePoolRank.active_pool_rank <= top_m,
             )

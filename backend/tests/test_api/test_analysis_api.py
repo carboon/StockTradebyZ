@@ -27,7 +27,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import AnalysisResult, CurrentHotCandidate, DailyB1Check, DailyB1CheckDetail, Stock, StockActivePoolRank, StockDaily, Task
+from app.models import AnalysisResult, Candidate, Config, CurrentHotCandidate, DailyB1Check, DailyB1CheckDetail, Stock, StockActivePoolRank, StockDaily, Task
 from app.schemas import SignalReturnBenchmark
 
 
@@ -228,6 +228,62 @@ def test_get_tomorrow_star_candidates_with_limit(test_client: TestClient, tmp_pa
     assert isinstance(data["candidates"], list)
     assert data["total"] == 3
     assert len(data["candidates"]) == 2
+
+
+@pytest.mark.api
+def test_get_tomorrow_star_candidates_returns_multiple_sector_names(test_client_with_db: Any) -> None:
+    pick_date = date(2026, 5, 8)
+    test_client_with_db.db.add_all([
+        Config(
+            key="sector_analysis_catalog",
+            value=json.dumps({
+                "sectors": [
+                    {"key": "compute", "name": "算力", "order": 1},
+                    {"key": "liquid", "name": "液冷", "order": 2},
+                ]
+            }, ensure_ascii=False),
+            description="sector catalog",
+        ),
+        Config(
+            key="sector_analysis_pool",
+            value=json.dumps({
+                "compute": [{"code": "600000", "name": "浦发银行"}],
+                "liquid": [{"code": "600000", "name": "浦发银行"}],
+            }, ensure_ascii=False),
+            description="sector pool",
+        ),
+        Stock(code="600000", name="浦发银行", market="SH", industry="银行"),
+        Candidate(
+            pick_date=pick_date,
+            code="600000",
+            strategy="b1",
+            close_price=10.2,
+            turnover=100000.0,
+            b1_passed=True,
+            kdj_j=12.3,
+        ),
+        StockDaily(
+            code="600000",
+            trade_date=pick_date,
+            open=10.0,
+            close=10.2,
+            high=10.3,
+            low=9.9,
+            volume=100000,
+            turnover_rate=1.2,
+            volume_ratio=1.1,
+        ),
+    ])
+    test_client_with_db.db.commit()
+
+    response = test_client_with_db.get(f"/api/v1/analysis/tomorrow-star/candidates?date={pick_date.isoformat()}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pick_date"] == pick_date.isoformat()
+    assert data["total"] == 1
+    assert data["candidates"][0]["code"] == "600000"
+    assert data["candidates"][0]["sector_names"] == ["算力", "液冷"]
 
 
 @pytest.mark.api

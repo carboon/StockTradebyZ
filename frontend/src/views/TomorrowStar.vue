@@ -172,6 +172,39 @@
                 </div>
               </template>
 
+              <div class="candidate-concept-filter candidate-concept-filter--mobile">
+                <el-autocomplete
+                  v-model="candidateConceptQuery"
+                  placeholder="输入概念关键词，例如 PCB、光模块"
+                  clearable
+                  :fetch-suggestions="fetchCandidateConceptSuggestions"
+                  @keyup.enter="applyCandidateConceptFilter()"
+                  @clear="clearCandidateConceptFilter"
+                >
+                  <template #default="{ item }">
+                    <div class="candidate-concept-suggestion">
+                      <span>{{ item.value }}</span>
+                      <small>{{ item.label }}</small>
+                    </div>
+                  </template>
+                  <template #append>
+                    <el-button :icon="Search" :loading="candidateConceptLoading" @click="applyCandidateConceptFilter()" />
+                  </template>
+                </el-autocomplete>
+                <el-button
+                  v-if="candidateConceptQuery.trim()"
+                  size="small"
+                  :loading="candidateConceptLoading"
+                  @click="refreshCandidateConceptAsync"
+                >
+                  异步刷新
+                </el-button>
+              </div>
+
+              <div v-if="activeConceptFilterSummary" class="candidate-concept-filter__summary candidate-concept-filter__summary--mobile">
+                {{ activeConceptFilterSummary }}
+              </div>
+
               <div class="table-header-tip mobile-tip">
                 <span class="tip-item">{{ activeMobileAnalysisTip }}</span>
               </div>
@@ -209,6 +242,9 @@
                     </el-tag>
                     <el-tag v-if="isCurrentHotTab" type="info" size="small">
                       活跃 {{ formatActivePoolRank(row.active_pool_rank) }}
+                    </el-tag>
+                    <el-tag v-if="activeConceptFilterApplied" type="warning" size="small">
+                      相关 {{ formatCandidateConceptRelevance(row.code) }}
                     </el-tag>
                     <el-tooltip
                       v-if="showAnalysisPrefilter && getAnalysisPrefilterPassed(row) === false && getAnalysisPrefilterSummary(getAnalysisPrefilterLike(row))"
@@ -411,6 +447,50 @@
                   </div>
                 </template>
 
+                <div class="candidate-concept-filter">
+                  <el-autocomplete
+                    v-model="candidateConceptQuery"
+                    placeholder="输入概念关键词，例如 PCB、光模块"
+                    clearable
+                    :fetch-suggestions="fetchCandidateConceptSuggestions"
+                    @keyup.enter="applyCandidateConceptFilter()"
+                    @clear="clearCandidateConceptFilter"
+                  >
+                    <template #default="{ item }">
+                      <div class="candidate-concept-suggestion">
+                        <span>{{ item.value }}</span>
+                        <small>{{ item.label }}</small>
+                      </div>
+                    </template>
+                    <template #append>
+                      <el-button :icon="Search" :loading="candidateConceptLoading" @click="applyCandidateConceptFilter()">
+                        检索
+                      </el-button>
+                    </template>
+                  </el-autocomplete>
+                  <el-button
+                    v-if="candidateConceptQuery.trim()"
+                    text
+                    size="small"
+                    :disabled="candidateConceptLoading"
+                    @click="clearCandidateConceptFilter"
+                  >
+                    清除
+                  </el-button>
+                  <el-button
+                    v-if="candidateConceptQuery.trim()"
+                    size="small"
+                    :loading="candidateConceptLoading"
+                    @click="refreshCandidateConceptAsync"
+                  >
+                    异步刷新
+                  </el-button>
+                </div>
+
+                <div v-if="activeConceptFilterSummary" class="candidate-concept-filter__summary">
+                  {{ activeConceptFilterSummary }}
+                </div>
+
                 <div
                   v-if="showTomorrowStarIndustryFilter"
                   class="industry-filter-panel"
@@ -546,6 +626,25 @@
                       <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
                         {{ getSignalTypeLabel(row.signal_type) }}
                       </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column
+                    v-if="activeConceptFilterApplied"
+                    label="相关"
+                    width="64"
+                    align="center"
+                  >
+                    <template #default="{ row }">
+                      <el-tooltip
+                        v-if="getCandidateConceptReason(row.code)"
+                        :content="getCandidateConceptReason(row.code)"
+                        placement="top"
+                      >
+                        <el-tag size="small" type="warning">
+                          {{ formatCandidateConceptRelevance(row.code) }}
+                        </el-tag>
+                      </el-tooltip>
+                      <span v-else>{{ formatCandidateConceptRelevance(row.code) }}</span>
                     </template>
                   </el-table-column>
                   <el-table-column v-if="!isCurrentHotTab" prop="total_score" label="评分" width="58" align="right" sortable="custom" :sort-orders="candidateSortOrders">
@@ -755,8 +854,8 @@
                     <div class="mobile-analysis-item__code">{{ row.code }}</div>
                     <div class="mobile-analysis-item__name">{{ row.name }}</div>
                   </div>
-                  <el-tag :type="getScoreType(row.score ?? undefined)" size="small">
-                    {{ typeof row.score === 'number' ? row.score.toFixed(1) : '-' }}
+                  <el-tag :type="getMiddayTrendStartTagType(row)" size="small">
+                    {{ formatMiddayTrendStartScore(row) }}
                   </el-tag>
                 </div>
                 <div class="mobile-analysis-item__meta">
@@ -926,10 +1025,10 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="score" label="总分" min-width="90" align="right" sortable="custom">
+                <el-table-column prop="score" label="趋势启动分" min-width="110" align="right" sortable="custom">
                   <template #default="{ row }">
-                    <el-tag :type="getScoreType(row.score)" size="small">
-                      {{ typeof row.score === 'number' ? row.score.toFixed(1) : '-' }}
+                    <el-tag :type="getMiddayTrendStartTagType(row)" size="small">
+                      {{ formatMiddayTrendStartScore(row) }}
                     </el-tag>
                   </template>
                 </el-table-column>
@@ -1050,6 +1149,199 @@
                   </template>
                 </el-table-column>
               </el-table>
+            </template>
+          </el-card>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="收盘分析" name="closing-analysis">
+        <div class="closing-layout">
+          <el-card class="candidates-card closing-card" v-loading="loadingClosingReport">
+            <template #header>
+              <div class="card-header">
+                <div class="title-section">
+                  <span>收盘分析</span>
+                  <el-tag size="small" type="info" class="date-tag">
+                    {{ closingReport?.trade_date || '待生成' }}
+                  </el-tag>
+                </div>
+                <div class="header-actions">
+                  <el-button
+                    size="small"
+                    :icon="Refresh"
+                    :loading="loadingClosingReport"
+                    @click="loadClosingReport(true)"
+                  >
+                    刷新
+                  </el-button>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    :loading="generatingClosingReport"
+                    @click="handleGenerateClosingReport"
+                  >
+                    {{ authStore.isAdmin && closingReport?.has_report ? '重新生成' : '生成报告' }}
+                  </el-button>
+                </div>
+              </div>
+            </template>
+
+            <el-empty v-if="!closingReport?.has_report" description="暂无收盘分析" :image-size="100">
+              <div class="midday-empty-note">
+                {{ closingReport?.message || '点击生成后，会基于最新日线数据形成当日报告。' }}
+              </div>
+            </el-empty>
+
+            <template v-else>
+              <div class="table-header-tip">
+                <span class="tip-item">· 普通用户每日只生成一份，已有报告会直接展示</span>
+                <span class="tip-item">· 管理员重新生成前会二次确认并覆盖当日报告</span>
+              </div>
+
+              <div class="closing-summary-grid">
+                <div class="closing-summary-card">
+                  <span class="closing-summary-card__label">大盘走势</span>
+                  <strong>{{ closingReport.market?.trend || '-' }}</strong>
+                  <span>{{ closingReport.market?.summary || '-' }}</span>
+                </div>
+                <div class="closing-summary-card">
+                  <span class="closing-summary-card__label">平均涨跌</span>
+                  <strong :class="(closingReport.market?.avg_change_pct || 0) >= 0 ? 'text-up' : 'text-down'">
+                    {{ formatClosingPct(closingReport.market?.avg_change_pct) }}
+                  </strong>
+                  <span>统计 {{ closingReport.market?.total_count || 0 }} 只股票</span>
+                </div>
+                <div class="closing-summary-card">
+                  <span class="closing-summary-card__label">涨跌家数</span>
+                  <strong>{{ closingReport.market?.up_count || 0 }} / {{ closingReport.market?.down_count || 0 }}</strong>
+                  <span>上涨 / 下跌</span>
+                </div>
+              </div>
+
+              <div class="closing-flow-grid">
+                <el-table :data="closingReport.sector_flow?.inflow_top3 || []" stripe>
+                  <el-table-column prop="sector_name" label="资金流入板块 TOP3" min-width="160" />
+                  <el-table-column label="净流入" width="120" align="right">
+                    <template #default="{ row }">
+                      <span class="text-up">{{ formatClosingMoney(row.net_mf_amount) }}</span>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <el-table :data="closingReport.sector_flow?.outflow_top3 || []" stripe>
+                  <el-table-column prop="sector_name" label="资金流出板块 TOP3" min-width="160" />
+                  <el-table-column label="净流出" width="120" align="right">
+                    <template #default="{ row }">
+                      <span class="text-down">{{ formatClosingMoney(row.net_mf_amount) }}</span>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+
+              <el-tabs
+                v-if="closingReport.candidate_buckets.length > 0 || closingReport.tomorrow_prediction"
+                v-model="closingActiveBucket"
+                class="closing-candidate-tabs"
+              >
+                <el-tab-pane
+                  v-for="bucket in closingReport.candidate_buckets"
+                  :key="bucket.source_pick_date"
+                  :label="getClosingBucketTitle(bucket)"
+                  :name="bucket.source_pick_date"
+                >
+                  <div class="closing-candidate-grid">
+                    <div>
+                      <h4>明显上涨（≥ 5%）</h4>
+                      <el-table :data="bucket.rising" stripe height="360">
+                        <el-table-column prop="code" label="代码" min-width="100" />
+                        <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+                        <el-table-column label="板块" min-width="160" show-overflow-tooltip>
+                          <template #default="{ row }">{{ getClosingSectorNames(row) }}</template>
+                        </el-table-column>
+                        <el-table-column label="候选日价" width="95" align="right">
+                          <template #default="{ row }">{{ formatPlanPrice(row.base_close) }}</template>
+                        </el-table-column>
+                        <el-table-column label="收盘价" width="95" align="right">
+                          <template #default="{ row }">{{ formatPlanPrice(row.latest_close) }}</template>
+                        </el-table-column>
+                        <el-table-column label="涨跌幅" width="100" align="right">
+                          <template #default="{ row }"><span class="text-up">{{ formatClosingPct(row.change_pct) }}</span></template>
+                        </el-table-column>
+                      </el-table>
+                    </div>
+                    <div>
+                      <h4>明显下跌（≤ -5%）</h4>
+                      <el-table :data="bucket.falling" stripe height="360">
+                        <el-table-column prop="code" label="代码" min-width="100" />
+                        <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+                        <el-table-column label="板块" min-width="160" show-overflow-tooltip>
+                          <template #default="{ row }">{{ getClosingSectorNames(row) }}</template>
+                        </el-table-column>
+                        <el-table-column label="候选日价" width="95" align="right">
+                          <template #default="{ row }">{{ formatPlanPrice(row.base_close) }}</template>
+                        </el-table-column>
+                        <el-table-column label="收盘价" width="95" align="right">
+                          <template #default="{ row }">{{ formatPlanPrice(row.latest_close) }}</template>
+                        </el-table-column>
+                        <el-table-column label="涨跌幅" width="100" align="right">
+                          <template #default="{ row }"><span class="text-down">{{ formatClosingPct(row.change_pct) }}</span></template>
+                        </el-table-column>
+                      </el-table>
+                    </div>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="明日预测" name="tomorrow-prediction">
+                  <div class="closing-prediction-header">
+                    <div>
+                      <h4>明日预测 TOP10</h4>
+                      <span>{{ closingReport.tomorrow_prediction?.message || '基于今日候选池、板块资金流、B1评分和AI消息面过滤。' }}</span>
+                    </div>
+                    <el-tag
+                      size="small"
+                      :type="closingReport.tomorrow_prediction?.status === 'ready' ? 'success' : 'warning'"
+                      effect="plain"
+                    >
+                      {{ closingReport.tomorrow_prediction?.status === 'ready' ? 'AI已过滤' : '本地预筛' }}
+                    </el-tag>
+                  </div>
+                  <el-table
+                    :data="closingReport.tomorrow_prediction?.selected || []"
+                    stripe
+                    height="520"
+                    table-layout="auto"
+                    class="closing-prediction-table"
+                  >
+                    <el-table-column prop="rank" label="#" width="56" align="center" />
+                    <el-table-column prop="code" label="代码" min-width="90" />
+                    <el-table-column prop="name" label="名称" min-width="110" show-overflow-tooltip />
+                    <el-table-column label="B1评价" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">{{ getClosingPredictionB1(row) }}</template>
+                    </el-table-column>
+                    <el-table-column label="所属板块" min-width="140" show-overflow-tooltip>
+                      <template #default="{ row }">{{ getClosingSectorNames(row) }}</template>
+                    </el-table-column>
+                    <el-table-column label="收盘/涨跌" min-width="120" align="right">
+                      <template #default="{ row }">
+                        {{ formatPlanPrice(row.close_price) }}
+                        <span :class="(row.change_pct || 0) >= 0 ? 'text-up' : 'text-down'">
+                          {{ formatClosingPct(row.change_pct) }}
+                        </span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="换手/量比" min-width="120" align="right">
+                      <template #default="{ row }">
+                        {{ formatTurnoverRate(row.turnover_rate) }} / {{ formatVolumeRatio(row.volume_ratio) }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="利好消息" min-width="240" show-overflow-tooltip>
+                      <template #default="{ row }">{{ getClosingPredictionBullish(row) }}</template>
+                    </el-table-column>
+                    <el-table-column label="AI点评" min-width="280" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.ai_comment || row.decision_reason || '-' }}</template>
+                    </el-table-column>
+                  </el-table>
+                </el-tab-pane>
+              </el-tabs>
+              <el-empty v-else description="暂无前日候选回看数据" :image-size="80" />
             </template>
           </el-card>
         </div>
@@ -1279,9 +1571,9 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh, Loading } from '@element-plus/icons-vue'
-import { apiAnalysis, apiTasks, isRequestCanceled } from '@/api'
-import { ElMessage } from 'element-plus'
+import { Refresh, Loading, Search } from '@element-plus/icons-vue'
+import { apiAnalysis, apiCustomConcepts, apiTasks, isRequestCanceled } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ECharts } from 'echarts/core'
 import type {
   Candidate,
@@ -1294,10 +1586,17 @@ import type {
   IntradayMarketOverviewItem,
   IntradayAnalysisResponse,
   IntradayAnalysisStatusResponse,
+  ClosingAnalysisReportResponse,
+  ClosingCandidateMoveBucket,
+  ClosingCandidateMoveItem,
+  ClosingTomorrowPredictionItem,
   RiskRegimeSummary,
   TomorrowStarHistoryItem,
   TomorrowStarWindowStatusResponse,
   SignalReturnAnalysisResponse,
+  CandidateConceptMatchItem,
+  CandidateConceptMatchRequestItem,
+  CandidateConceptMatchResponse,
 } from '@/types'
 import { useAuthStore } from '@/store/auth'
 import { useConfigStore } from '@/store/config'
@@ -1359,7 +1658,7 @@ type MiddaySortState = {
   prop: MiddaySortProp | ''
   order: SortOrder
 }
-type AnalysisDisplayRow = AnalysisResult | CurrentHotAnalysisResult | CurrentHotCandidate
+type AnalysisDisplayRow = Candidate | AnalysisResult | CurrentHotAnalysisResult | CurrentHotCandidate
 
 const analysisTabs: Array<{ name: DataTabKey; label: string }> = [
   { name: 'tomorrow-star', label: '明日之星' },
@@ -1396,6 +1695,8 @@ const currentHotLoading = ref(false)
 const currentHotLoadingLatest = ref(false)
 const loadingMidday = ref(false)
 const loadingMiddayAction = ref(false)
+const loadingClosingReport = ref(false)
+const generatingClosingReport = ref(false)
 const currentHotLoaded = ref(false)
 const currentHotHydratedFromCache = ref(false)
 const currentHotBoardFilter = ref<BoardFilter>('all')
@@ -1419,6 +1720,9 @@ const middayData = ref<IntradayAnalysisResponse>({
 })
 const middayLoaded = ref(false)
 const middaySort = ref<MiddaySortState>({ prop: '', order: null })
+const closingReportLoaded = ref(false)
+const closingReport = ref<ClosingAnalysisReportResponse | null>(null)
+const closingActiveBucket = ref('')
 
 type HistoryRow = {
   date: string
@@ -1545,11 +1849,20 @@ const currentHotRiskRegime = ref<RiskRegimeSummary | null>(null)
 const currentHotCandidatePage = ref(1)
 const currentHotAnalysisPage = ref(1)
 const currentHotCandidatePageSize = 18
-const currentHotAnalysisPageSize = 5
 const currentHotCandidateSort = ref<CandidateSortState>({ prop: '', order: null })
 const currentHotViewingDate = ref<string | null>(null)
 const currentHotCandidatesCache = ref<Map<string, { candidates: CurrentHotCandidate[], results: CurrentHotAnalysisResult[], riskRegime?: RiskRegimeSummary | null, timestamp: number }>>(new Map())
 const candidateSortOrders: Array<Exclude<SortOrder, null>> = ['descending', 'ascending']
+const candidateConceptQuery = ref('')
+const candidateConceptLoading = ref(false)
+const candidateConceptResult = ref<CandidateConceptMatchResponse | null>(null)
+const candidateConceptLocalCache = ref<Map<string, CandidateConceptMatchResponse>>(new Map())
+let candidateConceptRequestId = 0
+
+type CandidateConceptSuggestion = {
+  value: string
+  label: string
+}
 
 // 增量更新状态
 const incrementalUpdate = ref<IncrementalUpdateStatus>({
@@ -1583,7 +1896,9 @@ const middayMarketOverviewSummary = computed(() => middayData.value.market_overv
 const middayMarketOverviewItems = computed<IntradayMarketOverviewItem[]>(() => middayData.value.market_overview?.items || [])
 const middayRows = computed<IntradayAnalysisItem[]>(() => {
   const rows = [...(middayData.value.items || [])]
-  if (!middaySort.value.prop || !middaySort.value.order) return rows
+  if (!middaySort.value.prop || !middaySort.value.order) {
+    return rows.sort(compareMiddayTrendStartRows)
+  }
   return rows.sort((a, b) => compareMiddayRows(a, b, middaySort.value))
 })
 const middayCanViewData = computed(() => Boolean(middayData.value.has_data && middayRows.value.length > 0))
@@ -1726,9 +2041,9 @@ const tomorrowStarMergedCandidates = computed(() => latestCandidates.value.map(m
 const tomorrowStarIndustryOptions = computed(() => {
   const counts = new Map<string, number>()
   tomorrowStarMergedCandidates.value.forEach((candidate) => {
-    const industry = getCandidateIndustryLabel(candidate)
-    if (!industry || industry === '-') return
-    counts.set(industry, (counts.get(industry) || 0) + 1)
+    getCandidateSectorNames(candidate, { prioritizeSelected: false }).forEach((sectorName) => {
+      counts.set(sectorName, (counts.get(sectorName) || 0) + 1)
+    })
   })
 
   return [...counts.entries()]
@@ -1739,25 +2054,52 @@ const showTomorrowStarIndustryFilter = computed(() => !isCurrentHotTab.value && 
 const tomorrowStarFilteredCandidates = computed(() => {
   const selected = new Set(selectedTomorrowStarIndustries.value)
   if (selected.size === 0) return tomorrowStarMergedCandidates.value
-  return tomorrowStarMergedCandidates.value.filter((candidate) => selected.has(getCandidateIndustryLabel(candidate)))
+  return tomorrowStarMergedCandidates.value.filter((candidate) => (
+    getCandidateSectorNames(candidate, { prioritizeSelected: false }).some((sectorName) => selected.has(sectorName))
+  ))
 })
-const totalLatestCandidates = computed(() => tomorrowStarFilteredCandidates.value.length)
+const candidateConceptMatchMap = computed(() => {
+  const map = new Map<string, CandidateConceptMatchItem>()
+  ;(candidateConceptResult.value?.matches || []).forEach((item) => {
+    map.set(item.code, item)
+  })
+  return map
+})
+const activeConceptQuery = computed(() => candidateConceptQuery.value.trim())
+const activeConceptFilterApplied = computed(() => Boolean(activeConceptQuery.value && candidateConceptResult.value))
+const activeConceptFilterSummary = computed(() => {
+  if (!activeConceptFilterApplied.value || !candidateConceptResult.value) return ''
+  const sourceLabel = candidateConceptResult.value.source === 'stale_cache'
+    ? '缓存更新中'
+    : (candidateConceptResult.value.cache_hit ? '缓存' : 'AI')
+  return `${candidateConceptResult.value.query} · 命中 ${candidateConceptResult.value.matched_count} 只 · ${sourceLabel}`
+})
+const tomorrowStarConceptFilteredCandidates = computed(() => {
+  if (!activeConceptFilterApplied.value) return tomorrowStarFilteredCandidates.value
+  return tomorrowStarFilteredCandidates.value.filter((candidate) => candidateConceptMatchMap.value.has(candidate.code))
+})
+const totalLatestCandidates = computed(() => tomorrowStarConceptFilteredCandidates.value.length)
 const displayLatestCandidates = computed(() => {
   const pageCount = Math.max(1, Math.ceil(totalLatestCandidates.value / candidatePageSize))
   if (latestCandidatePage.value > pageCount) {
     latestCandidatePage.value = pageCount
   }
   const start = (latestCandidatePage.value - 1) * candidatePageSize
-  const sorted = sortTomorrowStarCandidates(tomorrowStarFilteredCandidates.value)
+  const sorted = sortTomorrowStarCandidates(tomorrowStarConceptFilteredCandidates.value)
   return sorted.slice(start, start + candidatePageSize)
 })
 
-const currentHotFilteredCandidates = computed(() => {
+const currentHotBaseFilteredCandidates = computed(() => {
   return [...currentHotLatestCandidates.value]
     .map(mergeCurrentHotCandidateAnalysis)
     .filter((candidate) => matchesBoardFilter(candidate.code, currentHotBoardFilter.value))
     .filter((candidate) => currentHotRiskFilter.value === 'all' || isRiskCandidate(candidate))
-    .sort(compareCurrentHotCandidates)
+})
+const currentHotFilteredCandidates = computed(() => {
+  const rows = activeConceptFilterApplied.value
+    ? currentHotBaseFilteredCandidates.value.filter((candidate) => candidateConceptMatchMap.value.has(candidate.code))
+    : currentHotBaseFilteredCandidates.value
+  return [...rows].sort(compareCurrentHotCandidates)
 })
 const totalCurrentHotCandidates = computed(() => currentHotFilteredCandidates.value.length)
 const displayCurrentHotLatestCandidates = computed(() => {
@@ -1768,6 +2110,17 @@ const displayCurrentHotLatestCandidates = computed(() => {
   const start = (currentHotCandidatePage.value - 1) * currentHotCandidatePageSize
   return currentHotFilteredCandidates.value.slice(start, start + currentHotCandidatePageSize)
 })
+const activeConceptUniverseCandidates = computed(() => (
+  isCurrentHotTab.value
+    ? currentHotLatestCandidates.value.map(mergeCurrentHotCandidateAnalysis)
+    : tomorrowStarMergedCandidates.value
+))
+const activeConceptUniverseSignature = computed(() => (
+  activeConceptUniverseCandidates.value
+    .map((candidate) => `${candidate.code}:${candidate.signal_type || ''}:${typeof candidate.total_score === 'number' ? candidate.total_score : ''}`)
+    .sort()
+    .join('|')
+))
 
 // 当前查看的日期显示
 const viewingDateDisplay = computed(() => {
@@ -1861,6 +2214,11 @@ function compareByCandidateSort(
 ): number {
   const sortState = getCandidateSortState()
   if (!sortState.prop || !sortState.order) {
+    if (activeConceptFilterApplied.value) {
+      const aRelevance = getCandidateConceptRelevanceValue(a.code) ?? -1
+      const bRelevance = getCandidateConceptRelevanceValue(b.code) ?? -1
+      if (aRelevance !== bRelevance) return bRelevance - aRelevance
+    }
     return fallback()
   }
 
@@ -1880,9 +2238,45 @@ function sortTomorrowStarCandidates(rows: Candidate[]): Candidate[] {
   })
 }
 
-function getCandidateIndustryLabel(candidate: Pick<Candidate, 'industry'>): string {
-  const industry = typeof candidate.industry === 'string' ? candidate.industry.trim() : ''
-  return industry || '-'
+type CandidateSectorLike = Pick<Candidate, 'industry' | 'sector_names'>
+
+function getCandidateSectorNames(
+  candidate: CandidateSectorLike,
+  options: { prioritizeSelected?: boolean } = {},
+): string[] {
+  const normalizedNames = Array.isArray(candidate.sector_names)
+    ? candidate.sector_names
+      .map((item) => String(item || '').trim())
+      .filter((item) => item.length > 0)
+    : []
+  const uniqueNames = normalizedNames.filter((item, index) => normalizedNames.indexOf(item) === index)
+
+  if (uniqueNames.length === 0) {
+    const industry = typeof candidate.industry === 'string' ? candidate.industry.trim() : ''
+    return industry ? [industry] : []
+  }
+
+  if (!options.prioritizeSelected || selectedTomorrowStarIndustries.value.length === 0 || uniqueNames.length < 2) {
+    return uniqueNames
+  }
+
+  const selectedOrder = new Map(
+    selectedTomorrowStarIndustries.value.map((item, index) => [item, index] as const)
+  )
+
+  return [...uniqueNames].sort((a, b) => {
+    const aOrder = selectedOrder.get(a)
+    const bOrder = selectedOrder.get(b)
+    if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder
+    if (aOrder !== undefined) return -1
+    if (bOrder !== undefined) return 1
+    return uniqueNames.indexOf(a) - uniqueNames.indexOf(b)
+  })
+}
+
+function getCandidateIndustryLabel(candidate: CandidateSectorLike): string {
+  const sectorNames = getCandidateSectorNames(candidate, { prioritizeSelected: true })
+  return sectorNames.length > 0 ? sectorNames.join(' / ') : '-'
 }
 
 function toggleTomorrowStarIndustry(industry: string) {
@@ -1900,6 +2294,140 @@ function clearTomorrowStarIndustryFilter() {
   selectedTomorrowStarIndustries.value = []
   latestCandidatePage.value = 1
   persistTomorrowStarCache()
+}
+
+function getCandidateConceptMatch(code: string): CandidateConceptMatchItem | null {
+  return candidateConceptMatchMap.value.get(code) || null
+}
+
+function formatCandidateConceptRelevance(code: string): string {
+  const match = getCandidateConceptMatch(code)
+  if (!match || typeof match.relevance_score !== 'number') return '-'
+  return `${Math.round(match.relevance_score)}`
+}
+
+function getCandidateConceptRelevanceValue(code: string): number | null {
+  const match = getCandidateConceptMatch(code)
+  return typeof match?.relevance_score === 'number' ? match.relevance_score : null
+}
+
+function getCandidateConceptReason(code: string): string {
+  const match = getCandidateConceptMatch(code)
+  if (!match) return ''
+  const roleText = Array.isArray(match.role_tags) && match.role_tags.length > 0 ? `角色:${match.role_tags.join('/')}` : ''
+  const chainText = match.chain_position ? `位置:${match.chain_position}` : ''
+  return [roleText, chainText, match.reason].filter((item) => typeof item === 'string' && item.trim()).join(' | ')
+}
+
+async function fetchCandidateConceptSuggestions(
+  query: string,
+  callback: (items: CandidateConceptSuggestion[]) => void,
+) {
+  try {
+    const response = await apiCustomConcepts.suggestQueries(query.trim(), 10)
+    callback((response.items || []).map((item) => ({
+      value: item.query,
+      label: item.label && item.label !== item.query ? `${item.source} · ${item.label}` : item.source,
+    })))
+  } catch (error) {
+    console.error('Failed to load concept query suggestions:', error)
+    callback([])
+  }
+}
+
+function buildCandidateConceptCacheKey(query: string, items: CandidateConceptMatchRequestItem[]): string {
+  const normalizedQuery = query.trim().toLowerCase()
+  const codes = items.map((item) => item.code).sort().join(',')
+  return `${activeDataTab.value}:${activeViewingDateDisplay.value}:${normalizedQuery}:${codes}`
+}
+
+function isSameOrAfterDate(value?: string | null, targetDate?: string | null): boolean {
+  if (!value) return false
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return false
+  if (!targetDate) return false
+  const target = new Date(`${targetDate}T00:00:00`)
+  if (Number.isNaN(target.getTime())) return false
+  return formatDate(date) >= formatDate(target)
+}
+
+function isFreshCandidateConceptResult(result: CandidateConceptMatchResponse): boolean {
+  return result.source !== 'stale_cache' && isSameOrAfterDate(result.data_updated_at, activeLatestDate.value)
+}
+
+function buildCandidateConceptPayloadItems(): CandidateConceptMatchRequestItem[] {
+  return activeConceptUniverseCandidates.value.map((candidate) => ({
+    code: candidate.code,
+    name: candidate.name || null,
+    industry: 'industry' in candidate ? candidate.industry || null : null,
+    sector_names: getCandidateSectorNames(candidate, { prioritizeSelected: false }),
+    signal_type: candidate.signal_type || null,
+    total_score: typeof candidate.total_score === 'number' ? candidate.total_score : null,
+    comment: candidate.comment || null,
+  }))
+}
+
+async function applyCandidateConceptFilter(forceRefresh: boolean = false, asyncRefresh: boolean = false) {
+  const query = candidateConceptQuery.value.trim()
+  if (!query) {
+    candidateConceptResult.value = null
+    latestCandidatePage.value = 1
+    currentHotCandidatePage.value = 1
+    return
+  }
+
+  const payloadItems = buildCandidateConceptPayloadItems()
+  if (payloadItems.length === 0) {
+    ElMessage.warning('当前没有可供检索的候选股票')
+    return
+  }
+
+  const cacheKey = buildCandidateConceptCacheKey(query, payloadItems)
+  if (!forceRefresh) {
+    const cached = candidateConceptLocalCache.value.get(cacheKey)
+    if (cached && isFreshCandidateConceptResult(cached)) {
+      candidateConceptResult.value = cached
+      latestCandidatePage.value = 1
+      currentHotCandidatePage.value = 1
+      return
+    } else if (cached) {
+      candidateConceptLocalCache.value.delete(cacheKey)
+    }
+  }
+
+  const requestId = ++candidateConceptRequestId
+  candidateConceptLoading.value = true
+  try {
+    const response = await apiCustomConcepts.matchCandidates(query, payloadItems, forceRefresh, asyncRefresh)
+    if (requestId !== candidateConceptRequestId) return
+    if (isFreshCandidateConceptResult(response)) {
+      candidateConceptLocalCache.value.set(cacheKey, response)
+    }
+    candidateConceptResult.value = response
+    if (response.refresh_scheduled) {
+      ElMessage.info('请耐心等待，大约需要1分钟后，用原始问题再次查询。')
+    }
+    latestCandidatePage.value = 1
+    currentHotCandidatePage.value = 1
+  } catch (error) {
+    if (requestId !== candidateConceptRequestId) return
+    ElMessage.error(getUserSafeErrorMessage(error, '候选相关性过滤失败'))
+  } finally {
+    if (requestId === candidateConceptRequestId) {
+      candidateConceptLoading.value = false
+    }
+  }
+}
+
+async function refreshCandidateConceptAsync() {
+  await applyCandidateConceptFilter(false, true)
+}
+
+function clearCandidateConceptFilter() {
+  candidateConceptQuery.value = ''
+  candidateConceptResult.value = null
+  latestCandidatePage.value = 1
+  currentHotCandidatePage.value = 1
 }
 
 function compareCurrentHotCandidates(a: CurrentHotCandidate, b: CurrentHotCandidate): number {
@@ -1985,70 +2513,73 @@ function compareTomorrowStarAnalysisResults(
   return a.code.localeCompare(b.code)
 }
 
-function compareCurrentHotAnalysisResults(
-  a: { b1_passed?: boolean | null, signal_type?: string, total_score?: number, code: string },
-  b: { b1_passed?: boolean | null, signal_type?: string, total_score?: number, code: string },
-): number {
-  const signalDiff = getSignalPriority(a.signal_type) - getSignalPriority(b.signal_type)
-  if (signalDiff !== 0) return signalDiff
-
-  const b1Diff = getB1PassPriority(a.b1_passed) - getB1PassPriority(b.b1_passed)
-  if (b1Diff !== 0) return b1Diff
-
-  const scoreDiff = getScoreSortValue(a.total_score) - getScoreSortValue(b.total_score)
-  if (scoreDiff !== 0) return scoreDiff
-
-  return a.code.localeCompare(b.code)
-}
-
 const topAnalysisResults = computed(() => {
-  return [...latestAnalysisResults.value]
+  const rows = activeConceptFilterApplied.value
+    ? latestAnalysisResults.value.filter((result) => candidateConceptMatchMap.value.has(result.code))
+    : latestAnalysisResults.value
+  return [...rows]
     .sort(compareTomorrowStarAnalysisResults)
     .slice(0, 5)
 })
 
-const currentHotFilteredAnalysisResults = computed(() => {
-  return [...currentHotAnalysisResults.value]
-    .filter((result) => matchesBoardFilter(result.code, currentHotBoardFilter.value))
-    .filter((result) => currentHotRiskFilter.value === 'all' || isRiskCandidate(result))
-    .sort(compareCurrentHotAnalysisResults)
-})
-const totalCurrentHotAnalysisResults = computed(() => currentHotFilteredAnalysisResults.value.length)
-const currentHotAnalysisPageCount = computed(() => Math.max(1, Math.ceil(totalCurrentHotAnalysisResults.value / currentHotAnalysisPageSize)))
+const mobileTomorrowStarSearchApplied = computed(() => !isCurrentHotTab.value && activeConceptFilterApplied.value)
 const showActiveAnalysisPagination = computed(() => (
   isCurrentHotTab.value
     ? totalCurrentHotCandidates.value > currentHotCandidatePageSize
-    : false
+    : (mobileTomorrowStarSearchApplied.value && totalLatestCandidates.value > candidatePageSize)
 ))
-const activeMobileAnalysisRows = computed(() => (isCurrentHotTab.value ? displayCurrentHotLatestCandidates.value : topAnalysisResults.value))
+const activeMobileAnalysisRows = computed(() => {
+  if (isCurrentHotTab.value) {
+    return displayCurrentHotLatestCandidates.value
+  }
+  return mobileTomorrowStarSearchApplied.value ? displayLatestCandidates.value : topAnalysisResults.value
+})
 const activeMobileAnalysisTitle = computed(() => (
   isCurrentHotTab.value
     ? (currentHotRiskFilter.value === 'risk-only' ? '风险标的' : '热力股票池')
-    : '分析结果 Top 5'
+    : (mobileTomorrowStarSearchApplied.value ? '检索结果' : '分析结果 Top 5')
 ))
-const activeMobileAnalysisTip = computed(() => (isCurrentHotTab.value ? '· 已合并评分与信号，默认按趋势启动、B1通过、评分排序' : '· 仅展示评分最高的 5 只股票'))
+const activeMobileAnalysisTip = computed(() => (
+  isCurrentHotTab.value
+    ? '· 已合并评分与信号，默认按趋势启动、B1通过、评分排序'
+    : (mobileTomorrowStarSearchApplied.value ? '· 展示当前检索命中的候选股票' : '· 仅展示评分最高的 5 只股票')
+))
 const activeMobileAnalysisEmptyDescription = computed(() => (
   isCurrentHotTab.value
     ? (currentHotRiskFilter.value === 'risk-only' ? '暂无风险标的' : '暂无热力股票池')
-    : '暂无 Top 5 分析结果'
+    : (mobileTomorrowStarSearchApplied.value ? '暂无检索结果' : '暂无 Top 5 分析结果')
 ))
 const activeMobileAnalysisPage = computed({
-  get: () => (isCurrentHotTab.value ? currentHotCandidatePage.value : currentHotAnalysisPage.value),
+  get: () => (
+    isCurrentHotTab.value
+      ? currentHotCandidatePage.value
+      : (mobileTomorrowStarSearchApplied.value ? latestCandidatePage.value : 1)
+  ),
   set: (value: number) => {
     if (isCurrentHotTab.value) {
       currentHotCandidatePage.value = value
       return
     }
-    currentHotAnalysisPage.value = value
+    if (mobileTomorrowStarSearchApplied.value) {
+      latestCandidatePage.value = value
+    }
   },
 })
-const activeMobileAnalysisPageSize = computed(() => (isCurrentHotTab.value ? currentHotCandidatePageSize : currentHotAnalysisPageSize))
+const activeMobileAnalysisPageSize = computed(() => (
+  isCurrentHotTab.value
+    ? currentHotCandidatePageSize
+    : (mobileTomorrowStarSearchApplied.value ? candidatePageSize : topAnalysisResults.value.length || 5)
+))
 const activeMobileAnalysisPageCount = computed(() => (
   isCurrentHotTab.value
     ? Math.max(1, Math.ceil(totalCurrentHotCandidates.value / currentHotCandidatePageSize))
-    : currentHotAnalysisPageCount.value
+    : (mobileTomorrowStarSearchApplied.value ? Math.max(1, Math.ceil(totalLatestCandidates.value / candidatePageSize)) : 1)
 ))
-const activeMobileAnalysisTotal = computed(() => (isCurrentHotTab.value ? totalCurrentHotCandidates.value : totalCurrentHotAnalysisResults.value))
+const activeMobileAnalysisTotal = computed(() => (
+  isCurrentHotTab.value
+    ? totalCurrentHotCandidates.value
+    : (mobileTomorrowStarSearchApplied.value ? totalLatestCandidates.value : topAnalysisResults.value.length)
+))
 const activeDisplayHistoryData = computed(() => (isCurrentHotTab.value ? displayCurrentHotHistoryData.value : displayHistoryData.value))
 const showAnalysisPrefilter = computed(() => !isCurrentHotTab.value)
 const activeSelectedDate = computed(() => (isCurrentHotTab.value ? currentHotSelectedDate.value : selectedDate.value))
@@ -3112,6 +3643,70 @@ async function refreshMiddayView() {
   await loadMiddayData(true)
 }
 
+async function loadClosingReport(forceRefresh: boolean = false) {
+  if (loadingClosingReport.value && !forceRefresh) return
+
+  loadingClosingReport.value = true
+  try {
+    const response = await apiAnalysis.getClosingReport()
+    closingReport.value = response
+    closingReportLoaded.value = true
+    if (response.candidate_buckets?.length && !response.candidate_buckets.some((bucket) => bucket.source_pick_date === closingActiveBucket.value)) {
+      closingActiveBucket.value = response.candidate_buckets[0].source_pick_date
+    } else if (!response.candidate_buckets?.length && response.tomorrow_prediction) {
+      closingActiveBucket.value = 'tomorrow-prediction'
+    }
+  } catch (error) {
+    console.error('Failed to load closing analysis report:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '加载收盘分析失败'))
+  } finally {
+    loadingClosingReport.value = false
+  }
+}
+
+async function generateClosingReport(force: boolean = false) {
+  if (generatingClosingReport.value) return
+
+  generatingClosingReport.value = true
+  try {
+    const response = await apiAnalysis.generateClosingReport(force)
+    closingReport.value = response
+    closingReportLoaded.value = true
+    if (response.candidate_buckets?.length && !response.candidate_buckets.some((bucket) => bucket.source_pick_date === closingActiveBucket.value)) {
+      closingActiveBucket.value = response.candidate_buckets[0].source_pick_date
+    } else if (!response.candidate_buckets?.length && response.tomorrow_prediction) {
+      closingActiveBucket.value = 'tomorrow-prediction'
+    }
+    ElMessage.success(response.message || (response.generated ? '收盘分析已生成' : '当日收盘分析已存在'))
+  } catch (error) {
+    console.error('Failed to generate closing analysis report:', error)
+    ElMessage.error(getUserSafeErrorMessage(error, '生成收盘分析失败'))
+  } finally {
+    generatingClosingReport.value = false
+  }
+}
+
+async function handleGenerateClosingReport() {
+  if (authStore.isAdmin && closingReport.value?.has_report) {
+    try {
+      await ElMessageBox.confirm(
+        '当日收盘分析已经生成。确认后会基于当前最新日线数据强制重算并覆盖原报告。',
+        '确认重新生成收盘分析',
+        {
+          confirmButtonText: '确认重算',
+          cancelButtonText: '取消',
+          type: 'warning',
+        },
+      )
+      await generateClosingReport(true)
+    } catch {
+      ElMessage.info('已取消重新生成')
+    }
+    return
+  }
+  await generateClosingReport(false)
+}
+
 async function runMiddayAdminAction(action: 'generate' | 'refresh' | 'prefetch') {
   if (loadingMiddayAction.value) return
 
@@ -3180,7 +3775,14 @@ function getAnalysisResultComment(result: AnalysisDisplayRow): string {
   if (typeof result.comment === 'string' && result.comment.trim()) {
     return result.comment.trim()
   }
-  return '点击查看单股诊断'
+  const b1Passed = getAnalysisB1Passed(result)
+  const parts = [
+    result.signal_type ? getSignalTypeLabel(result.signal_type) : '',
+    result.verdict ? getVerdictLabel(result.verdict) : '',
+    typeof result.total_score === 'number' ? `评分 ${result.total_score.toFixed(1)}` : '',
+    b1Passed === true ? 'B1通过' : (b1Passed === false ? 'B1未通过' : ''),
+  ].filter((item) => item && item.trim())
+  return parts.length > 0 ? parts.join(' · ') : '暂无简要分析'
 }
 
 type PullbackFieldLike = {
@@ -3295,16 +3897,17 @@ function getCandidateInlineNote(row: Candidate | CurrentHotCandidate): string {
   const pullbackSummary = getRowPullbackSummary(row)
   const prefilterNote = getCandidatePrefilterNote(row as CandidateNoteLike)
   const riskSummary = getRiskFlagSummary(row as AnalysisDisplayRow)
+  const fallbackSummary = getAnalysisResultComment(row as AnalysisDisplayRow)
   if (isCurrentHotTab.value) {
     const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
-    return [riskSummary, pullbackSummary, comment, prefilterNote]
+    return [riskSummary, pullbackSummary, comment || fallbackSummary, prefilterNote]
       .filter((item) => typeof item === 'string' && item.trim())
-      .join('；') || '点击查看单股诊断'
+      .join('；') || '暂无简要分析'
   }
   const comment = typeof row.comment === 'string' ? row.comment.trim() : ''
-  return [pullbackSummary, comment, prefilterNote]
+  return [pullbackSummary, comment || fallbackSummary, prefilterNote]
     .filter((item) => typeof item === 'string' && item.trim())
-    .join('；') || '点击查看单股诊断'
+    .join('；') || '暂无简要分析'
 }
 
 function getAnalysisB1Passed(result: AnalysisDisplayRow): boolean | null | undefined {
@@ -3610,6 +4213,43 @@ function formatPlanPrice(value?: number | string | null): string {
   return numeric === null ? '-' : numeric.toFixed(2)
 }
 
+function formatClosingMoney(value?: number | null): string {
+  const numeric = toFiniteNumber(value)
+  if (numeric === null) return '-'
+  const abs = Math.abs(numeric)
+  if (abs >= 10000) return `${(numeric / 10000).toFixed(2)}亿`
+  return `${numeric.toFixed(2)}万`
+}
+
+function formatClosingPct(value?: number | null): string {
+  const numeric = toFiniteNumber(value)
+  return numeric === null ? '-' : `${numeric.toFixed(2)}%`
+}
+
+function getClosingBucketTitle(bucket: ClosingCandidateMoveBucket): string {
+  return `${bucket.label} ${bucket.source_pick_date}`
+}
+
+function getClosingSectorNames(row: ClosingCandidateMoveItem | ClosingTomorrowPredictionItem): string {
+  return row.sector_names?.length ? row.sector_names.join(' / ') : '-'
+}
+
+function getClosingPredictionB1(row: ClosingTomorrowPredictionItem): string {
+  const parts = [
+    row.b1_passed === true ? 'B1通过' : row.b1_passed === false ? 'B1未通过' : 'B1未知',
+    typeof row.b1_score === 'number' ? `评分 ${row.b1_score.toFixed(1)}` : '',
+    row.verdict ? `结论 ${getVerdictLabel(row.verdict)}` : '',
+    row.b1_comment || '',
+  ].filter(Boolean)
+  return parts.length ? parts.join('；') : '-'
+}
+
+function getClosingPredictionBullish(row: ClosingTomorrowPredictionItem): string {
+  if (row.bullish_news?.length) return row.bullish_news.join('；')
+  if (row.local_reasons?.length) return row.local_reasons.slice(0, 3).join('；')
+  return '-'
+}
+
 function formatKeyLevels(levels?: Record<string, number | null> | null): string {
   if (!levels) return '-'
   const labelMap: Record<string, string> = {
@@ -3699,6 +4339,44 @@ function getMiddayPositionSuggestion(row: IntradayAnalysisItem): string {
   return '持仓建议：先持有观察，以下午量价和关键位表现决定是否加仓或减仓。'
 }
 
+function getMiddayTrendStartScore(row: IntradayAnalysisItem): number | null {
+  const change = toFiniteNumber(row.latest_change_pct) ?? toFiniteNumber(row.change_pct)
+  if (change === null) return null
+  const volumeRatio = toFiniteNumber(row.volume_ratio) ?? 1
+  const volumeBoost = Math.max(volumeRatio - 1, 0)
+  const b1Boost = row.b1_passed === true ? 15 : 0
+  if (change <= -5) {
+    return Number((change * 10 - volumeBoost * 6 + b1Boost * 0.2).toFixed(2))
+  }
+  const positiveBase = change > 0 ? change * 10 + volumeBoost * 8 + b1Boost : change * 10 + volumeBoost * 2
+  return Number(positiveBase.toFixed(2))
+}
+
+function formatMiddayTrendStartScore(row: IntradayAnalysisItem): string {
+  const score = getMiddayTrendStartScore(row)
+  return score === null ? '-' : score.toFixed(1)
+}
+
+function getMiddayTrendStartTagType(row: IntradayAnalysisItem): string {
+  const score = getMiddayTrendStartScore(row)
+  if (score === null) return 'info'
+  if (score >= 50) return 'success'
+  if (score >= 20) return 'warning'
+  if (score <= -50) return 'danger'
+  return 'info'
+}
+
+function compareMiddayTrendStartRows(a: IntradayAnalysisItem, b: IntradayAnalysisItem): number {
+  const aScore = getMiddayTrendStartScore(a)
+  const bScore = getMiddayTrendStartScore(b)
+  if (aScore !== null || bScore !== null) {
+    if (aScore === null) return 1
+    if (bScore === null) return -1
+    if (aScore !== bScore) return bScore - aScore
+  }
+  return a.code.localeCompare(b.code)
+}
+
 function getMiddayRowComment(row: IntradayAnalysisItem): string {
   const reason = row.exit_plan?.reason?.trim()
   const suggestion = getMiddayPositionSuggestion(row)
@@ -3717,6 +4395,7 @@ function getMiddaySortableValue(row: IntradayAnalysisItem, prop: MiddaySortProp)
   if (prop === 'signal_type') return getSignalTypeLabel(row.signal_type)
   if (prop === 'b1_passed') return row.b1_passed ?? null
   if (prop === 'latest_price') return getMiddayLatestPrice(row)
+  if (prop === 'score') return getMiddayTrendStartScore(row)
   return toFiniteNumber(row[prop as keyof IntradayAnalysisItem] as number | string | null | undefined)
 }
 
@@ -3727,7 +4406,7 @@ function compareMiddayRows(a: IntradayAnalysisItem, b: IntradayAnalysisItem, sta
     getMiddaySortableValue(b, state.prop),
     state.order,
   )
-  return diff !== 0 ? diff : a.code.localeCompare(b.code)
+  return diff !== 0 ? diff : compareMiddayTrendStartRows(a, b)
 }
 
 function handleMiddaySortChange({ prop, order }: { prop: string, order: SortOrder }) {
@@ -3966,6 +4645,10 @@ watch(activeTab, (value) => {
   }
   if (value === 'current-hot' && !currentHotLoaded.value) {
     void loadCurrentHotData()
+    return
+  }
+  if (value === 'closing-analysis' && !closingReportLoaded.value) {
+    void loadClosingReport()
   }
 })
 
@@ -3989,6 +4672,11 @@ watch(currentHotBoardFilter, () => {
 watch(currentHotRiskFilter, () => {
   currentHotCandidatePage.value = 1
   currentHotAnalysisPage.value = 1
+})
+
+watch([activeDataTab, activeConceptUniverseSignature], () => {
+  if (!candidateConceptQuery.value.trim()) return
+  void applyCandidateConceptFilter()
 })
 
 watch(tomorrowStarIndustryOptions, (options) => {
@@ -4164,6 +4852,44 @@ $space-lg: 32px;
     border: 1px solid #ebeef5;
     border-radius: 6px;
     background: #fafafa;
+  }
+
+  .candidate-concept-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: $space-xs;
+
+    :deep(.el-input),
+    :deep(.el-autocomplete) {
+      flex: 1 1 auto;
+    }
+  }
+
+  .candidate-concept-suggestion {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+
+    small {
+      color: #909399;
+      font-size: 12px;
+    }
+  }
+
+  .candidate-concept-filter__summary {
+    margin: -4px 0 $space-xs;
+    font-size: 12px;
+    color: #909399;
+  }
+
+  .candidate-concept-filter--mobile {
+    margin-bottom: 8px;
+  }
+
+  .candidate-concept-filter__summary--mobile {
+    margin-top: 0;
   }
 
   .industry-filter-chip {
@@ -5057,6 +5783,84 @@ $space-lg: 32px;
 .return-down {
   color: #67c23a;
   font-weight: 500;
+}
+
+.closing-layout {
+  width: 100%;
+}
+
+.closing-card {
+  min-height: 520px;
+}
+
+.closing-summary-grid,
+.closing-flow-grid,
+.closing-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.closing-flow-grid,
+.closing-candidate-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.closing-summary-card {
+  padding: 14px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #64748b;
+
+  strong {
+    font-size: 22px;
+    color: #111827;
+  }
+}
+
+.closing-summary-card__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.closing-candidate-tabs {
+  margin-top: 16px;
+
+  h4 {
+    margin: 0 0 8px;
+    color: #1f2937;
+  }
+}
+
+.closing-prediction-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  color: #64748b;
+
+  h4 {
+    margin: 0 0 4px;
+  }
+}
+
+.closing-prediction-table {
+  min-width: 1180px;
+}
+
+@media (max-width: 768px) {
+  .closing-summary-grid,
+  .closing-flow-grid,
+  .closing-candidate-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dialog-footer {

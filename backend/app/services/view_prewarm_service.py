@@ -76,7 +76,7 @@ def prewarm_latest_analysis_views(trade_date: str | None = None) -> dict[str, An
                 "tomorrow_star_candidates",
                 lambda: {
                     "pick_date": str(latest_tomorrow_star_date),
-                    "total": len(CandidateService(db).load_candidates(str(latest_tomorrow_star_date), limit=2000)[1]),
+                    "total": len(CandidateService(db).load_candidates(str(latest_tomorrow_star_date), limit=3000)[1]),
                 },
             )
             run_step(

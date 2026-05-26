@@ -186,6 +186,10 @@ class AnalysisService:
         )
         return HybridB1Selector(config=config)
 
+    def _build_b1_selector(self):
+        """兼容旧调用入口，统一复用当前的 Hybrid B1 选择器。"""
+        return self._build_hybrid_b1_selector()
+
     def _load_preselect_config(self) -> dict[str, Any]:
         """加载初选配置。"""
         config_file = ROOT / "config" / "rules_preselect.yaml"
@@ -296,7 +300,7 @@ class AnalysisService:
     ) -> Optional[dict[pd.Timestamp, set[str]]]:
         """构建指定时间窗的流动性池成员集合。"""
         global_cfg = preselect_cfg.get("global", {})
-        top_m = int(global_cfg.get("top_m", 2000))
+        top_m = int(global_cfg.get("top_m", 3000))
         n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
         cache_key = (
             start_ts.strftime("%Y-%m-%d"),
@@ -335,7 +339,7 @@ class AnalysisService:
             return {}
 
         global_cfg = preselect_cfg.get("global", {})
-        top_m = int(global_cfg.get("top_m", 2000))
+        top_m = int(global_cfg.get("top_m", 3000))
         n_turnover_days = int(global_cfg.get("n_turnover_days", 43))
         cache_key = (
             start_ts.strftime("%Y-%m-%d"),
@@ -425,7 +429,7 @@ class AnalysisService:
             return active_pool_rank_service.get_available_dates(
                 start_date=start_ts,
                 end_date=end_ts,
-                top_m=int(global_cfg.get("top_m", 2000)),
+                top_m=int(global_cfg.get("top_m", 3000)),
                 n_turnover_days=int(global_cfg.get("n_turnover_days", 43)),
             )
         except Exception as exc:
@@ -685,7 +689,7 @@ class AnalysisService:
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config) if include_prefilter else None
         preselect_cfg = self._load_preselect_config()
-        top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
+        top_m = int(preselect_cfg.get("global", {}).get("top_m", 3000))
 
         target_ts_map = {
             pd.Timestamp(item).normalize(): item
@@ -1320,7 +1324,7 @@ class AnalysisService:
             if analysis_date_text:
                 check_ts = pd.Timestamp(analysis_date_text).normalize()
                 preselect_cfg = self._load_preselect_config()
-                top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
+                top_m = int(preselect_cfg.get("global", {}).get("top_m", 3000))
                 active_pool_rankings = self._safe_build_active_pool_rankings(
                     start_ts=check_ts,
                     end_ts=check_ts,
@@ -1845,7 +1849,7 @@ class AnalysisService:
         quant_config = self._load_quant_review_config()
         prefilter = self._build_prefilter(quant_config)
         preselect_cfg = self._load_preselect_config()
-        top_m = int(preselect_cfg.get("global", {}).get("top_m", 2000))
+        top_m = int(preselect_cfg.get("global", {}).get("top_m", 3000))
         active_pool_rankings = self._safe_build_active_pool_rankings(
             start_ts=target_ts.normalize(),
             end_ts=target_ts.normalize(),

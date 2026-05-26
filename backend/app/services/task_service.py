@@ -1460,7 +1460,7 @@ class TaskService:
         global_cfg = preselect_cfg.get("global", {})
         return active_pool_rank_service.compute_for_dates(
             [trade_date],
-            top_m=int(global_cfg.get("top_m", 2000)),
+            top_m=int(global_cfg.get("top_m", 3000)),
             n_turnover_days=int(global_cfg.get("n_turnover_days", 43)),
             force=force,
         )

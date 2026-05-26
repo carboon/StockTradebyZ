@@ -92,6 +92,7 @@ export interface Candidate {
   code: string
   name?: string
   industry?: string | null
+  sector_names?: string[]
   strategy?: string
   open_price?: number
   close_price?: number
@@ -907,6 +908,105 @@ export type CurrentHotIntradayAnalysisResponse = IntradayAnalysisResponse
 export type CurrentHotIntradayAnalysisActionResponse = IntradayAnalysisActionResponse
 export type CurrentHotIntradayAnalysisPrefetchResponse = IntradayAnalysisPrefetchResponse
 
+export interface ClosingSectorFlowItem {
+  sector_name: string
+  net_mf_amount: number
+}
+
+export interface ClosingMarketOverview {
+  trend: string
+  trade_date?: string | null
+  previous_trade_date?: string | null
+  avg_change_pct?: number | null
+  up_count: number
+  down_count: number
+  flat_count: number
+  total_count: number
+  summary?: string | null
+}
+
+export interface ClosingSectorFlow {
+  inflow_top3: ClosingSectorFlowItem[]
+  outflow_top3: ClosingSectorFlowItem[]
+}
+
+export interface ClosingCandidateMoveItem {
+  code: string
+  name?: string | null
+  sector_names: string[]
+  base_close?: number | null
+  latest_close?: number | null
+  change_pct: number
+  source_pick_date: string
+}
+
+export interface ClosingCandidateMoveBucket {
+  label: string
+  source_pick_date: string
+  rising: ClosingCandidateMoveItem[]
+  falling: ClosingCandidateMoveItem[]
+}
+
+export interface ClosingTomorrowPredictionItem {
+  rank?: number | null
+  code: string
+  name?: string | null
+  sector_names: string[]
+  b1_score?: number | null
+  b1_passed?: boolean | null
+  b1_comment?: string | null
+  signal_type?: string | null
+  verdict?: string | null
+  close_price?: number | null
+  change_pct?: number | null
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  sector_net_mf_amount?: number | null
+  sector_3d_net_mf_amount?: number | null
+  local_score?: number | null
+  local_reasons: string[]
+  ai_score?: number | null
+  bullish_news: string[]
+  negative_news: string[]
+  ai_comment?: string | null
+  decision_reason?: string | null
+}
+
+export interface ClosingTomorrowPrediction {
+  trade_date?: string | null
+  status?: string | null
+  message?: string | null
+  preselected: ClosingTomorrowPredictionItem[]
+  selected: ClosingTomorrowPredictionItem[]
+  sector_flow_history: Array<Record<string, any>>
+  ai?: Record<string, any> | null
+}
+
+export interface ClosingAnalysisStatusResponse {
+  latest_data_date?: string | null
+  report_trade_date?: string | null
+  has_report: boolean
+  can_generate: boolean
+  status: string
+  message: string
+}
+
+export interface ClosingAnalysisReportResponse {
+  id?: number | null
+  has_report: boolean
+  generated: boolean
+  status?: string | null
+  message?: string | null
+  trade_date?: string | null
+  source_data_date?: string | null
+  generated_at?: string | null
+  force_generated: boolean
+  market?: ClosingMarketOverview | null
+  sector_flow?: ClosingSectorFlow | null
+  candidate_buckets: ClosingCandidateMoveBucket[]
+  tomorrow_prediction?: ClosingTomorrowPrediction | null
+}
+
 export interface DiagnosisHistoryResponse {
   code: string
   name?: string
@@ -977,6 +1077,15 @@ export interface DiagnosisResultResponse {
   verdict?: 'PASS' | 'WATCH' | 'FAIL'
   analysis?: DiagnosisAnalysisDetails
   risk_regime?: RiskRegimeSummary | null
+}
+
+export interface StockAiAnalysisResponse {
+  code: string
+  name?: string | null
+  provider: string
+  model?: string | null
+  context: Record<string, any>
+  result: Record<string, any>
 }
 
 export interface WatchlistResponse {
@@ -1384,4 +1493,248 @@ export interface ConceptMembersResponse {
     out_date?: string
   }>
   total: number
+}
+
+export interface CustomConceptRunItem {
+  id: number
+  status: string
+  provider?: string | null
+  model?: string | null
+  prompt_version: string
+  candidate_count: number
+  matched_stock_count: number
+  started_at?: string | null
+  finished_at?: string | null
+  error_message?: string | null
+}
+
+export interface OfficialConceptMatchItem {
+  concept_code: string
+  concept_name: string
+  score: number
+  matched_terms: string[]
+}
+
+export interface CustomConceptSummaryItem {
+  id: number
+  name: string
+  display_name: string
+  description?: string | null
+  chain_hint?: string | null
+  status: string
+  prompt_version: string
+  aliases: string[]
+  related_sectors: string[]
+  tag_count: number
+  last_refreshed_at?: string | null
+  updated_at: string
+  latest_run?: CustomConceptRunItem | null
+}
+
+export interface CustomConceptDetailResponse extends CustomConceptSummaryItem {
+  recent_runs: CustomConceptRunItem[]
+}
+
+export interface CustomConceptListResponse {
+  concepts: CustomConceptSummaryItem[]
+  total: number
+}
+
+export interface CustomConceptUpsertRequest {
+  name: string
+  display_name?: string | null
+  description?: string | null
+  chain_hint?: string | null
+  aliases: string[]
+  related_sectors: string[]
+  status: string
+}
+
+export interface CustomConceptStockTagItem {
+  stock_code: string
+  stock_name?: string | null
+  industry?: string | null
+  relevance_score?: number | null
+  confidence?: number | null
+  chain_position: string
+  role_tags: string[]
+  reason?: string | null
+  matched_source_concepts: string[]
+  updated_at: string
+}
+
+export interface CustomConceptStockTagsResponse {
+  concept_id: number
+  concept_name: string
+  stocks: CustomConceptStockTagItem[]
+  total: number
+}
+
+export interface StockCustomConceptItem {
+  concept_id: number
+  concept_name: string
+  concept_display_name: string
+  relevance_score?: number | null
+  confidence?: number | null
+  chain_position: string
+  role_tags: string[]
+  reason?: string | null
+  updated_at: string
+}
+
+export interface StockCustomConceptsResponse {
+  code: string
+  concepts: StockCustomConceptItem[]
+  total: number
+}
+
+export interface CustomConceptRefreshResponse {
+  concept_id: number
+  concept_name: string
+  run: CustomConceptRunItem
+  official_matches: OfficialConceptMatchItem[]
+  stocks_saved: number
+  concept_summary?: string | null
+  industry_chain_definition?: string | null
+}
+
+export interface CandidateConceptMatchRequestItem {
+  code: string
+  name?: string | null
+  industry?: string | null
+  sector_names: string[]
+  signal_type?: string | null
+  total_score?: number | null
+  comment?: string | null
+}
+
+export interface CandidateConceptMatchItem {
+  code: string
+  name?: string | null
+  industry?: string | null
+  relevance_score?: number | null
+  confidence?: number | null
+  chain_position: string
+  role_tags: string[]
+  reason?: string | null
+}
+
+export interface CandidateConceptMatchResponse {
+  query: string
+  concept_id: number
+  concept_name: string
+  cache_hit: boolean
+  source: 'cache' | 'ai' | string
+  data_updated_at?: string | null
+  refresh_scheduled: boolean
+  total_candidates: number
+  matched_count: number
+  matches: CandidateConceptMatchItem[]
+}
+
+export interface ConceptQuerySuggestionItem {
+  query: string
+  label: string
+  source: string
+  updated_at?: string | null
+}
+
+export interface ConceptQuerySuggestionsResponse {
+  items: ConceptQuerySuggestionItem[]
+  total: number
+}
+
+export interface ConceptMemoryEntryItem {
+  id: number
+  keyword: string
+  title: string
+  content: string
+  category?: string | null
+  source_type: string
+  source_name?: string | null
+  source_url?: string | null
+  status: string
+  priority: number
+  is_fixed: boolean
+  tags: string[]
+  related_stock_codes: string[]
+  summary?: string | null
+  evidence?: Record<string, any> | null
+  prompt_version?: string | null
+  last_refreshed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ConceptMemoryRunItem {
+  id: number
+  entry_id?: number | null
+  run_type: string
+  query_text?: string | null
+  status: string
+  provider?: string | null
+  model?: string | null
+  prompt_version?: string | null
+  matched_entry_count: number
+  matched_news_count: number
+  started_at?: string | null
+  finished_at?: string | null
+  error_message?: string | null
+}
+
+export interface ConceptMemoryUpsertRequest {
+  keyword: string
+  title: string
+  content: string
+  category?: string | null
+  source_type: string
+  source_name?: string | null
+  source_url?: string | null
+  status: string
+  priority: number
+  is_fixed: boolean
+  tags: string[]
+  related_stock_codes: string[]
+}
+
+export interface ConceptMemoryListResponse {
+  entries: ConceptMemoryEntryItem[]
+  total: number
+  stats: Record<string, any>
+}
+
+export interface ConceptMemoryDetailResponse extends ConceptMemoryEntryItem {
+  recent_runs: ConceptMemoryRunItem[]
+}
+
+export interface ConceptMemoryRefreshResponse {
+  entry_id: number
+  keyword: string
+  run: ConceptMemoryRunItem
+  matched_news_count: number
+  matched_official_concepts: Record<string, any>[]
+  matched_memory_entries: Record<string, any>[]
+  ai_summary?: string | null
+  ai_keywords: string[]
+  ai_related_stock_codes: string[]
+}
+
+export interface ConceptMemoryComposeRequest {
+  query: string
+  use_ai: boolean
+  force_refresh: boolean
+  max_entries: number
+  max_news: number
+}
+
+export interface ConceptMemoryComposeResponse {
+  query: string
+  cache_hit: boolean
+  source: 'cache' | 'ai' | 'local' | string
+  context_text: string
+  matched_entries: ConceptMemoryEntryItem[]
+  matched_news: Record<string, any>[]
+  matched_official_concepts: Record<string, any>[]
+  ai_result?: Record<string, any> | null
+  run?: ConceptMemoryRunItem | null
 }

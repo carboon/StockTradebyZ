@@ -245,7 +245,8 @@ function getSignalEventColor(event: SignalReturnEventPoint) {
 function buildTooltipFormatter(
   data: KLineData,
   movingAverages: MovingAverageKey[],
-  advancedIndicators: AdvancedIndicators | null = null
+  advancedIndicators: AdvancedIndicators | null = null,
+  advancedIndicatorOffset = 0,
 ) {
   return (params: TooltipParam[] | undefined) => {
     if (!params || params.length === 0) return ''
@@ -279,8 +280,9 @@ function buildTooltipFormatter(
 
     // 添加高级指标到tooltip
     if (advancedIndicators) {
-      const trendBoundary = advancedIndicators.trendBoundaryLine[dataIndex]
-      const momentum = advancedIndicators.momentumLine[dataIndex]
+      const indicatorIndex = dataIndex + advancedIndicatorOffset
+      const trendBoundary = advancedIndicators.trendBoundaryLine[indicatorIndex]
+      const momentum = advancedIndicators.momentumLine[indicatorIndex]
 
       if (typeof trendBoundary === 'number' && !Number.isNaN(trendBoundary)) {
         result += `<span style="color:#FFD700">●</span> 趋势分界: ${trendBoundary.toFixed(2)}<br/>`
@@ -311,6 +313,7 @@ export function buildKLineChartOption({
 }: KLineChartOptionParams): EChartsCoreOption {
   // 使用完整数据计算高级指标（如果提供）
   const dataForIndicators = fullData || data
+  const advancedIndicatorOffset = Math.max(dataForIndicators.daily.length - data.daily.length, 0)
   const dates = data.daily.map((item) => item.date)
   const values = data.daily.map((item) => [item.open, item.close, item.low, item.high])
   const highlightedDateSet = new Set(highlightedDates)
@@ -460,7 +463,7 @@ export function buildKLineChartOption({
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
-      formatter: buildTooltipFormatter(data, movingAverages, advancedIndicators),
+      formatter: buildTooltipFormatter(data, movingAverages, advancedIndicators, advancedIndicatorOffset),
       backgroundColor: 'rgba(30, 30, 30, 0.9)',
       borderColor: '#444',
       textStyle: { color: '#ddd' },

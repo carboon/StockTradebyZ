@@ -305,6 +305,8 @@ class CandidateService:
         if not target_date:
             return None, []
 
+        sector_names_by_code = self._load_sector_names_by_code()
+
         # 查询候选数据
         query = (
             self.db.query(
@@ -347,6 +349,7 @@ class CandidateService:
 
         candidates = []
         for row in query.all():
+            code = str(row.code or "").zfill(6)
             raw_snapshot = None
             if (
                 row.open_price is None
@@ -354,7 +357,7 @@ class CandidateService:
                 or row.turnover_rate is None
                 or row.volume_ratio is None
             ):
-                raw_snapshot = self._load_raw_daily_snapshot(str(row.code).zfill(6), target_date)
+                raw_snapshot = self._load_raw_daily_snapshot(code, target_date)
             close_price = float(row.close_price) if row.close_price is not None else (
                 float(row.daily_close_price) if row.daily_close_price is not None else (
                     raw_snapshot.get("close") if raw_snapshot else None
@@ -367,10 +370,15 @@ class CandidateService:
             if open_price is not None and close_price is not None and open_price > 0:
                 change_pct = (close_price - open_price) / open_price * 100
 
+            sector_names = sector_names_by_code.get(code, [])
+            if not sector_names and str(row.industry or "").strip():
+                sector_names = [str(row.industry).strip()]
+
             candidates.append({
-                "code": row.code,
+                "code": code,
                 "name": row.name,
                 "industry": row.industry,
+                "sector_names": sector_names,
                 "strategy": row.strategy,
                 "open": open_price,
                 "close": close_price,
@@ -390,6 +398,24 @@ class CandidateService:
 
         self._fill_missing_active_pool_ranks(target_date, candidates)
         return target_date.isoformat(), candidates
+
+    def _load_sector_names_by_code(self) -> Dict[str, List[str]]:
+        try:
+            from app.services.sector_analysis_service import SectorAnalysisService
+
+            _, _, code_to_sector_names, _ = SectorAnalysisService(self.db)._build_sector_entry_map()
+            return {
+                str(code or "").zfill(6): [
+                    str(name).strip()
+                    for name in (sector_names or [])
+                    if str(name or "").strip()
+                ]
+                for code, sector_names in code_to_sector_names.items()
+                if str(code or "").strip()
+            }
+        except Exception as exc:
+            logger.warning("读取候选板块映射失败: %s", exc)
+            return {}
 
     @staticmethod
     def _fill_missing_active_pool_ranks(pick_date: date, candidates: List[Dict[str, Any]]) -> None:

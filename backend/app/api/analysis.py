@@ -38,10 +38,12 @@ from app.services.analysis_service import analysis_service
 from app.services.current_hot_aggregate_service import CurrentHotAggregateService
 from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysisService
 from app.services.current_hot_service import CurrentHotService
+from app.services.closing_analysis_service import ClosingAnalysisService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.market_service import MarketService
 from app.services.sector_analysis_service import SectorAnalysisService
+from app.services.stock_ai_analysis_service import StockAiAnalysisService
 # 风险识别服务已暂时屏蔽
 # from app.services.speculative_risk_service import SpeculativeRiskService
 from app.services.task_service import TaskService
@@ -66,6 +68,8 @@ from app.schemas import (
     CurrentHotIntradayAnalysisGenerateResponse,
     CurrentHotIntradayAnalysisPrefetchResponse,
     CurrentHotIntradayAnalysisResponse,
+    ClosingAnalysisReportResponse,
+    ClosingAnalysisStatusResponse,
     SectorAnalysisRowsResponse,
     SectorAnalysisRowItem,
     TomorrowStarDatesResponse,
@@ -79,6 +83,7 @@ from app.schemas import (
     B1CheckItem,
     DiagnosisRequest,
     DiagnosisResponse,
+    StockAiAnalysisResponse,
     SignalReturnAnalysisResponse,
     SignalReturnBenchmark,
     SignalReturnEventPoint,
@@ -564,7 +569,7 @@ async def get_tomorrow_star_freshness(
 
 @router.get("/tomorrow-star/aggregate")
 def get_tomorrow_star_aggregate(
-    candidate_limit: int = 2000,
+    candidate_limit: int = 3000,
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
@@ -978,7 +983,7 @@ def get_tomorrow_star_aggregate(
 @router.get("/tomorrow-star/candidates", response_model=CandidatesResponse)
 def get_candidates(
     date: Optional[str] = None,
-    limit: int = 100,
+    limit: int = 3000,
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CandidatesResponse:
@@ -989,7 +994,7 @@ def get_candidates(
     import pandas as pd
 
     requested_date = analysis_service._normalize_pick_date(date)
-    cache_key = f"{build_candidates_cache_key(requested_date, limit)}:market-metrics-v4"
+    cache_key = f"{build_candidates_cache_key(requested_date, limit)}:market-metrics-v5"
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         return CandidatesResponse(**cached_result)
@@ -1030,6 +1035,7 @@ def get_candidates(
                         code=c["code"],
                         name=c.get("name"),
                         industry=c.get("industry"),
+                        sector_names=c.get("sector_names") or [],
                         strategy=c.get("strategy") or "b1",
                         open_price=c.get("open"),
                         close_price=c.get("close"),
@@ -1276,7 +1282,7 @@ def get_analysis_results(
 )
 def get_current_hot_aggregate(
     date: Optional[str] = Query(default=None, description="交易日，不传则取最新"),
-    candidates_limit: int = Query(default=200, ge=1, le=2000, description="候选/分析结果条数上限"),
+    candidates_limit: int = Query(default=3000, ge=1, le=3000, description="候选/分析结果条数上限"),
     sector_window_size: int = Query(default=CurrentHotService.DEFAULT_WINDOW_SIZE, ge=20, le=240, description="板块分析回看窗口"),
     sector_top_n: int = Query(default=5, ge=1, le=12, description="板块 Top N"),
     include_sectors: bool = Query(default=True, description="是否包含板块分析"),
@@ -1452,7 +1458,7 @@ async def get_current_hot_dates(
 )
 def get_current_hot_candidates(
     date: Optional[str] = None,
-    limit: int = 200,
+    limit: int = 3000,
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> CurrentHotCandidatesResponse:
@@ -1688,6 +1694,45 @@ async def prefetch_current_hot_intraday(
         raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
     payload = service.prefetch_snapshot_data(trade_date=parsed_date)
     return CurrentHotIntradayAnalysisPrefetchResponse(**payload)
+
+
+@router.get("/closing-report/status", response_model=ClosingAnalysisStatusResponse)
+def get_closing_analysis_status(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ClosingAnalysisStatusResponse:
+    status = ClosingAnalysisService(db).get_status()
+    return ClosingAnalysisStatusResponse(
+        latest_data_date=status.latest_data_date,
+        report_trade_date=status.report_trade_date,
+        has_report=status.has_report,
+        can_generate=status.can_generate,
+        status=status.status,
+        message=status.message,
+    )
+
+
+@router.get("/closing-report", response_model=ClosingAnalysisReportResponse)
+def get_closing_analysis_report(
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ClosingAnalysisReportResponse:
+    payload = ClosingAnalysisService(db).get_latest_report_payload()
+    return ClosingAnalysisReportResponse(**payload)
+
+
+@router.post("/closing-report/generate", response_model=ClosingAnalysisReportResponse)
+def generate_closing_analysis_report(
+    force: bool = Query(default=False, description="管理员强制重算当日收盘分析"),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ClosingAnalysisReportResponse:
+    payload = ClosingAnalysisService(db).generate_report(
+        user_id=getattr(user, "id", None),
+        is_admin=getattr(user, "role", None) == "admin",
+        force=force,
+    )
+    return ClosingAnalysisReportResponse(**payload)
 
 
 @router.get("/intraday/status")
@@ -2126,6 +2171,20 @@ def get_analysis_result(code: str, db: Session = Depends(get_db), user=Depends(r
             # "risk_flag": risk_flag,  # 已屏蔽
         },
     }
+
+
+@router.post("/diagnosis/{code}/ai-analysis", response_model=StockAiAnalysisResponse)
+def analyze_stock_with_ai(
+    code: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> StockAiAnalysisResponse:
+    try:
+        return StockAiAnalysisService(db).analyze(code)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/tomorrow-star/generate")

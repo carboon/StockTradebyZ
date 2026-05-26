@@ -18,6 +18,8 @@ import type {
   CurrentHotIntradayAnalysisPrefetchResponse,
   CurrentHotIntradayAnalysisResponse,
   CurrentHotIntradayAnalysisStatusResponse,
+  ClosingAnalysisReportResponse,
+  ClosingAnalysisStatusResponse,
   DataFreshnessResponse,
   DataStatus,
   DiagnosisAnalyzeTaskResponse,
@@ -38,6 +40,7 @@ import type {
   SaveEnvResponse,
   SignalReturnAnalysisResponse,
   StockInfo,
+  StockAiAnalysisResponse,
   StockSearchResponse,
   Task,
   TaskDiagnosticsResponse,
@@ -67,6 +70,21 @@ import type {
   StockConceptsResponse,
   ConceptMembersResponse,
   CsvImportResult,
+  CustomConceptDetailResponse,
+  CustomConceptListResponse,
+  CustomConceptRefreshResponse,
+  CustomConceptStockTagsResponse,
+  CustomConceptUpsertRequest,
+  CandidateConceptMatchRequestItem,
+  CandidateConceptMatchResponse,
+  ConceptQuerySuggestionsResponse,
+  ConceptMemoryComposeRequest,
+  ConceptMemoryComposeResponse,
+  ConceptMemoryDetailResponse,
+  ConceptMemoryListResponse,
+  ConceptMemoryRefreshResponse,
+  ConceptMemoryUpsertRequest,
+  StockCustomConceptsResponse,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
@@ -91,6 +109,7 @@ const TIMEOUTS = {
   short: 10000,
   standard: 20000,
   long: 45000,
+  aiLong: 180000,
 }
 
 function withRequestOptions(options: RequestOptions | undefined, timeoutMs: number) {
@@ -209,6 +228,84 @@ export const apiConfig = {
   getTushareStatus: () => api.get<never, TushareStatusResponse>('/v1/config/tushare-status'),
 }
 
+export const apiCustomConcepts = {
+  list: (options?: RequestOptions) =>
+    api.get<never, CustomConceptListResponse>('/v1/custom-concepts/', withRequestOptions(options, TIMEOUTS.standard)),
+
+  getDetail: (conceptId: number, options?: RequestOptions) =>
+    api.get<never, CustomConceptDetailResponse>(`/v1/custom-concepts/${conceptId}`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  create: (payload: CustomConceptUpsertRequest, options?: RequestOptions) =>
+    api.post<CustomConceptUpsertRequest, CustomConceptDetailResponse>('/v1/custom-concepts/', payload, withRequestOptions(options, TIMEOUTS.standard)),
+
+  update: (conceptId: number, payload: CustomConceptUpsertRequest, options?: RequestOptions) =>
+    api.put<CustomConceptUpsertRequest, CustomConceptDetailResponse>(`/v1/custom-concepts/${conceptId}`, payload, withRequestOptions(options, TIMEOUTS.standard)),
+
+  delete: (conceptId: number, options?: RequestOptions) =>
+    api.delete<never, { deleted: boolean; concept_id: number }>(`/v1/custom-concepts/${conceptId}`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  refresh: (conceptId: number, options?: RequestOptions) =>
+    api.post<null, CustomConceptRefreshResponse>(`/v1/custom-concepts/${conceptId}/refresh`, null, withRequestOptions(options, TIMEOUTS.long)),
+
+  getStocks: (
+    conceptId: number,
+    params?: { chain_position?: string; role_tag?: string; min_relevance?: number; limit?: number },
+    options?: RequestOptions,
+  ) =>
+    api.get<never, CustomConceptStockTagsResponse>(`/v1/custom-concepts/${conceptId}/stocks`, {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params,
+    }),
+
+  getByStock: (code: string, options?: RequestOptions) =>
+    api.get<never, StockCustomConceptsResponse>(`/v1/custom-concepts/by-stock/${code}`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  matchCandidates: (
+    query: string,
+    candidates: CandidateConceptMatchRequestItem[],
+    forceRefresh: boolean = false,
+    asyncRefresh: boolean = false,
+    options?: RequestOptions,
+  ) =>
+    api.post<
+      { query: string; candidates: CandidateConceptMatchRequestItem[]; force_refresh: boolean; async_refresh: boolean },
+      CandidateConceptMatchResponse
+    >(
+      '/v1/custom-concepts/match-candidates',
+      { query, candidates, force_refresh: forceRefresh, async_refresh: asyncRefresh },
+      withRequestOptions(options, TIMEOUTS.aiLong),
+  ),
+
+  suggestQueries: (q: string, limit: number = 10, options?: RequestOptions) =>
+    api.get<never, ConceptQuerySuggestionsResponse>('/v1/custom-concepts/query-suggestions', {
+      ...withRequestOptions(options, TIMEOUTS.short),
+      params: { q, limit },
+    }),
+}
+
+export const apiConceptMemory = {
+  list: (params?: { keyword?: string; source_type?: string; status?: string; limit?: number }, options?: RequestOptions) =>
+    api.get<never, ConceptMemoryListResponse>('/v1/concept-memory/', {
+      ...withRequestOptions(options, TIMEOUTS.standard),
+      params,
+    }),
+
+  getDetail: (entryId: number, options?: RequestOptions) =>
+    api.get<never, ConceptMemoryDetailResponse>(`/v1/concept-memory/${entryId}`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  create: (payload: ConceptMemoryUpsertRequest, options?: RequestOptions) =>
+    api.post<ConceptMemoryUpsertRequest, ConceptMemoryDetailResponse>('/v1/concept-memory/', payload, withRequestOptions(options, TIMEOUTS.standard)),
+
+  update: (entryId: number, payload: ConceptMemoryUpsertRequest, options?: RequestOptions) =>
+    api.put<ConceptMemoryUpsertRequest, ConceptMemoryDetailResponse>(`/v1/concept-memory/${entryId}`, payload, withRequestOptions(options, TIMEOUTS.standard)),
+
+  refresh: (entryId: number, options?: RequestOptions) =>
+    api.post<null, ConceptMemoryRefreshResponse>(`/v1/concept-memory/${entryId}/refresh`, null, withRequestOptions(options, TIMEOUTS.aiLong)),
+
+  compose: (payload: ConceptMemoryComposeRequest, options?: RequestOptions) =>
+    api.post<ConceptMemoryComposeRequest, ConceptMemoryComposeResponse>('/v1/concept-memory/compose', payload, withRequestOptions(options, TIMEOUTS.aiLong)),
+}
+
 export const apiStock = {
   // 获取股票信息
   getInfo: (code: string, options?: RequestOptions) => api.get<never, StockInfo>(`/v1/stock/${code}`, withRequestOptions(options, TIMEOUTS.short)),
@@ -234,7 +331,7 @@ export const apiStock = {
 export const apiAnalysis = {
   // 聚合接口 - 一次返回首屏全部数据（日期+候选+结果+新鲜度）
   getAggregate: (options?: RequestOptions) =>
-    api.get<never, TomorrowStarAggregateResponse>('/v1/analysis/tomorrow-star/aggregate', { ...withRequestOptions(options, TIMEOUTS.long), params: { candidate_limit: 2000 } }),
+    api.get<never, TomorrowStarAggregateResponse>('/v1/analysis/tomorrow-star/aggregate', { ...withRequestOptions(options, TIMEOUTS.long), params: { candidate_limit: 3000 } }),
 
   // 获取明日之星数据新鲜度
   getFreshness: (options?: RequestOptions) => api.get<never, FreshnessResponse>('/v1/analysis/tomorrow-star/freshness', withRequestOptions(options, TIMEOUTS.short)),
@@ -244,7 +341,7 @@ export const apiAnalysis = {
 
   // 获取候选列表
   getCandidates: (date?: string, options?: RequestOptions) =>
-    api.get<never, CandidatesResponse>('/v1/analysis/tomorrow-star/candidates', { ...withRequestOptions(options, TIMEOUTS.standard), params: { date, limit: 2000 } }),
+    api.get<never, CandidatesResponse>('/v1/analysis/tomorrow-star/candidates', { ...withRequestOptions(options, TIMEOUTS.standard), params: { date, limit: 3000 } }),
 
   // 获取分析结果
   getResults: (date?: string, options?: RequestOptions) =>
@@ -269,14 +366,14 @@ export const apiAnalysis = {
   }, options?: RequestOptions) =>
     api.get<never, CurrentHotAggregateResponse>('/v1/analysis/current-hot/aggregate', {
       ...withRequestOptions(options, TIMEOUTS.long),
-      params,
+      params: { candidates_limit: 3000, ...params },
     }),
 
   // 获取当前热盘候选列表
   getCurrentHotCandidates: (date?: string, options?: RequestOptions) =>
     api.get<never, CurrentHotCandidatesResponse>('/v1/analysis/current-hot/candidates', {
       ...withRequestOptions(options, TIMEOUTS.standard),
-      params: { date, limit: 2000 },
+      params: { date, limit: 3000 },
     }),
 
   // 获取当前热盘分析结果
@@ -348,6 +445,18 @@ export const apiAnalysis = {
   // 预下载当前热盘中盘分时数据
   prefetchCurrentHotMidday: () =>
     api.post<null, CurrentHotIntradayAnalysisPrefetchResponse>('/v1/analysis/current-hot/intraday/prefetch', null, { timeout: TIMEOUTS.standard }),
+
+  // 获取收盘分析状态
+  getClosingReportStatus: (options?: RequestOptions) =>
+    api.get<never, ClosingAnalysisStatusResponse>('/v1/analysis/closing-report/status', withRequestOptions(options, TIMEOUTS.short)),
+
+  // 获取最近收盘分析
+  getClosingReport: (options?: RequestOptions) =>
+    api.get<never, ClosingAnalysisReportResponse>('/v1/analysis/closing-report', withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 生成收盘分析
+  generateClosingReport: (force: boolean = false) =>
+    api.post<null, ClosingAnalysisReportResponse>('/v1/analysis/closing-report/generate', null, { params: { force }, timeout: TIMEOUTS.long }),
 
   // 获取单股诊断历史
   getDiagnosisHistory: (
@@ -421,6 +530,13 @@ export const apiAnalysis = {
   // 获取单股分析结果
   getResult: (code: string, options?: RequestOptions) =>
     api.get<never, DiagnosisResultResponse>(`/v1/analysis/diagnosis/${code}/result`, withRequestOptions(options, TIMEOUTS.standard)),
+
+  analyzeStockWithAi: (code: string, options?: RequestOptions) =>
+    api.post<null, StockAiAnalysisResponse>(
+      `/v1/analysis/diagnosis/${code}/ai-analysis`,
+      null,
+      withRequestOptions(options, TIMEOUTS.aiLong),
+    ),
 
   // 获取历史信号收益率分析
   // source: "tomorrow_star" | "current_hot"

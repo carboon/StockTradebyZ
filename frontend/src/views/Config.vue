@@ -265,6 +265,14 @@
           </div>
         </el-tab-pane>
 
+        <el-tab-pane label="自定义概念" name="custom-concepts">
+          <CustomConceptManager />
+        </el-tab-pane>
+
+        <el-tab-pane label="概念记忆库" name="concept-memory">
+          <ConceptMemoryManager />
+        </el-tab-pane>
+
         <!-- Tab 2: 系统自检 -->
         <el-tab-pane label="系统自检" name="diagnostics">
           <div class="startup-panel">
@@ -363,6 +371,8 @@ import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { useResponsive } from '@/composables/useResponsive'
+import CustomConceptManager from '@/components/config/CustomConceptManager.vue'
+import ConceptMemoryManager from '@/components/config/ConceptMemoryManager.vue'
 import { useConfigStore } from '@/store/config'
 import { useNoticeStore } from '@/store/notice'
 import { apiTasks } from '@/api'

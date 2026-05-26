@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from openai import OpenAI
 
-from app.config import settings
+from app.config import get_settings
 
 
 class DeepSeekService:
@@ -16,19 +16,28 @@ class DeepSeekService:
     DEFAULT_MODEL = "deepseek-chat"
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = str(api_key or settings.deepseek_api_key or "").strip()
+        self.api_key = str(api_key or "").strip()
         self._client: Optional[OpenAI] = None
+
+    def _resolve_api_key(self) -> str:
+        if self.api_key:
+            return self.api_key
+        runtime_key = str(get_settings().deepseek_api_key or "").strip()
+        if runtime_key:
+            self.api_key = runtime_key
+        return self.api_key
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(self._resolve_api_key())
 
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            if not self.api_key:
+            api_key = self._resolve_api_key()
+            if not api_key:
                 raise ValueError("DeepSeek API Key 未配置")
-            self._client = OpenAI(api_key=self.api_key, base_url=self.BASE_URL)
+            self._client = OpenAI(api_key=api_key, base_url=self.BASE_URL)
         return self._client
 
     def infer_json(

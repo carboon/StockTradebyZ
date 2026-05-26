@@ -102,7 +102,7 @@ class ActivePoolRankService:
         self,
         trade_date: Any,
         *,
-        top_m: int = 2000,
+        top_m: int = 3000,
         n_turnover_days: int = 43,
     ) -> Optional[dict[str, dict[str, Any]]]:
         normalized_date = self._normalize_date(trade_date)
@@ -129,7 +129,7 @@ class ActivePoolRankService:
         start_date: Any,
         end_date: Any,
         target_codes: set[str],
-        top_m: int = 2000,
+        top_m: int = 3000,
         n_turnover_days: int = 43,
     ) -> Optional[dict[str, dict[pd.Timestamp, int]]]:
         start = self._normalize_date(start_date)
@@ -171,7 +171,7 @@ class ActivePoolRankService:
         *,
         start_date: Any,
         end_date: Any,
-        top_m: int = 2000,
+        top_m: int = 3000,
         n_turnover_days: int = 43,
     ) -> set[date_class]:
         """Return dates that already have persisted active-pool rank factors."""
@@ -203,7 +203,7 @@ class ActivePoolRankService:
         *,
         start_date: Any,
         end_date: Any,
-        top_m: int = 2000,
+        top_m: int = 3000,
         n_turnover_days: int = 43,
     ) -> Optional[dict[pd.Timestamp, set[str]]]:
         start = self._normalize_date(start_date)
@@ -259,7 +259,7 @@ class ActivePoolRankService:
         self,
         trade_dates: Iterable[Any],
         *,
-        top_m: int = 2000,
+        top_m: int = 3000,
         n_turnover_days: int = 43,
         force: bool = False,
     ) -> dict[str, Any]:

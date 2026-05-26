@@ -31,7 +31,7 @@
         <div class="overview-grid">
           <el-card class="overview-card">
             <div class="overview-label">流动性池</div>
-            <div class="overview-value">Top 2000</div>
+            <div class="overview-value">Top 3000</div>
             <p>按近 43 个交易日滚动成交额排序，只保留活跃股票。</p>
           </el-card>
 
@@ -145,7 +145,7 @@
                 <div class="definition-list">
                   <div class="definition-item">
                     <el-tag effect="plain">流动性池</el-tag>
-                    <p>全市场先按滚动成交额排序，取前 2000 只股票，作为基础观察范围。</p>
+                    <p>全市场先按滚动成交额排序，取前 3000 只股票，作为基础观察范围。</p>
                   </div>
                   <div class="definition-item">
                     <el-tag effect="plain">候选股</el-tag>
@@ -331,7 +331,7 @@
                   <div class="flow-step">02</div>
                   <div>
                     <h3>流动性入池</h3>
-                    <p>按 43 日滚动成交额排序，取前 2000 只形成流动性池。</p>
+                    <p>按 43 日滚动成交额排序，取前 3000 只形成流动性池。</p>
                   </div>
                 </div>
 
