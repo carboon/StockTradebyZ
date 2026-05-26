@@ -51,6 +51,21 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+RECOVERABLE_LOGIN_USERS: dict[str, int] = {
+    "307god": 3,
+    "chenyujun": 5,
+    "hntest": 7,
+    "江橙澄": 14,
+    "DotakuHX": 16,
+    "暴走的美芽": 18,
+    "suppermoon": 20,
+    "pangzipang38": 21,
+    "youmo110": 23,
+    "悠悠果": 26,
+    "Yajun": 27,
+    "yidu": 28,
+}
+
 _USER_EXPORT_HEADERS = [
     "id",
     "username",
@@ -515,10 +530,31 @@ def register(body: UserRegister, request: Request, db: Session = Depends(get_db)
     )
 
 
+def _initialize_recovered_user(username: str, password: str, db: Session) -> User | None:
+    recovered_user_id = RECOVERABLE_LOGIN_USERS.get(username)
+    if recovered_user_id is None:
+        return None
+
+    user = User(
+        id=recovered_user_id,
+        username=username,
+        hashed_password=hash_password(password),
+        role="user",
+        is_active=True,
+        daily_quota=1000,
+    )
+    db.add(user)
+    db.flush()
+    logger.info("恢复用户首次登录初始化: username=%s, user_id=%s", user.username, user.id)
+    return user
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: UserLogin, request: Request, db: Session = Depends(get_db)):
     """用户登录"""
     user = db.query(User).filter(User.username == body.username).first()
+    if user is None:
+        user = _initialize_recovered_user(body.username, body.password, db)
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

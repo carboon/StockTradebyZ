@@ -1104,6 +1104,117 @@ class TushareService:
         except Exception:
             return []
 
+    def get_financial_indicators(
+        self,
+        ts_codes: List[str],
+    ) -> dict[str, dict[str, Any]]:
+        """批量获取最近一期财务指标（ROE、营收增速、净利润增速）。
+
+        Returns:
+            {code_6digit: {roe, netprofit_yoy, rev_yoy, grossprofit_margin, end_date}}
+        """
+        if not self.token or not ts_codes:
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+        batch_size = 5
+
+        for i in range(0, len(ts_codes), batch_size):
+            batch = ts_codes[i : i + batch_size]
+            try:
+                acquire_tushare_slot("fina_indicator")
+                df = self.pro.fina_indicator(
+                    ts_code=",".join(batch),
+                    fields="ts_code,ann_date,end_date,roe,netprofit_yoy,rev_yoy,grossprofit_margin",
+                )
+                if df is None or df.empty:
+                    continue
+
+                df = df.sort_values("end_date", ascending=False)
+                seen: set[str] = set()
+                for _, row in df.iterrows():
+                    tc = str(row.get("ts_code") or "")
+                    code6 = tc.split(".")[0] if "." in tc else tc
+                    if code6 in seen:
+                        continue
+                    seen.add(code6)
+                    result[code6] = {
+                        "roe": self._safe_float(row.get("roe")),
+                        "netprofit_yoy": self._safe_float(row.get("netprofit_yoy")),
+                        "rev_yoy": self._safe_float(row.get("rev_yoy")),
+                        "grossprofit_margin": self._safe_float(row.get("grossprofit_margin")),
+                        "end_date": str(row.get("end_date") or ""),
+                    }
+            except Exception:
+                continue
+
+        return result
+
+    def get_institutional_ratings(
+        self,
+        ts_codes: List[str],
+    ) -> dict[str, dict[str, Any]]:
+        """获取机构评级数据（近60天内券商研报评级摘要）。
+
+        优先使用 broker_recommend 接口，若不可用则尝试 report_rc。
+        返回每只股票的最新评级统计。
+        """
+        if not self.token or not ts_codes:
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=60)
+
+        for ts_code in ts_codes:
+            try:
+                acquire_tushare_slot("broker_recommend")
+                df = self.pro.broker_recommend(
+                    ts_code=ts_code,
+                    start_date=start_dt.strftime("%Y%m%d"),
+                    end_date=end_dt.strftime("%Y%m%d"),
+                )
+                if df is None or df.empty:
+                    continue
+
+                code6 = ts_code.split(".")[0] if "." in ts_code else ts_code
+                ratings: list[str] = []
+                for _, row in df.iterrows():
+                    r = str(row.get("rating") or "").strip()
+                    if r:
+                        ratings.append(r)
+
+                result[code6] = {
+                    "rating_count": len(ratings),
+                    "latest_ratings": ratings[:5],
+                    "summary": self._summarize_ratings(ratings),
+                }
+            except Exception:
+                continue
+
+        return result
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        try:
+            return round(float(value), 4)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _summarize_ratings(ratings: list[str]) -> str:
+        if not ratings:
+            return ""
+        positive = {"买入", "增持", "推荐", "强烈推荐", "强推", "优于大市"}
+        neutral = {"中性", "持有", "观望", "减持"}
+        pos = sum(1 for r in ratings if any(k in r for k in positive))
+        neg = sum(1 for r in ratings if any(k in r for k in neutral))
+        if pos > neg:
+            return "偏多"
+        if neg > pos:
+            return "偏空"
+        return "中性"
+
     @classmethod
     def clear_concept_cache(cls) -> None:
         """清除概念板块缓存"""

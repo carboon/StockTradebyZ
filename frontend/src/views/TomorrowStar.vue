@@ -1216,6 +1216,28 @@
                   <strong>{{ closingReport.market?.up_count || 0 }} / {{ closingReport.market?.down_count || 0 }}</strong>
                   <span>上涨 / 下跌</span>
                 </div>
+                <div class="closing-summary-card closing-hot-topic-card">
+                  <span class="closing-summary-card__label">当前热点</span>
+                  <div class="closing-hot-topic-tags">
+                    <el-tag
+                      v-for="topic in getClosingHotTopicKeywords()"
+                      :key="topic.keyword"
+                      size="small"
+                      effect="plain"
+                      :title="topic.reason || topic.related_sectors?.join(' / ') || topic.keyword"
+                    >
+                      {{ topic.keyword }}
+                    </el-tag>
+                    <span v-if="getClosingHotTopicKeywords().length === 0">-</span>
+                  </div>
+                  <span>{{ closingReport.hot_topics?.summary || `${closingReport.hot_topics?.start_date || '-'} 至 ${closingReport.hot_topics?.end_date || '-'}` }}</span>
+                </div>
+              </div>
+
+              <div v-if="closingReport.sector_flow?.source_trade_date" class="closing-flow-source">
+                <el-tag size="small" :type="closingReport.sector_flow?.is_fallback ? 'warning' : 'info'" effect="plain">
+                  资金流来源 {{ formatClosingFlowSource(closingReport.sector_flow.source) }} {{ closingReport.sector_flow.source_trade_date }}
+                </el-tag>
               </div>
 
               <div class="closing-flow-grid">
@@ -1289,11 +1311,31 @@
                     </div>
                   </div>
                 </el-tab-pane>
-                <el-tab-pane label="明日预测" name="tomorrow-prediction">
+                <el-tab-pane name="tomorrow-prediction">
+                      <template #label>
+                        明日预测
+                        <el-tooltip placement="top" effect="light">
+                          <template #content>
+                            <div style="max-width: 420px; line-height: 1.8;">
+                              <strong>核心方法：量化评分 + AI双层筛选</strong><br/>
+                              <strong>数据源：</strong><br/>
+                              · B1策略候选池（KDJ低位 + 知行线 + 周线多头排列）<br/>
+                              · 板块资金流（当日 + 3日净流入/流出）<br/>
+                              · 行业头部识别（流通市值行业内排名前三加权 +10分）<br/>
+                              · 财务指标（ROE、营收增速、净利润增速、毛利率）<br/>
+                              · 机构评级（近60天券商研报评级汇总）<br/>
+                              · 近三天热点关键词（AI提取并判断产业相关性）<br/>
+                              · 近14天相关新闻（AI消息面风险过滤）<br/>
+                              <strong>流程：</strong>本地量化评分 → 热点相关性加权 → 预筛TOP30 → DeepSeek AI选出TOP10；明日之星未入选时追加为第11项
+                            </div>
+                          </template>
+                          <el-icon style="margin-left: 4px; vertical-align: middle; cursor: help;"><QuestionFilled /></el-icon>
+                        </el-tooltip>
+                      </template>
                   <div class="closing-prediction-header">
                     <div>
-                      <h4>明日预测 TOP10</h4>
-                      <span>{{ closingReport.tomorrow_prediction?.message || '基于今日候选池、板块资金流、B1评分和AI消息面过滤。' }}</span>
+                      <h4>明日预测 TOP{{ closingReport.tomorrow_prediction?.selected?.length || 10 }}</h4>
+                      <span>{{ closingReport.tomorrow_prediction?.message || '基于今日候选池、板块资金流、B1评价、热点关键词和AI消息面风险过滤。' }}</span>
                     </div>
                     <el-tag
                       size="small"
@@ -1309,15 +1351,32 @@
                     height="520"
                     table-layout="auto"
                     class="closing-prediction-table"
+                    :row-class-name="getClosingPredictionRowClass"
                   >
-                    <el-table-column prop="rank" label="#" width="56" align="center" />
+                    <el-table-column prop="rank" label="#" width="56" align="center">
+                      <template #default="{ row }">
+                        <template v-if="row.is_star_rejected">
+                          <el-tag size="small" type="warning" effect="plain">星</el-tag>
+                        </template>
+                        <template v-else>{{ row.rank }}</template>
+                      </template>
+                    </el-table-column>
                     <el-table-column prop="code" label="代码" min-width="90" />
-                    <el-table-column prop="name" label="名称" min-width="110" show-overflow-tooltip />
+                    <el-table-column prop="name" label="名称" min-width="110" show-overflow-tooltip>
+                      <template #default="{ row }">
+                        <el-button text type="primary" size="small" @click="viewStock(row.code, 'closing-analysis')">
+                          {{ row.name || row.code }}
+                        </el-button>
+                      </template>
+                    </el-table-column>
                     <el-table-column label="B1评价" min-width="180" show-overflow-tooltip>
                       <template #default="{ row }">{{ getClosingPredictionB1(row) }}</template>
                     </el-table-column>
                     <el-table-column label="所属板块" min-width="140" show-overflow-tooltip>
                       <template #default="{ row }">{{ getClosingSectorNames(row) }}</template>
+                    </el-table-column>
+                    <el-table-column label="热点" min-width="150" show-overflow-tooltip>
+                      <template #default="{ row }">{{ getClosingMatchedTopics(row) }}</template>
                     </el-table-column>
                     <el-table-column label="收盘/涨跌" min-width="120" align="right">
                       <template #default="{ row }">
@@ -1332,11 +1391,13 @@
                         {{ formatTurnoverRate(row.turnover_rate) }} / {{ formatVolumeRatio(row.volume_ratio) }}
                       </template>
                     </el-table-column>
-                    <el-table-column label="利好消息" min-width="240" show-overflow-tooltip>
-                      <template #default="{ row }">{{ getClosingPredictionBullish(row) }}</template>
-                    </el-table-column>
-                    <el-table-column label="AI点评" min-width="280" show-overflow-tooltip>
-                      <template #default="{ row }">{{ row.ai_comment || row.decision_reason || '-' }}</template>
+                    <el-table-column label="AI点评" min-width="420" show-overflow-tooltip>
+                      <template #default="{ row }">
+                        <template v-if="row.is_star_rejected && row.ai_comment">
+                          <el-tag size="small" type="warning" effect="plain" style="margin-right: 4px;">明日之星</el-tag>{{ row.ai_comment }}
+                        </template>
+                        <template v-else>{{ row.ai_comment || row.decision_reason || '-' }}</template>
+                      </template>
                     </el-table-column>
                   </el-table>
                 </el-tab-pane>
@@ -1571,7 +1632,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh, Loading, Search } from '@element-plus/icons-vue'
+import { Refresh, Loading, Search, QuestionFilled } from '@element-plus/icons-vue'
 import { apiAnalysis, apiCustomConcepts, apiTasks, isRequestCanceled } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ECharts } from 'echarts/core'
@@ -1579,6 +1640,7 @@ import type {
   Candidate,
   AnalysisResult,
   CurrentHotAnalysisResult,
+  CurrentHotAggregateResponse,
   CurrentHotCandidate,
   IncrementalUpdateStatus,
   ExitPlan,
@@ -1589,6 +1651,7 @@ import type {
   ClosingAnalysisReportResponse,
   ClosingCandidateMoveBucket,
   ClosingCandidateMoveItem,
+  ClosingHotTopicItem,
   ClosingTomorrowPredictionItem,
   RiskRegimeSummary,
   TomorrowStarHistoryItem,
@@ -2873,41 +2936,7 @@ async function loadTomorrowStarFallbackHistory(dates: string[], signal: AbortSig
   return rows.sort((a, b) => b.rawDate.localeCompare(a.rawDate))
 }
 
-async function loadCurrentHotFallbackHistory(dates: string[], signal: AbortSignal): Promise<HistoryRow[]> {
-  const prioritizedDates = prioritizeHistoryDates(dates, currentHotLatestDate.value, historyPageSize.value)
-  const rows = await mapWithConcurrency(prioritizedDates, HISTORY_FALLBACK_CONCURRENCY, async (date) => {
-    try {
-      const [candidatesData, resultsData] = await Promise.all([
-        apiAnalysis.getCurrentHotCandidates(date, { signal }),
-        apiAnalysis.getCurrentHotResults(date, { signal }),
-      ])
-      const candidates = candidatesData.candidates || []
-      const results = resultsData.results || []
-      const passCount = results.filter((r) => r.signal_type === 'trend_start').length
-      const b1PassCount = candidates.filter((candidate) => candidate.b1_passed === true).length
-      const rawDate = formatDateString(date)
-
-      return {
-        date: rawDate,
-        rawDate,
-        count: candidates.length,
-        pass: passCount,
-        b1PassCount,
-        consecutiveCandidateCount: '-',
-        tomorrowStarCount: '-',
-        status: 'success',
-        analysisCount: results.length,
-        errorMessage: null,
-        isLatest: rawDate === currentHotLatestDate.value,
-      } satisfies HistoryRow
-    } catch {
-      return createMissingHistoryRow(date, currentHotLatestDate.value)
-    }
-  })
-  return rows.sort((a, b) => b.rawDate.localeCompare(a.rawDate))
-}
-
-async function loadData(_skipLatestLoad: boolean = false) {
+async function loadData(forceRefresh: boolean = false) {
   if (loading.value) return
 
   const requestId = ++loadDataRequestId
@@ -2916,7 +2945,7 @@ async function loadData(_skipLatestLoad: boolean = false) {
   const previousViewingDate = viewingDate.value
   loading.value = true
   try {
-    const aggData = await apiAnalysis.getAggregate({ signal })
+    const aggData = await apiAnalysis.getAggregate({ force_refresh: forceRefresh || undefined }, { signal })
     if (requestId !== loadDataRequestId) return
 
     const dates = aggData.dates || []
@@ -3001,6 +3030,7 @@ async function loadData(_skipLatestLoad: boolean = false) {
     viewingDate.value = hasPreviousViewingDate ? previousViewingDate : (latestDataDate.value || latestDate.value)
 
     persistTomorrowStarCache()
+    void prefetchCurrentHotAggregate()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load data:', error)
@@ -3014,7 +3044,7 @@ async function loadData(_skipLatestLoad: boolean = false) {
   }
 }
 
-async function loadCurrentHotData(skipLatestLoad: boolean = false) {
+async function loadCurrentHotData(forceRefresh: boolean = false, silent: boolean = false) {
   if (currentHotLoading.value) return
 
   const requestId = ++currentHotLoadDataRequestId
@@ -3023,54 +3053,24 @@ async function loadCurrentHotData(skipLatestLoad: boolean = false) {
   const previousViewingDate = currentHotViewingDate.value
   currentHotLoading.value = true
   try {
-    const datesData = await apiAnalysis.getCurrentHotDates({ signal })
+    const aggregate = await apiAnalysis.getCurrentHotAggregate({
+      include_sectors: true,
+      force_refresh: forceRefresh || undefined,
+    }, { signal })
     if (requestId !== currentHotLoadDataRequestId) return
 
-    const dates = datesData.dates || []
-    const history = datesData.history || []
-    const windowStatus = datesData.window_status || null
-
-    currentHotLatestDate.value = dates.length > 0
-      ? formatDateString(windowStatus?.latest_date || dates[0])
-      : formatDateString(windowStatus?.latest_date || '')
-
-    if (history.length > 0 || windowStatus) {
-      currentHotHistoryData.value = normalizeHistoryRows(dates, history, windowStatus)
-    } else {
-      currentHotHistoryData.value = await loadCurrentHotFallbackHistory(dates, signal)
-      if (requestId !== currentHotLoadDataRequestId) return
-    }
-
-    currentHotLastHistorySignature.value = buildHistorySignature(dates, currentHotHistoryData.value)
-    currentHotHydratedFromCache.value = false
+    applyCurrentHotAggregate(aggregate, {
+      previousSelectedDate,
+      previousViewingDate,
+    })
     currentHotLoaded.value = true
-
-    if (dates.length === 0) {
-      currentHotSelectedDate.value = null
-      currentHotViewingDate.value = null
-      currentHotLatestCandidates.value = []
-      currentHotAnalysisResults.value = []
-      currentHotRiskRegime.value = null
-      currentHotLatestDataDate.value = ''
-      persistTomorrowStarCache()
-      return
-    }
-
-    const hasPreviousSelectedDate = !!previousSelectedDate && currentHotHistoryData.value.some((item) => item.rawDate === previousSelectedDate)
-    currentHotSelectedDate.value = hasPreviousSelectedDate ? previousSelectedDate : currentHotLatestDate.value
-
-    const hasPreviousViewingDate = !!previousViewingDate && currentHotHistoryData.value.some((item) => item.rawDate === previousViewingDate)
-    currentHotViewingDate.value = hasPreviousViewingDate ? previousViewingDate : currentHotLatestDate.value
-
-    if (!skipLatestLoad && requestId === currentHotLoadDataRequestId) {
-      await loadCurrentHotLatestCandidates()
-    }
-
     persistTomorrowStarCache()
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load current-hot data:', error)
-    ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘数据失败'))
+    if (!silent) {
+      ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘数据失败'))
+    }
   } finally {
     finishRequest('currentHotLoadData', signal)
     if (requestId === currentHotLoadDataRequestId) {
@@ -3079,72 +3079,60 @@ async function loadCurrentHotData(skipLatestLoad: boolean = false) {
   }
 }
 
-async function loadCurrentHotLatestCandidates() {
-  const requestId = ++currentHotCandidatesRequestId
-  const signal = beginRequest('currentHotLatestCandidates')
-  currentHotLoadingLatest.value = true
+function applyCurrentHotAggregate(
+  aggregate: CurrentHotAggregateResponse,
+  options: { previousSelectedDate?: string | null; previousViewingDate?: string | null } = {},
+) {
+  const dates = aggregate.dates || []
+  const history = aggregate.history || []
+  const latest = formatDateString(aggregate.latest_date || dates[0] || '')
+
+  currentHotLatestDate.value = latest
+
+  currentHotHistoryData.value = normalizeHistoryRows(dates, history, null)
+  currentHotLastHistorySignature.value = buildHistorySignature(dates, currentHotHistoryData.value)
+  currentHotHydratedFromCache.value = false
+
+  if (dates.length === 0) {
+    currentHotSelectedDate.value = null
+    currentHotViewingDate.value = null
+    currentHotLatestCandidates.value = []
+    currentHotAnalysisResults.value = []
+    currentHotRiskRegime.value = null
+    currentHotLatestDataDate.value = ''
+    return
+  }
+
+  const hasPreviousSelectedDate = !!options.previousSelectedDate && currentHotHistoryData.value.some((item) => item.rawDate === options.previousSelectedDate)
+  currentHotSelectedDate.value = hasPreviousSelectedDate ? options.previousSelectedDate! : currentHotLatestDate.value
+
+  const hasPreviousViewingDate = !!options.previousViewingDate && currentHotHistoryData.value.some((item) => item.rawDate === options.previousViewingDate)
+  currentHotViewingDate.value = hasPreviousViewingDate ? options.previousViewingDate! : (formatDateString(aggregate.pick_date || '') || currentHotLatestDate.value)
+
+  currentHotLatestCandidates.value = aggregate.candidates || []
+  currentHotAnalysisResults.value = aggregate.results || []
+  currentHotRiskRegime.value = aggregate.risk_regime || null
+  currentHotLatestDataDate.value = formatDateString(aggregate.pick_date || currentHotViewingDate.value || currentHotLatestDate.value)
+  currentHotCandidatePage.value = 1
+  currentHotAnalysisPage.value = 1
+  currentHotCandidateSort.value = { prop: '', order: null }
+
+  if (currentHotLatestDataDate.value && (currentHotLatestCandidates.value.length > 0 || currentHotAnalysisResults.value.length > 0)) {
+    currentHotCandidatesCache.value.set(currentHotLatestDataDate.value, {
+      candidates: currentHotLatestCandidates.value,
+      results: currentHotAnalysisResults.value,
+      riskRegime: currentHotRiskRegime.value,
+      timestamp: Date.now(),
+    })
+  }
+}
+
+async function prefetchCurrentHotAggregate() {
+  if (currentHotLoaded.value || currentHotLoading.value) return
   try {
-    const candidatesData = await apiAnalysis.getCurrentHotCandidates(undefined, { signal })
-    if (requestId !== currentHotCandidatesRequestId) return
-    const candidates = candidatesData.candidates || []
-    currentHotLatestCandidates.value = candidates
-    currentHotRiskRegime.value = candidatesData.risk_regime || null
-    currentHotCandidatePage.value = 1
-    currentHotAnalysisPage.value = 1
-    currentHotCandidateSort.value = { prop: '', order: null }
-
-    if (candidatesData.pick_date) {
-      const newPickDate = formatDate(candidatesData.pick_date)
-      currentHotLatestDataDate.value = newPickDate
-      currentHotViewingDate.value = newPickDate
-
-      if (newPickDate && newPickDate !== currentHotLatestDate.value) {
-        await loadCurrentHotData(true)
-        if (requestId !== currentHotCandidatesRequestId) return
-        try {
-          const resultsData = await apiAnalysis.getCurrentHotResults(undefined, { signal })
-          if (requestId !== currentHotCandidatesRequestId) return
-          currentHotAnalysisResults.value = resultsData.results || []
-          currentHotCandidatesCache.value.set(newPickDate, {
-            candidates,
-            results: resultsData.results || [],
-            riskRegime: candidatesData.risk_regime || resultsData.risk_regime || null,
-            timestamp: Date.now(),
-          })
-        } catch {
-          currentHotAnalysisResults.value = []
-        }
-        persistTomorrowStarCache()
-        return
-      }
-    } else {
-      currentHotLatestDataDate.value = ''
-    }
-
-    try {
-      const resultsData = await apiAnalysis.getCurrentHotResults(undefined, { signal })
-      if (requestId !== currentHotCandidatesRequestId) return
-      currentHotAnalysisResults.value = resultsData.results || []
-      if (currentHotLatestDataDate.value) {
-        currentHotCandidatesCache.value.set(currentHotLatestDataDate.value, {
-          candidates,
-          results: resultsData.results || [],
-          riskRegime: candidatesData.risk_regime || resultsData.risk_regime || null,
-          timestamp: Date.now(),
-        })
-      }
-    } catch {
-      currentHotAnalysisResults.value = []
-    }
-
-    persistTomorrowStarCache()
-  } catch (error) {
-    if (isRequestCanceled(error)) return
-    console.error('Failed to load current-hot candidates:', error)
-    ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘候选股票失败'))
-  } finally {
-    finishRequest('currentHotLatestCandidates', signal)
-    currentHotLoadingLatest.value = false
+    await loadCurrentHotData(false, true)
+  } catch {
+    // 静默预取，不影响明日之星首屏。
   }
 }
 
@@ -3472,43 +3460,7 @@ async function refreshCurrentHotCandidates() {
 
   const dateToRefresh = currentHotViewingDate.value || currentHotLatestDate.value
   if (!dateToRefresh) return
-
-  const requestId = ++currentHotCandidatesRequestId
-  const signal = beginRequest('currentHotLatestCandidates')
-  currentHotLoadingLatest.value = true
-  try {
-    const [candidatesData, resultsData] = await Promise.all([
-      apiAnalysis.getCurrentHotCandidates(dateToRefresh, { signal }),
-      apiAnalysis.getCurrentHotResults(dateToRefresh, { signal }),
-    ])
-    if (requestId !== currentHotCandidatesRequestId) return
-
-    const candidates = candidatesData.candidates || []
-    const results = resultsData.results || []
-
-    currentHotLatestCandidates.value = candidates
-    currentHotAnalysisResults.value = results
-    currentHotLatestDataDate.value = dateToRefresh
-    currentHotCandidatePage.value = 1
-    currentHotAnalysisPage.value = 1
-    currentHotCandidateSort.value = { prop: '', order: null }
-
-    currentHotCandidatesCache.value.set(dateToRefresh, {
-      candidates,
-      results,
-      timestamp: Date.now(),
-    })
-
-    persistTomorrowStarCache()
-    ElMessage.success(`已刷新 ${dateToRefresh} 的当前热盘数据`)
-  } catch (error) {
-    if (isRequestCanceled(error)) return
-    console.error('Failed to refresh current-hot candidates:', error)
-    ElMessage.error(getUserSafeErrorMessage(error, '刷新当前热盘失败'))
-  } finally {
-    finishRequest('currentHotLatestCandidates', signal)
-    currentHotLoadingLatest.value = false
-  }
+  ElMessage.success(`已刷新 ${dateToRefresh} 的当前热盘数据`)
 }
 
 async function checkIncrementalStatus() {
@@ -3530,7 +3482,7 @@ async function incrementalPollCallback() {
   // 如果更新完成，停止轮询并刷新数据
   if (!incrementalUpdate.value.running) {
     stopIncrementalPolling()
-    await loadData()
+    await loadData(true)
   }
 }
 
@@ -3607,7 +3559,7 @@ async function ensureFreshDataAndLoad(forceReload: boolean = false) {
   }
 
   // 需要刷新数据 - 使用聚合接口一次加载全部
-  await loadData()
+  await loadData(forceReload)
 }
 
 async function loadMiddayData(forceRefresh: boolean = false) {
@@ -3755,7 +3707,7 @@ async function runMiddayAdminAction(action: 'generate' | 'refresh' | 'prefetch')
   }
 }
 
-function viewStock(code: string, source: 'tomorrow-star' | 'current-hot' | 'midday-analysis' = 'tomorrow-star') {
+function viewStock(code: string, source: 'tomorrow-star' | 'current-hot' | 'midday-analysis' | 'closing-analysis' = 'tomorrow-star') {
   router.push({ path: '/diagnosis', query: { code, source, days: '30' } })
 }
 
@@ -4221,6 +4173,14 @@ function formatClosingMoney(value?: number | null): string {
   return `${numeric.toFixed(2)}万`
 }
 
+function formatClosingFlowSource(source?: string | null): string {
+  if (source === 'tushare_dc') return '东财板块资金'
+  if (source === 'eastmoney_direct') return '东方财富'
+  if (source === 'eastmoney') return '东方财富'
+  if (source === 'tushare') return 'Tushare'
+  return '未知'
+}
+
 function formatClosingPct(value?: number | null): string {
   const numeric = toFiniteNumber(value)
   return numeric === null ? '-' : `${numeric.toFixed(2)}%`
@@ -4235,19 +4195,27 @@ function getClosingSectorNames(row: ClosingCandidateMoveItem | ClosingTomorrowPr
 }
 
 function getClosingPredictionB1(row: ClosingTomorrowPredictionItem): string {
+  if (row.b1_comment?.trim()) {
+    return row.b1_comment.trim()
+  }
   const parts = [
     row.b1_passed === true ? 'B1通过' : row.b1_passed === false ? 'B1未通过' : 'B1未知',
-    typeof row.b1_score === 'number' ? `评分 ${row.b1_score.toFixed(1)}` : '',
     row.verdict ? `结论 ${getVerdictLabel(row.verdict)}` : '',
-    row.b1_comment || '',
+    row.signal_type ? getSignalTypeLabel(row.signal_type) : '',
   ].filter(Boolean)
   return parts.length ? parts.join('；') : '-'
 }
 
-function getClosingPredictionBullish(row: ClosingTomorrowPredictionItem): string {
-  if (row.bullish_news?.length) return row.bullish_news.join('；')
-  if (row.local_reasons?.length) return row.local_reasons.slice(0, 3).join('；')
-  return '-'
+function getClosingHotTopicKeywords(): ClosingHotTopicItem[] {
+  return closingReport.value?.hot_topics?.keywords?.slice(0, 12) || []
+}
+
+function getClosingMatchedTopics(row: ClosingTomorrowPredictionItem): string {
+  return row.matched_hot_topics?.length ? row.matched_hot_topics.join(' / ') : '-'
+}
+
+function getClosingPredictionRowClass({ row }: { row: ClosingTomorrowPredictionItem }): string {
+  return row.is_star_rejected ? 'star-rejected-row' : ''
 }
 
 function formatKeyLevels(levels?: Record<string, number | null> | null): string {
@@ -4476,7 +4444,7 @@ async function checkForRefresh(forceLoad: boolean = false) {
   if (!forceLoad && now - lastRefreshCheckAt.value < REFRESH_CHECK_INTERVAL_MS) return
 
   // 直接用聚合接口刷新，避免额外的 getDates 请求
-  await loadData()
+  await loadData(forceLoad)
 }
 
 async function refreshStatusAndRetry() {
@@ -4627,7 +4595,7 @@ onActivated(() => {
     void loadMiddayData(true)
   } else if (activeTab.value === 'current-hot') {
     if (currentHotLoaded.value) {
-      void loadCurrentHotData(true)
+      void loadCurrentHotData()
     } else {
       void loadCurrentHotData()
     }
@@ -5797,7 +5765,7 @@ $space-lg: 32px;
 .closing-flow-grid,
 .closing-candidate-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin: 14px 0;
 }
@@ -5810,7 +5778,7 @@ $space-lg: 32px;
 .closing-summary-card {
   padding: 14px 16px;
   border: 1px solid #e5e7eb;
-  border-radius: 12px;
+  border-radius: 8px;
   background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
   display: flex;
   flex-direction: column;
@@ -5821,6 +5789,18 @@ $space-lg: 32px;
     font-size: 22px;
     color: #111827;
   }
+}
+
+.closing-hot-topic-card {
+  min-width: 0;
+}
+
+.closing-hot-topic-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  align-items: center;
 }
 
 .closing-summary-card__label {
@@ -5853,6 +5833,14 @@ $space-lg: 32px;
 
 .closing-prediction-table {
   min-width: 1180px;
+}
+
+.closing-prediction-table :deep(.star-rejected-row) {
+  background-color: #fdf6ec !important;
+}
+
+.closing-prediction-table :deep(.star-rejected-row td) {
+  border-top: 2px solid #e6a23c;
 }
 
 @media (max-width: 768px) {

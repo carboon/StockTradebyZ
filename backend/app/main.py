@@ -133,8 +133,9 @@ def ensure_admin_user() -> None:
             now = utc_now()
             conn.execute(
                 text(
-                    "INSERT INTO users (username, hashed_password, role, is_active, daily_quota, created_at, updated_at) "
-                    "VALUES (:username, :password, 'admin', true, 10000, :now, :now)"
+                    "INSERT INTO users "
+                    "(username, hashed_password, role, is_active, daily_quota, is_online, created_at, updated_at) "
+                    "VALUES (:username, :password, 'admin', true, 10000, false, :now, :now)"
                 ),
                 {
                     "username": settings.admin_default_username,

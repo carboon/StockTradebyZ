@@ -109,6 +109,19 @@
               </div>
             </el-form-item>
 
+            <el-form-item label="Bocha Key">
+              <el-input
+                v-model="configs.bocha_api_key"
+                type="password"
+                show-password
+                placeholder="Bocha AI Search API Key"
+                class="config-input"
+              />
+              <div class="form-tip">
+                热点新闻检索增强，获取地址: <a href="https://open.bochaai.com/" target="_blank">https://open.bochaai.com/</a>
+              </div>
+            </el-form-item>
+
             <!-- 其他配置 -->
             <el-divider content-position="left">其他配置</el-divider>
 
@@ -394,6 +407,7 @@ type ConfigFormState = {
   dashscope_api_key: string
   gemini_api_key: string
   deepseek_api_key: string
+  bocha_api_key: string
   default_reviewer: string
   min_score_threshold: number
   register_validation_question: string
@@ -406,6 +420,7 @@ const configs = ref<ConfigFormState>({
   dashscope_api_key: '',
   gemini_api_key: '',
   deepseek_api_key: '',
+  bocha_api_key: '',
   default_reviewer: 'quant',
   min_score_threshold: 4.0,
   register_validation_question: '系统管理员的微信名是什么',
@@ -623,6 +638,7 @@ async function loadConfigs() {
       dashscope_api_key: configStore.configs.dashscope_api_key || '',
       gemini_api_key: configStore.configs.gemini_api_key || '',
       deepseek_api_key: configStore.configs.deepseek_api_key || '',
+      bocha_api_key: configStore.configs.bocha_api_key || '',
       default_reviewer: configStore.configs.default_reviewer || 'quant',
       min_score_threshold: parseFloat(configStore.configs.min_score_threshold || '4.0'),
       register_validation_question: configStore.configs.register_validation_question || '系统管理员的微信名是什么',

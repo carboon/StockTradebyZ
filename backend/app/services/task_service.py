@@ -1535,12 +1535,16 @@ class TaskService:
     def _invalidate_tomorrow_star_caches() -> None:
         from app.api.cache_decorators import build_freshness_cache_key
         from app.cache import cache
+        from app.services.current_hot_aggregate_service import CurrentHotAggregateService
+        from app.services.tomorrow_star_aggregate_service import TomorrowStarAggregateCache
 
         cache.delete_prefix("candidates:")
         cache.delete_prefix("analysis_results:")
         cache.delete_prefix("diagnosis:history:")
         cache.delete_prefix("active_pool_rank:")
         cache.delete(build_freshness_cache_key())
+        TomorrowStarAggregateCache.invalidate_cache()
+        CurrentHotAggregateService.invalidate_cache()
 
     async def _run_tomorrow_star(self, task: Any, db: Session):
         """生成明日之星"""

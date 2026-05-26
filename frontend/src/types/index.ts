@@ -700,6 +700,8 @@ export interface TomorrowStarAggregateResponse {
   candidates: CandidatesResponse | null
   results: AnalysisResultsResponse | null
   freshness: FreshnessResponse | null
+  generated_at?: string | null
+  cache_hit: boolean
 }
 
 export interface CurrentHotAnalysisResultsResponse {
@@ -926,8 +928,33 @@ export interface ClosingMarketOverview {
 }
 
 export interface ClosingSectorFlow {
+  source?: string | null
+  source_trade_date?: string | null
+  is_fallback?: boolean
   inflow_top3: ClosingSectorFlowItem[]
   outflow_top3: ClosingSectorFlowItem[]
+}
+
+export interface ClosingHotTopicItem {
+  keyword: string
+  category?: string | null
+  heat?: number | null
+  reason?: string | null
+  related_sectors: string[]
+  related_companies: string[]
+  evidence: Array<Record<string, any>>
+}
+
+export interface ClosingHotTopics {
+  source?: string | null
+  window_days: number
+  start_date?: string | null
+  end_date?: string | null
+  search_queries: string[]
+  keywords: ClosingHotTopicItem[]
+  summary?: string | null
+  confidence?: number | null
+  evidence: Array<Record<string, any>>
 }
 
 export interface ClosingCandidateMoveItem {
@@ -963,6 +990,14 @@ export interface ClosingTomorrowPredictionItem {
   volume_ratio?: number | null
   sector_net_mf_amount?: number | null
   sector_3d_net_mf_amount?: number | null
+  is_industry_leader?: boolean | null
+  market_cap?: number | null
+  financial_performance?: Record<string, any> | null
+  institutional_rating?: Record<string, any> | null
+  tomorrow_star_pass?: boolean | null
+  is_star_rejected?: boolean | null
+  topic_relevance_score?: number | null
+  matched_hot_topics: string[]
   local_score?: number | null
   local_reasons: string[]
   ai_score?: number | null
@@ -979,6 +1014,7 @@ export interface ClosingTomorrowPrediction {
   preselected: ClosingTomorrowPredictionItem[]
   selected: ClosingTomorrowPredictionItem[]
   sector_flow_history: Array<Record<string, any>>
+  hot_topics?: ClosingHotTopics | null
   ai?: Record<string, any> | null
 }
 
@@ -1003,6 +1039,7 @@ export interface ClosingAnalysisReportResponse {
   force_generated: boolean
   market?: ClosingMarketOverview | null
   sector_flow?: ClosingSectorFlow | null
+  hot_topics?: ClosingHotTopics | null
   candidate_buckets: ClosingCandidateMoveBucket[]
   tomorrow_prediction?: ClosingTomorrowPrediction | null
 }

@@ -6,17 +6,24 @@ Closing Analysis Service
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
+import requests
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import AnalysisResult, Candidate, ClosingAnalysisReport, Config, Stock, StockDaily
 from app.services.deepseek_service import DeepSeekService
+from app.services.hot_news_aggregator_service import HotNewsAggregatorService
 from app.services.tushare_service import TushareService
+from app.utils.stock_metadata import resolve_ts_code
+from app.utils.tushare_rate_limit import acquire_tushare_slot
 from app.time_utils import utc_now
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,6 +38,8 @@ class ClosingAnalysisStatus:
 
 class ClosingAnalysisService:
     """基于本地日线、候选池和资金流字段生成收盘日报。"""
+
+    EASTMONEY_SECTOR_FLOW_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 
     def __init__(self, db: Session):
         self.db = db
@@ -116,14 +125,17 @@ class ClosingAnalysisService:
             .filter(StockDaily.trade_date < trade_date)
             .scalar()
         )
+        sector_flow = self._build_sector_flow(trade_date)
+        hot_topics = self._build_hot_topics(trade_date, sector_flow)
         return {
             "trade_date": trade_date.isoformat(),
             "source_data_date": trade_date.isoformat(),
             "generated_at": utc_now().isoformat(),
             "market": self._build_market_overview(trade_date, previous_trade_date),
-            "sector_flow": self._build_sector_flow(trade_date),
+            "sector_flow": sector_flow,
+            "hot_topics": hot_topics,
             "candidate_buckets": self._build_candidate_buckets(trade_date),
-            "tomorrow_prediction": self._build_tomorrow_prediction(trade_date),
+            "tomorrow_prediction": self._build_tomorrow_prediction(trade_date, hot_topics=hot_topics),
         }
 
     def _build_market_overview(self, trade_date: date, previous_trade_date: date | None) -> dict[str, Any]:
@@ -168,21 +180,120 @@ class ClosingAnalysisService:
             "summary": f"全市场均值涨跌 {avg_change_pct:.2f}%，上涨 {up_count} 家、下跌 {down_count} 家" if avg_change_pct is not None else "暂无前一交易日对照数据",
         }
 
-    def _build_sector_flow(self, trade_date: date) -> dict[str, list[dict[str, Any]]]:
+    def _build_sector_flow(self, trade_date: date) -> dict[str, Any]:
+        items = self._build_local_sector_flow_items(trade_date)
+        source = "tushare"
+        if not items:
+            items = self._fetch_tushare_dc_sector_flow_items(trade_date)
+            source = "tushare_dc" if items else "none"
+        if not items:
+            items = self._fetch_eastmoney_sector_flow_items()
+            source = "eastmoney_direct" if items else "none"
+        inflow, outflow = self._rank_sector_flow_items(items)
+        return {
+            "source": source,
+            "source_trade_date": trade_date.isoformat() if source != "none" else None,
+            "is_fallback": source in {"tushare_dc", "eastmoney_direct"},
+            "inflow_top3": inflow,
+            "outflow_top3": outflow,
+        }
+
+    def _build_hot_topics(self, trade_date: date, sector_flow: dict[str, Any]) -> dict[str, Any]:
+        """提取近三天市场热点关键词。"""
+        return HotNewsAggregatorService(
+            self.db,
+            tushare_service=self.tushare_service,
+            deepseek_service=self.deepseek_service,
+        ).get_market_hot_topics(trade_date=trade_date, window_days=3, limit=12, sector_flow=sector_flow)
+
+    def _build_local_sector_flow_items(self, trade_date: date) -> list[dict[str, Any]]:
         rows = (
-            self.db.query(Stock.industry, func.sum(func.coalesce(StockDaily.net_mf_amount, 0.0)))
+            self.db.query(Stock.industry, func.sum(StockDaily.net_mf_amount))
             .join(StockDaily, StockDaily.code == Stock.code)
             .filter(StockDaily.trade_date == trade_date)
+            .filter(StockDaily.net_mf_amount.isnot(None))
             .group_by(Stock.industry)
             .all()
         )
-        items = [
+        return [
             {"sector_name": industry or "未分类", "net_mf_amount": round(float(amount or 0.0), 2)}
             for industry, amount in rows
+            if amount is not None and float(amount or 0.0) != 0.0
         ]
+
+    def _fetch_eastmoney_sector_flow_items(self) -> list[dict[str, Any]]:
+        params = {
+            "fid": "f62",
+            "po": "1",
+            "pz": "600",
+            "pn": "1",
+            "np": "1",
+            "fltt": "2",
+            "invt": "2",
+            "ut": "b2884a393a59ad64002292a3e90d46a5",
+            "fs": "m:90 t:2",
+            "fields": "f12,f14,f62",
+        }
+        try:
+            response = requests.get(self.EASTMONEY_SECTOR_FLOW_URL, params=params, timeout=8)
+            response.raise_for_status()
+            rows = ((response.json().get("data") or {}).get("diff") or [])
+        except Exception:
+            logger.warning("东方财富板块资金流获取失败", exc_info=True)
+            return []
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            sector_name = str(row.get("f14") or "").strip()
+            net_amount = row.get("f62")
+            if not sector_name or net_amount in (None, "-"):
+                continue
+            try:
+                # 东方财富 f62 为元，系统资金流展示口径为万元。
+                net_mf_amount = round(float(net_amount) / 10000, 2)
+            except (TypeError, ValueError):
+                continue
+            if net_mf_amount == 0:
+                continue
+            items.append({"sector_name": sector_name, "net_mf_amount": net_mf_amount})
+        return items
+
+    def _fetch_tushare_dc_sector_flow_items(self, trade_date: date) -> list[dict[str, Any]]:
+        try:
+            acquire_tushare_slot("moneyflow_ind_dc")
+            frame = self.tushare_service.pro.moneyflow_ind_dc(
+                trade_date=trade_date.strftime("%Y%m%d"),
+                content_type="行业",
+                fields="trade_date,name,net_amount,rank",
+            )
+        except Exception:
+            logger.warning("Tushare DC 板块资金流获取失败: trade_date=%s", trade_date, exc_info=True)
+            return []
+
+        if frame is None or frame.empty:
+            return []
+
+        items: list[dict[str, Any]] = []
+        for _, row in frame.iterrows():
+            sector_name = str(row.get("name") or "").strip()
+            net_amount = row.get("net_amount")
+            if not sector_name or net_amount in (None, "-"):
+                continue
+            try:
+                # Tushare DC net_amount 为元，系统资金流展示口径为万元。
+                net_mf_amount = round(float(net_amount) / 10000, 2)
+            except (TypeError, ValueError):
+                continue
+            if net_mf_amount == 0:
+                continue
+            items.append({"sector_name": sector_name, "net_mf_amount": net_mf_amount})
+        return items
+
+    @staticmethod
+    def _rank_sector_flow_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         inflow = sorted([item for item in items if item["net_mf_amount"] > 0], key=lambda item: item["net_mf_amount"], reverse=True)[:3]
         outflow = sorted([item for item in items if item["net_mf_amount"] < 0], key=lambda item: item["net_mf_amount"])[:3]
-        return {"inflow_top3": inflow, "outflow_top3": outflow}
+        return inflow, outflow
 
     def _build_candidate_buckets(self, trade_date: date) -> list[dict[str, Any]]:
         pick_dates = [
@@ -252,7 +363,7 @@ class ClosingAnalysisService:
         )
         return {code: float(close) for code, close in rows if close is not None}
 
-    def _build_tomorrow_prediction(self, trade_date: date) -> dict[str, Any]:
+    def _build_tomorrow_prediction(self, trade_date: date, *, hot_topics: dict[str, Any] | None = None) -> dict[str, Any]:
         rows = (
             self.db.query(Candidate, Stock, StockDaily, AnalysisResult)
             .join(Stock, Stock.code == Candidate.code)
@@ -294,6 +405,11 @@ class ClosingAnalysisService:
         codes = [candidate.code for candidate, *_ in rows]
         previous_prices = self._price_map(codes, previous_date) if previous_date else {}
 
+        industry_leaders = self._build_industry_leader_set(trade_date, codes)
+        financial_data = self._build_financial_data(codes)
+        rating_data = self._build_rating_data(codes)
+        topic_keywords = self._normalize_hot_topic_keywords(hot_topics)
+
         scored: list[dict[str, Any]] = []
         for candidate, stock, daily, analysis in rows:
             industry = stock.industry or "未分类"
@@ -301,9 +417,21 @@ class ClosingAnalysisService:
             change_pct = (daily.close - prev_close) / prev_close * 100 if prev_close else None
             sector_latest = float(latest_flow.get(industry, 0.0))
             sector_three_day = float(three_day_flow.get(industry, 0.0))
-            b1_score = float(analysis.total_score) if analysis and analysis.total_score is not None else (65.0 if candidate.b1_passed else 45.0)
+            raw_b1_score = float(analysis.total_score) if analysis and analysis.total_score is not None else None
+            # total_score 是 0~5 分制，需要归一化到 0~100 再参与预测评分
+            if raw_b1_score is not None:
+                b1_score = min(max(raw_b1_score / 5.0 * 100.0, 0.0), 100.0)
+            else:
+                b1_score = 65.0 if candidate.b1_passed else 45.0
             turnover_rate = float(daily.turnover_rate or candidate.turnover or 0.0)
             volume_ratio = float(daily.volume_ratio or 0.0)
+            is_leader = candidate.code in industry_leaders
+            circ_mv = float(daily.circ_mv) if daily.circ_mv else None
+            topic_relevance_score, matched_topics = self._score_topic_relevance(
+                stock=stock,
+                analysis=analysis,
+                topic_keywords=topic_keywords,
+            )
             local_score = self._score_tomorrow_candidate(
                 b1_score=b1_score,
                 sector_latest=sector_latest,
@@ -313,6 +441,8 @@ class ClosingAnalysisService:
                 turnover_rate=turnover_rate,
                 volume_ratio=volume_ratio,
                 b1_passed=bool(candidate.b1_passed),
+                is_industry_leader=is_leader,
+                topic_relevance_score=topic_relevance_score,
             )
             scored.append({
                 "code": candidate.code,
@@ -329,6 +459,13 @@ class ClosingAnalysisService:
                 "volume_ratio": round(volume_ratio, 2) if volume_ratio else None,
                 "sector_net_mf_amount": round(sector_latest, 2),
                 "sector_3d_net_mf_amount": round(sector_three_day, 2),
+                "is_industry_leader": is_leader,
+                "market_cap": round(circ_mv, 2) if circ_mv else None,
+                "financial_performance": financial_data.get(candidate.code),
+                "institutional_rating": rating_data.get(candidate.code),
+                "tomorrow_star_pass": self._extract_tomorrow_star_pass(analysis),
+                "topic_relevance_score": round(topic_relevance_score, 2),
+                "matched_hot_topics": matched_topics,
                 "local_score": round(local_score, 2),
                 "local_reasons": self._build_local_reasons(
                     industry=industry,
@@ -340,21 +477,48 @@ class ClosingAnalysisService:
                     turnover_rate=turnover_rate,
                     volume_ratio=volume_ratio,
                     b1_passed=bool(candidate.b1_passed),
+                    is_industry_leader=is_leader,
+                    matched_hot_topics=matched_topics,
                 ),
             })
 
-        preselected = sorted(scored, key=lambda item: item["local_score"], reverse=True)[:20]
-        ai_result = self._ai_filter_tomorrow_prediction(trade_date, preselected, sector_flow_history)
+        preselected = self._build_tomorrow_preselected(scored)
+        ai_result = self._ai_filter_tomorrow_prediction(trade_date, preselected, sector_flow_history, hot_topics=hot_topics)
         selected = self._merge_ai_prediction(preselected, ai_result)
+        selected = self._ensure_tomorrow_star_visible(scored, selected)
         return {
             "trade_date": trade_date.isoformat(),
             "status": "ready" if ai_result.get("enabled") else "ai_unavailable",
             "message": ai_result.get("message") or "明日预测已生成",
             "sector_flow_history": sector_flow_history,
+            "hot_topics": hot_topics or {},
             "preselected": preselected,
-            "selected": selected[:10],
+            "selected": selected,
             "ai": ai_result,
         }
+
+    @staticmethod
+    def _build_tomorrow_preselected(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked = sorted(scored, key=lambda item: item["local_score"], reverse=True)
+        # 记录本地排名
+        for idx, item in enumerate(ranked):
+            item["local_rank"] = idx + 1
+        preselected_by_code = {str(item["code"]): item for item in ranked[:30]}
+        # 强信号项强制纳入
+        strong_signal_items = [
+            item
+            for item in ranked
+            if item.get("signal_type") == "trend_start"
+            and item.get("verdict") == "PASS"
+            and item.get("b1_passed") is True
+        ]
+        for item in strong_signal_items:
+            preselected_by_code.setdefault(str(item["code"]), item)
+        # 明日之星强制纳入（即使本地分数低于TOP30）
+        tomorrow_star_items = [item for item in ranked if item.get("tomorrow_star_pass") is True]
+        for item in tomorrow_star_items:
+            preselected_by_code.setdefault(str(item["code"]), item)
+        return sorted(preselected_by_code.values(), key=lambda item: item["local_score"], reverse=True)
 
     def _score_tomorrow_candidate(
         self,
@@ -367,6 +531,8 @@ class ClosingAnalysisService:
         turnover_rate: float,
         volume_ratio: float,
         b1_passed: bool,
+        is_industry_leader: bool = False,
+        topic_relevance_score: float = 0.0,
     ) -> float:
         score = min(max(b1_score, 0.0), 100.0) * 0.35
         score += 12.0 if b1_passed else -8.0
@@ -374,6 +540,9 @@ class ClosingAnalysisService:
         score += min(max(sector_three_day / 250000.0, -12.0), 16.0)
         if in_outflow_sector:
             score -= 18.0
+        if is_industry_leader:
+            score += 10.0
+        score += min(max(topic_relevance_score, 0.0), 12.0)
         if change_pct is not None:
             if -1.0 <= change_pct <= 6.0:
                 score += 10.0
@@ -405,8 +574,14 @@ class ClosingAnalysisService:
         turnover_rate: float,
         volume_ratio: float,
         b1_passed: bool,
+        is_industry_leader: bool = False,
+        matched_hot_topics: list[str] | None = None,
     ) -> list[str]:
-        reasons = [f"B1{'通过' if b1_passed else '未通过'}，评分 {b1_score:.1f}"]
+        reasons = [f"B1{'通过' if b1_passed else '未通过'}"]
+        if is_industry_leader:
+            reasons.append(f"{industry} 行业头部企业")
+        if matched_hot_topics:
+            reasons.append(f"匹配热点：{'、'.join(matched_hot_topics[:4])}")
         if sector_latest > 0:
             reasons.append(f"{industry} 当日资金净流入 {sector_latest:.0f} 万")
         elif sector_latest < 0:
@@ -423,6 +598,56 @@ class ClosingAnalysisService:
             reasons.append(f"量比 {volume_ratio:.2f}")
         return reasons
 
+    def _build_industry_leader_set(self, trade_date: date, candidate_codes: list[str]) -> set[str]:
+        """基于流通市值判断候选股是否为所在行业头部企业（每个行业取市值前3名）。"""
+        code_set = set(candidate_codes)
+        rows = (
+            self.db.query(StockDaily.code, Stock.industry, StockDaily.circ_mv)
+            .join(Stock, Stock.code == StockDaily.code)
+            .filter(
+                StockDaily.trade_date == trade_date,
+                StockDaily.circ_mv.isnot(None),
+                StockDaily.circ_mv > 0,
+            )
+            .all()
+        )
+        by_industry: dict[str, list[tuple[str, float]]] = {}
+        for code, industry, circ_mv in rows:
+            if industry:
+                by_industry.setdefault(industry, []).append((code, float(circ_mv)))
+
+        leaders: set[str] = set()
+        for _industry, items in by_industry.items():
+            items.sort(key=lambda x: x[1], reverse=True)
+            for code, _ in items[:3]:
+                if code in code_set:
+                    leaders.add(code)
+        return leaders
+
+    def _build_financial_data(self, codes: list[str]) -> dict[str, dict[str, Any]]:
+        """获取候选股最新财务指标（ROE、营收增速、净利润增速、毛利率）。"""
+        if not codes:
+            return {}
+        ts_codes = [resolve_ts_code(code) for code in codes]
+        ts_codes = [tc for tc in ts_codes if tc]
+        try:
+            return self.tushare_service.get_financial_indicators(ts_codes)
+        except Exception:
+            logger.warning("财务数据获取失败", exc_info=True)
+            return {}
+
+    def _build_rating_data(self, codes: list[str]) -> dict[str, dict[str, Any]]:
+        """获取候选股机构评级数据。"""
+        if not codes:
+            return {}
+        ts_codes = [resolve_ts_code(code) for code in codes]
+        ts_codes = [tc for tc in ts_codes if tc]
+        try:
+            return self.tushare_service.get_institutional_ratings(ts_codes)
+        except Exception:
+            logger.warning("机构评级数据获取失败", exc_info=True)
+            return {}
+
     def _build_sector_flow_history(self, trade_date: date, *, days: int) -> list[dict[str, Any]]:
         trade_dates = [
             item[0]
@@ -437,14 +662,14 @@ class ClosingAnalysisService:
         ]
         history: list[dict[str, Any]] = []
         for item_date in trade_dates:
-            flow_rows = (
-                self.db.query(Stock.industry, func.sum(func.coalesce(StockDaily.net_mf_amount, 0.0)))
-                .join(StockDaily, StockDaily.code == Stock.code)
-                .filter(StockDaily.trade_date == item_date)
-                .group_by(Stock.industry)
-                .all()
-            )
-            sectors = {industry or "未分类": round(float(amount or 0.0), 2) for industry, amount in flow_rows}
+            items = self._build_local_sector_flow_items(item_date)
+            if not items and item_date == trade_date:
+                items = self._fetch_tushare_dc_sector_flow_items(item_date)
+            if not items and item_date == trade_date:
+                items = self._fetch_eastmoney_sector_flow_items()
+            sectors = {str(item["sector_name"]): round(float(item["net_mf_amount"]), 2) for item in items}
+            if not sectors:
+                continue
             history.append({"trade_date": item_date.isoformat(), "sectors": sectors})
         return history
 
@@ -459,18 +684,75 @@ class ClosingAnalysisService:
                 result[str(name)] = result.get(str(name), 0.0) + float(value or 0.0)
         return result
 
+    @staticmethod
+    def _normalize_hot_topic_keywords(hot_topics: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(hot_topics, dict):
+            return []
+        raw_keywords = hot_topics.get("keywords")
+        if not isinstance(raw_keywords, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in raw_keywords:
+            if isinstance(item, str):
+                keyword = item.strip()
+                related_sectors: list[str] = []
+            elif isinstance(item, dict):
+                keyword = str(item.get("keyword") or "").strip()
+                sectors = item.get("related_sectors")
+                related_sectors = [str(sector).strip() for sector in sectors if str(sector).strip()] if isinstance(sectors, list) else []
+            else:
+                continue
+            if keyword:
+                normalized.append({"keyword": keyword, "related_sectors": related_sectors})
+        return normalized
+
+    @staticmethod
+    def _score_topic_relevance(*, stock: Stock, analysis: Any, topic_keywords: list[dict[str, Any]]) -> tuple[float, list[str]]:
+        if not topic_keywords:
+            return 0.0, []
+        text_parts = [
+            stock.name or "",
+            stock.industry or "",
+            getattr(analysis, "comment", None) or "",
+            getattr(analysis, "signal_type", None) or "",
+        ]
+        details = getattr(analysis, "details_json", None)
+        if isinstance(details, dict):
+            text_parts.append(json.dumps(details, ensure_ascii=False, default=str)[:2000])
+        haystack = " ".join(text_parts)
+
+        score = 0.0
+        matched: list[str] = []
+        industry = stock.industry or ""
+        for item in topic_keywords:
+            keyword = str(item.get("keyword") or "").strip()
+            related_sectors = [str(sector) for sector in item.get("related_sectors") or []]
+            if not keyword:
+                continue
+            keyword_matched = keyword in haystack or any(sector and (sector in industry or industry in sector) for sector in related_sectors)
+            if not keyword_matched:
+                continue
+            matched.append(keyword)
+            score += 6.0 if keyword in (stock.name or "") else 4.0
+            if keyword in industry or any(sector and (sector in industry or industry in sector) for sector in related_sectors):
+                score += 4.0
+        return min(score, 12.0), matched[:6]
+
     def _ai_filter_tomorrow_prediction(
         self,
         trade_date: date,
         preselected: list[dict[str, Any]],
         sector_flow_history: list[dict[str, Any]],
+        *,
+        hot_topics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.deepseek_service.enabled:
             return {"enabled": False, "message": "DeepSeek API Key 未配置，已仅返回本地量化预筛"}
 
         context = {
             "trade_date": trade_date.isoformat(),
-            "rule": "从本地预筛 TOP20 中剔除明显负面消息、缺少利好催化或板块资金明显恶化的股票，最终选出 TOP10。",
+            "rule": "从本地预筛 TOP30 中剔除明显负面消息、板块资金明显恶化或缺少数据支撑的股票，最终选出 TOP10；如明日之星未入TOP10，服务端会追加展示为第11项。",
+            "hot_topics": hot_topics or {},
             "sector_flow_history": sector_flow_history,
             "candidates": preselected,
             "recent_news": self._matched_news_for_candidates(preselected),
@@ -478,13 +760,18 @@ class ClosingAnalysisService:
         system_prompt = (
             "你是A股收盘后明日候选股筛选助手。"
             "只能基于提供的结构化上下文与新闻摘要判断，必须输出 JSON object，不能输出 markdown。"
-            "如果没有足够利好消息或存在明显负面消息，应降低排名或剔除。"
+            "如果存在明显负面消息、板块资金恶化、财务或交易数据不匹配，应降低排名或剔除。"
+            "candidates 中包含行业头部标记(is_industry_leader)、财务指标(financial_performance)和机构评级(institutional_rating)，"
+            "请在筛选时综合考量：行业头部企业具有更强抗风险能力，财务数据优秀的公司更值得关注，机构评级偏多的股票更受市场认可。"
+            "hot_topics 是近三天市场热点关键词；如果股票与关键词、行业、产业链上下游或核心公司存在强相关，排序应靠前，并说明关系。"
+            "ai_comment 字段必须是一段综合评述，包含：B1技术形态、板块资金、热点/产业链相关性、财务指标、机构评级、消息风险。"
+            "不要展示或引用具体综合分数，不要单列利好消息清单。"
         )
         user_prompt = (
             "请从 candidates 中选出最终 TOP10。"
             "固定返回 JSON："
             '{"selected":[{"code":"string","rank":1,"ai_score":0,'
-            '"bullish_news":["string"],"negative_news":["string"],"ai_comment":"string",'
+            '"ai_comment":"综合评述（B1；资金；热点关系；财务；机构；风险）",'
             '"decision_reason":"string"}],'
             '"rejected":[{"code":"string","reason":"string"}],'
             '"summary":"string","confidence":0}\n'
@@ -497,7 +784,7 @@ class ClosingAnalysisService:
                 temperature=0.15,
             )
             result["enabled"] = True
-            result["message"] = "DeepSeek 已完成 TOP20 到 TOP10 过滤"
+            result["message"] = "DeepSeek 已完成 TOP30 到 TOP10 过滤"
             return result
         except Exception as exc:
             return {"enabled": False, "message": f"DeepSeek 明日预测失败：{exc}"}
@@ -524,6 +811,25 @@ class ClosingAnalysisService:
             if len(matched) >= 40:
                 break
         return matched
+
+    @staticmethod
+    def _extract_tomorrow_star_pass(analysis: Any) -> bool | None:
+        """从 AnalysisResult 的 details_json 中提取 tomorrow_star_pass 标记。"""
+        if analysis is None:
+            return None
+        details = getattr(analysis, "details_json", None)
+        if not isinstance(details, dict):
+            return None
+        direct = details.get("tomorrow_star_pass")
+        if isinstance(direct, bool):
+            return direct
+        rules = details.get("rules")
+        if isinstance(rules, dict) and isinstance(rules.get("tomorrow_star_pass"), bool):
+            return rules["tomorrow_star_pass"]
+        detail = details.get("details")
+        if isinstance(detail, dict) and isinstance(detail.get("tomorrow_star_pass"), bool):
+            return detail["tomorrow_star_pass"]
+        return None
 
     @staticmethod
     def _merge_ai_prediction(preselected: list[dict[str, Any]], ai_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -560,7 +866,96 @@ class ClosingAnalysisService:
                 }
                 for index, item in enumerate(preselected[:10])
             ]
-        return sorted(merged, key=lambda item: item.get("rank") or 999)
+        else:
+            merged = sorted(merged, key=lambda item: item.get("rank") or 999)[:10]
+            for index, item in enumerate(merged):
+                item["rank"] = index + 1
+
+        # 明日之星未被AI选中时，追加到TOP10后面
+        merged_codes = {item["code"] for item in merged}
+        rejected_map: dict[str, str] = {}
+        if isinstance(ai_result.get("rejected"), list):
+            for r in ai_result["rejected"]:
+                if isinstance(r, dict):
+                    rejected_map[str(r.get("code") or "").zfill(6)] = str(r.get("reason") or "")
+
+        for item in preselected:
+            if not item.get("tomorrow_star_pass"):
+                continue
+            if item["code"] in merged_codes:
+                continue
+            if len(merged) >= 11:
+                break
+            merged_codes.add(item["code"])
+            rejection_reason = rejected_map.get(item["code"], "")
+            merged.append({
+                **item,
+                "rank": len(merged) + 1,
+                "ai_score": None,
+                "is_star_rejected": True,
+                "bullish_news": [],
+                "negative_news": [],
+                "ai_comment": f"明日之星未被AI选中" + (f"：{rejection_reason}" if rejection_reason else ""),
+                "decision_reason": rejection_reason or "AI未选中",
+            })
+
+        return sorted(merged, key=lambda item: item.get("rank") or 999)[:11]
+
+    def _ensure_tomorrow_star_visible(
+        self,
+        scored: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """确保明日之星至少可见；常规 TOP10 外最多追加 1 只形成 TOP11。"""
+        selected_codes = {item["code"] for item in selected}
+        appended = sorted(list(selected), key=lambda item: item.get("rank") or 999)[:11]
+        if any(item.get("tomorrow_star_pass") for item in appended):
+            return appended[:11]
+
+        star_items = sorted(
+            [item for item in scored if item.get("tomorrow_star_pass") and item["code"] not in selected_codes],
+            key=lambda item: item.get("local_score") or 0,
+            reverse=True,
+        )
+        for item in star_items[:1]:
+            if not item.get("tomorrow_star_pass"):
+                continue
+            if item["code"] in selected_codes:
+                continue
+            if len(appended) >= 11:
+                appended = appended[:10]
+            selected_codes.add(item["code"])
+            b1_comment = item.get("b1_comment") or ""
+            appended.append({
+                **item,
+                "rank": len(appended) + 1,
+                "ai_score": None,
+                "is_star_rejected": True,
+                "bullish_news": [],
+                "negative_news": [],
+                "ai_comment": self._build_forced_star_comment(item, b1_comment),
+                "decision_reason": "明日之星强制纳入",
+            })
+
+        return sorted(appended, key=lambda item: item.get("rank") or 999)[:11]
+
+    @staticmethod
+    def _build_forced_star_comment(item: dict[str, Any], b1_comment: str) -> str:
+        parts = [
+            f"明日之星，本地排名 {item.get('local_rank', '-')}",
+            b1_comment,
+            f"板块资金：当日 {item.get('sector_net_mf_amount', 0)} 万，近3日 {item.get('sector_3d_net_mf_amount', 0)} 万",
+        ]
+        matched_topics = item.get("matched_hot_topics") or []
+        if matched_topics:
+            parts.append(f"热点关系：{'、'.join(matched_topics[:4])}")
+        financial = item.get("financial_performance")
+        if financial:
+            parts.append(f"财务：{financial}")
+        rating = item.get("institutional_rating")
+        if rating:
+            parts.append(f"机构：{rating}")
+        return "；".join(str(part) for part in parts if part)
 
     def _report_to_payload(self, report: ClosingAnalysisReport, *, generated: bool, message: str) -> dict[str, Any]:
         data = dict(report.report_json or {})

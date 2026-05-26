@@ -20,6 +20,7 @@ import type {
   CurrentHotIntradayAnalysisStatusResponse,
   ClosingAnalysisReportResponse,
   ClosingAnalysisStatusResponse,
+  ClosingHotTopics,
   DataFreshnessResponse,
   DataStatus,
   DiagnosisAnalyzeTaskResponse,
@@ -330,8 +331,11 @@ export const apiStock = {
 
 export const apiAnalysis = {
   // 聚合接口 - 一次返回首屏全部数据（日期+候选+结果+新鲜度）
-  getAggregate: (options?: RequestOptions) =>
-    api.get<never, TomorrowStarAggregateResponse>('/v1/analysis/tomorrow-star/aggregate', { ...withRequestOptions(options, TIMEOUTS.long), params: { candidate_limit: 3000 } }),
+  getAggregate: (params?: { force_refresh?: boolean }, options?: RequestOptions) =>
+    api.get<never, TomorrowStarAggregateResponse>('/v1/analysis/tomorrow-star/aggregate', {
+      ...withRequestOptions(options, TIMEOUTS.long),
+      params: { candidate_limit: 3000, ...params },
+    }),
 
   // 获取明日之星数据新鲜度
   getFreshness: (options?: RequestOptions) => api.get<never, FreshnessResponse>('/v1/analysis/tomorrow-star/freshness', withRequestOptions(options, TIMEOUTS.short)),
@@ -453,6 +457,13 @@ export const apiAnalysis = {
   // 获取最近收盘分析
   getClosingReport: (options?: RequestOptions) =>
     api.get<never, ClosingAnalysisReportResponse>('/v1/analysis/closing-report', withRequestOptions(options, TIMEOUTS.standard)),
+
+  // 获取近三天市场热点关键词
+  getHotTopics: (params?: { trade_date?: string; window_days?: number }, options?: RequestOptions) =>
+    api.get<never, ClosingHotTopics>('/v1/analysis/hot-topics', {
+      ...withRequestOptions(options, TIMEOUTS.long),
+      params,
+    }),
 
   // 生成收盘分析
   generateClosingReport: (force: boolean = false) =>

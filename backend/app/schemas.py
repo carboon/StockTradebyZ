@@ -456,8 +456,35 @@ class ClosingMarketOverview(BaseModel):
 
 class ClosingSectorFlow(BaseModel):
     """收盘分析板块资金流"""
+    source: Optional[str] = None
+    source_trade_date: Optional[date_class] = None
+    is_fallback: bool = False
     inflow_top3: List[ClosingSectorFlowItem] = Field(default_factory=list)
     outflow_top3: List[ClosingSectorFlowItem] = Field(default_factory=list)
+
+
+class ClosingHotTopicItem(BaseModel):
+    """收盘分析热点关键词"""
+    keyword: str
+    category: Optional[str] = None
+    heat: Optional[float] = None
+    reason: Optional[str] = None
+    related_sectors: List[str] = Field(default_factory=list)
+    related_companies: List[str] = Field(default_factory=list)
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ClosingHotTopics(BaseModel):
+    """近三天市场热点"""
+    source: Optional[str] = None
+    window_days: int = 3
+    start_date: Optional[date_class] = None
+    end_date: Optional[date_class] = None
+    search_queries: List[str] = Field(default_factory=list)
+    keywords: List[ClosingHotTopicItem] = Field(default_factory=list)
+    summary: Optional[str] = None
+    confidence: Optional[float] = None
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ClosingCandidateMoveItem(BaseModel):
@@ -496,6 +523,14 @@ class ClosingTomorrowPredictionItem(BaseModel):
     volume_ratio: Optional[float] = None
     sector_net_mf_amount: Optional[float] = None
     sector_3d_net_mf_amount: Optional[float] = None
+    is_industry_leader: Optional[bool] = None
+    market_cap: Optional[float] = None
+    financial_performance: Optional[Dict[str, Any]] = None
+    institutional_rating: Optional[Dict[str, Any]] = None
+    tomorrow_star_pass: Optional[bool] = None
+    is_star_rejected: Optional[bool] = None
+    topic_relevance_score: Optional[float] = None
+    matched_hot_topics: List[str] = Field(default_factory=list)
     local_score: Optional[float] = None
     local_reasons: List[str] = Field(default_factory=list)
     ai_score: Optional[float] = None
@@ -513,6 +548,7 @@ class ClosingTomorrowPrediction(BaseModel):
     preselected: List[ClosingTomorrowPredictionItem] = Field(default_factory=list)
     selected: List[ClosingTomorrowPredictionItem] = Field(default_factory=list)
     sector_flow_history: List[Dict[str, Any]] = Field(default_factory=list)
+    hot_topics: Optional[ClosingHotTopics] = None
     ai: Optional[Dict[str, Any]] = None
 
 
@@ -537,6 +573,7 @@ class ClosingAnalysisReportResponse(BaseModel):
     force_generated: bool = False
     market: Optional[ClosingMarketOverview] = None
     sector_flow: Optional[ClosingSectorFlow] = None
+    hot_topics: Optional[ClosingHotTopics] = None
     candidate_buckets: List[ClosingCandidateMoveBucket] = Field(default_factory=list)
     tomorrow_prediction: Optional[ClosingTomorrowPrediction] = None
 
@@ -596,6 +633,8 @@ class TomorrowStarAggregateResponse(BaseModel):
 
     # 新鲜度状态
     freshness: Optional[Dict[str, Any]] = None
+    generated_at: Optional[datetime] = None
+    cache_hit: bool = False
 
 
 class CurrentHotHistoryItem(BaseModel):

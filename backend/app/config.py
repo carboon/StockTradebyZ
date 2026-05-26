@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     deepseek_api_key: str = ""
 
+    # 热点新闻搜索增强（可选）
+    hot_news_search_enabled: bool = Field(default=True, alias="HOT_NEWS_SEARCH_ENABLED")
+    hot_news_search_provider: str = Field(default="auto", alias="HOT_NEWS_SEARCH_PROVIDER")
+    hot_news_search_max_queries: int = Field(default=6, ge=1, le=12, alias="HOT_NEWS_SEARCH_MAX_QUERIES")
+    hot_news_search_max_results: int = Field(default=5, ge=1, le=20, alias="HOT_NEWS_SEARCH_MAX_RESULTS")
+    tavily_api_key: str = Field(default="", alias="TAVILY_API_KEY")
+    ai360_api_key: str = Field(default="", alias="AI360_API_KEY")
+    bocha_api_key: str = Field(default="", alias="BOCHA_API_KEY")
+
     # 分析配置
     default_reviewer: str = "quant"  # quant, glm, qwen, gemini
     min_score_threshold: float = 4.0

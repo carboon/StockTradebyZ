@@ -40,6 +40,7 @@ from app.services.current_hot_intraday_service import CurrentHotIntradayAnalysis
 from app.services.current_hot_service import CurrentHotService
 from app.services.closing_analysis_service import ClosingAnalysisService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
+from app.services.hot_news_aggregator_service import HotNewsAggregatorService
 from app.services.intraday_analysis_service import IntradayAnalysisService
 from app.services.market_service import MarketService
 from app.services.sector_analysis_service import SectorAnalysisService
@@ -47,6 +48,7 @@ from app.services.stock_ai_analysis_service import StockAiAnalysisService
 # 风险识别服务已暂时屏蔽
 # from app.services.speculative_risk_service import SpeculativeRiskService
 from app.services.task_service import TaskService
+from app.services.tomorrow_star_aggregate_service import TomorrowStarAggregateCache
 from app.services.tomorrow_star_window_service import TomorrowStarWindowService
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
@@ -70,8 +72,10 @@ from app.schemas import (
     CurrentHotIntradayAnalysisResponse,
     ClosingAnalysisReportResponse,
     ClosingAnalysisStatusResponse,
+    ClosingHotTopics,
     SectorAnalysisRowsResponse,
     SectorAnalysisRowItem,
+    TomorrowStarAggregateResponse,
     TomorrowStarDatesResponse,
     TomorrowStarHistoryItem,
     TomorrowStarWindowStatusResponse,
@@ -567,17 +571,23 @@ async def get_tomorrow_star_freshness(
     return result
 
 
-@router.get("/tomorrow-star/aggregate")
+@router.get("/tomorrow-star/aggregate", response_model=TomorrowStarAggregateResponse)
 def get_tomorrow_star_aggregate(
     candidate_limit: int = 3000,
+    force_refresh: bool = Query(default=False, description="强制刷新缓存"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
-) -> dict:
+) -> TomorrowStarAggregateResponse:
     """
     聚合接口 - 一次返回首屏所需的全部数据。
     包含：日期窗口 + 最新候选 + 最新分析结果 + 新鲜度状态。
     """
     ensure_analysis_read_available(db)
+    aggregate_cache = TomorrowStarAggregateCache(db)
+    if not force_refresh:
+        cached_payload = aggregate_cache.get(candidate_limit=candidate_limit)
+        if cached_payload is not None:
+            return TomorrowStarAggregateResponse(**cached_payload)
 
     # --- 1) 日期窗口 ---
     summary = TomorrowStarWindowService(db).get_window_status(window_size=TomorrowStarWindowService.DEFAULT_WINDOW_SIZE)
@@ -970,14 +980,18 @@ def get_tomorrow_star_aggregate(
         },
     }
 
-    return {
+    payload = {
         "dates": dates_data["dates"],
         "history": dates_data["history"],
         "window_status": dates_data["window_status"],
         "candidates": candidates_data,
         "results": results_data,
         "freshness": freshness_data,
+        "generated_at": utc_now().isoformat(),
+        "cache_hit": False,
     }
+    aggregate_cache.set(payload, candidate_limit=candidate_limit)
+    return TomorrowStarAggregateResponse(**payload)
 
 
 @router.get("/tomorrow-star/candidates", response_model=CandidatesResponse)
@@ -1719,6 +1733,33 @@ def get_closing_analysis_report(
 ) -> ClosingAnalysisReportResponse:
     payload = ClosingAnalysisService(db).get_latest_report_payload()
     return ClosingAnalysisReportResponse(**payload)
+
+
+@router.get("/hot-topics", response_model=ClosingHotTopics)
+def get_market_hot_topics(
+    trade_date: Optional[str] = Query(default=None, description="交易日，格式 YYYY-MM-DD；为空时使用最新本地日线日期，若无日线则使用今天"),
+    window_days: int = Query(default=3, ge=1, le=7, description="热点回看天数"),
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+) -> ClosingHotTopics:
+    parsed_date = _parse_date_or_none(trade_date)
+    if trade_date and parsed_date is None:
+        raise HTTPException(status_code=400, detail="交易日格式错误，应为 YYYY-MM-DD")
+
+    target_date = parsed_date or db.query(func.max(StockDaily.trade_date)).scalar() or date.today()
+    closing_service = ClosingAnalysisService(db)
+    sector_flow = closing_service._build_sector_flow(target_date)
+    payload = HotNewsAggregatorService(
+        db,
+        tushare_service=closing_service.tushare_service,
+        deepseek_service=closing_service.deepseek_service,
+    ).get_market_hot_topics(
+        trade_date=target_date,
+        window_days=window_days,
+        limit=12,
+        sector_flow=sector_flow,
+    )
+    return ClosingHotTopics(**payload)
 
 
 @router.post("/closing-report/generate", response_model=ClosingAnalysisReportResponse)
