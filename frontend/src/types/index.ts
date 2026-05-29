@@ -677,6 +677,11 @@ export interface CandidatesResponse {
   pick_date?: string | null
   candidates: Candidate[]
   total: number
+  status?: string | null
+  message?: string | null
+  has_running_task?: boolean | null
+  running_task_id?: number | null
+  market_regime_info?: Record<string, any> | null
 }
 
 export interface CurrentHotCandidatesResponse {
@@ -691,6 +696,9 @@ export interface AnalysisResultsResponse {
   results: AnalysisResult[]
   total: number
   min_score_threshold: number
+  status?: string | null
+  message?: string | null
+  market_regime_info?: Record<string, any> | null
 }
 
 export interface TomorrowStarAggregateResponse {
@@ -1023,6 +1031,8 @@ export interface ClosingAnalysisStatusResponse {
   report_trade_date?: string | null
   has_report: boolean
   can_generate: boolean
+  running_task_id?: number | null
+  running_task_status?: string | null
   status: string
   message: string
 }
@@ -1037,6 +1047,10 @@ export interface ClosingAnalysisReportResponse {
   source_data_date?: string | null
   generated_at?: string | null
   force_generated: boolean
+  task_id?: number | null
+  ws_url?: string | null
+  task_status?: string | null
+  existing_task?: boolean | null
   market?: ClosingMarketOverview | null
   sector_flow?: ClosingSectorFlow | null
   hot_topics?: ClosingHotTopics | null

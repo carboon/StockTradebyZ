@@ -557,6 +557,8 @@ class ClosingAnalysisStatusResponse(BaseModel):
     report_trade_date: Optional[date_class] = None
     has_report: bool = False
     can_generate: bool = False
+    running_task_id: Optional[int] = None
+    running_task_status: Optional[str] = None
     status: str
     message: str
 
@@ -571,6 +573,10 @@ class ClosingAnalysisReportResponse(BaseModel):
     source_data_date: Optional[date_class] = None
     generated_at: Optional[datetime] = None
     force_generated: bool = False
+    task_id: Optional[int] = None
+    ws_url: Optional[str] = None
+    task_status: Optional[str] = None
+    existing_task: Optional[bool] = None
     market: Optional[ClosingMarketOverview] = None
     sector_flow: Optional[ClosingSectorFlow] = None
     hot_topics: Optional[ClosingHotTopics] = None

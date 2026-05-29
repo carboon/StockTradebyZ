@@ -32,6 +32,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.time_utils import utc_now
 from app.services.daily_batch_update_service import DailyBatchUpdateService
+from app.services.closing_analysis_service import ClosingAnalysisService
 
 ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -197,6 +198,7 @@ class TaskService:
     DAILY_BATCH_UPDATE_TASK_TYPE = "daily_batch_update"
     GENERATE_HISTORY_TASK_TYPE = "generate_history"
     GENERATE_HISTORY_DETAIL_TASK_TYPE = "generate_history_detail"
+    CLOSING_ANALYSIS_TASK_TYPE = "closing_analysis"
     # 阶段6：历史回溯任务类型
     HISTORY_BACKFILL_INIT_TASK_TYPE = "history_backfill_initialize"
     HISTORY_BACKFILL_INCR_TASK_TYPE = "history_backfill_incremental"
@@ -270,6 +272,8 @@ class TaskService:
         "daily_batch_completed": {"label": "批量刷新完成", "index": 6, "total": 6, "percent": 100},
         "generating_history": {"label": "生成历史数据", "index": 1, "total": 2, "percent": 50},
         "generating_history_detail": {"label": "生成诊断详情", "index": 1, "total": 2, "percent": 50},
+        "closing_analysis_preparing": {"label": "准备收盘分析", "index": 1, "total": 2, "percent": 25},
+        "closing_analysis_generating": {"label": "生成收盘分析", "index": 2, "total": 2, "percent": 70},
 
         # === 历史回溯阶段 ===
         "backfill_initializing": {"label": "初始化历史回溯", "index": 1, "total": 2, "percent": 10},
@@ -346,6 +350,25 @@ class TaskService:
                             "ws_url": f"/ws/tasks/{existing_task.id}",
                             "existing": True,
                         }
+            if task_type == self.CLOSING_ANALYSIS_TASK_TYPE:
+                trade_date = str(params.get("trade_date") or "").strip()
+                allow_recreate = bool(params.get("allow_recreate", False))
+                if trade_date:
+                    active_task = self._get_active_closing_analysis_task(trade_date)
+                    if active_task:
+                        return {
+                            "task_id": active_task.id,
+                            "ws_url": f"/ws/tasks/{active_task.id}",
+                            "existing": True,
+                        }
+                    if not allow_recreate:
+                        latest_task = self._get_latest_closing_analysis_task(trade_date)
+                        if latest_task:
+                            return {
+                                "task_id": latest_task.id,
+                                "ws_url": f"/ws/tasks/{latest_task.id}",
+                                "existing": True,
+                            }
 
             # 阶段6：历史回溯任务去重
             if task_type in (
@@ -497,6 +520,34 @@ class TaskService:
             .first()
         )
 
+    def _get_active_closing_analysis_task(self, trade_date: str) -> Optional[Any]:
+        from app.models import Task
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type == self.CLOSING_ANALYSIS_TASK_TYPE,
+                Task.params_json["trade_date"].as_string() == trade_date,
+                Task.status.in_(self.ACTIVE_STATUSES),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+
+    def _get_latest_closing_analysis_task(self, trade_date: str) -> Optional[Any]:
+        from app.models import Task
+
+        return (
+            self.db.query(Task)
+            .filter(
+                Task.task_type == self.CLOSING_ANALYSIS_TASK_TYPE,
+                Task.params_json["trade_date"].as_string() == trade_date,
+                Task.status.in_(("completed", "pending", "running")),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .first()
+        )
+
     async def _run_task(self, task_id: int):
         """运行任务"""
         from app.models import Task
@@ -545,6 +596,8 @@ class TaskService:
                 await self._run_generate_history(task, db, params_json)
             elif task_type == self.GENERATE_HISTORY_DETAIL_TASK_TYPE:
                 await self._run_generate_history_detail(task, db, params_json)
+            elif task_type == self.CLOSING_ANALYSIS_TASK_TYPE:
+                await self._run_closing_analysis(task, db, params_json)
             # 阶段6：历史回溯任务
             elif task_type == self.HISTORY_BACKFILL_INIT_TASK_TYPE:
                 await self._run_history_backfill_initialize(task, db, params_json)
@@ -1634,6 +1687,34 @@ class TaskService:
             message=f"诊断详情生成完成: {code} {check_date}",
         )
 
+    async def _run_closing_analysis(self, task: Any, db: Session, params_json: dict = None):
+        params = params_json or task.params_json or {}
+        task.task_stage = "closing_analysis_preparing"
+        task.progress = 20
+        task.progress_meta_json = self._build_stage_meta(
+            "closing_analysis_preparing",
+            progress=20,
+            message="准备生成收盘分析",
+        )
+        db.commit()
+
+        task.task_stage = "closing_analysis_generating"
+        task.progress = 70
+        task.progress_meta_json = self._build_stage_meta(
+            "closing_analysis_generating",
+            progress=70,
+            message="正在生成收盘分析",
+        )
+        db.commit()
+
+        result = await asyncio.to_thread(
+            ClosingAnalysisService(db).generate_report,
+            user_id=params.get("user_id"),
+            is_admin=bool(params.get("is_admin", False)),
+            force=bool(params.get("force", False)),
+        )
+        task.result_json = self._make_json_safe(result)
+
     async def _run_history_backfill_initialize(
         self, task: Any, db: Session, params_json: dict = None
     ):
@@ -1965,6 +2046,8 @@ class TaskService:
             return f"历史数据生成 / code={params.get('code', '-')}, days={params.get('days', 30)}"
         if task_type == "generate_history_detail":
             return f"诊断详情生成 / code={params.get('code', '-')}, check_date={params.get('check_date', '-')}"
+        if task_type == TaskService.CLOSING_ANALYSIS_TASK_TYPE:
+            return f"收盘分析生成 / trade_date={params.get('trade_date', '-')}"
         # 阶段6：历史回溯任务
         if task_type == "history_backfill_initialize":
             return f"历史回溯初始化 / code={params.get('code', '-')}"

@@ -1177,7 +1177,7 @@
                   <el-button
                     type="primary"
                     size="small"
-                    :loading="generatingClosingReport"
+                    :loading="generatingClosingReport || closingReportTaskRunning"
                     @click="handleGenerateClosingReport"
                   >
                     {{ authStore.isAdmin && closingReport?.has_report ? '重新生成' : '生成报告' }}
@@ -1760,6 +1760,8 @@ const loadingMidday = ref(false)
 const loadingMiddayAction = ref(false)
 const loadingClosingReport = ref(false)
 const generatingClosingReport = ref(false)
+const closingReportTaskRunning = ref(false)
+const closingReportTaskId = ref<number | null>(null)
 const currentHotLoaded = ref(false)
 const currentHotHydratedFromCache = ref(false)
 const currentHotBoardFilter = ref<BoardFilter>('all')
@@ -1899,6 +1901,7 @@ const viewingDate = ref<string | null>(null)
 // 按日期缓存的数据（避免重复请求）
 const candidatesCache = ref<Map<string, { candidates: Candidate[], results: AnalysisResult[], timestamp: number }>>(new Map())
 const CACHE_TTL_MS = 5 * 60 * 1000  // 缓存5分钟
+const autoFullDataRefreshDates = new Set<string>()
 
 const currentHotHistoryData = ref<HistoryRow[]>([])
 const currentHotSelectedDate = ref<string | null>(null)
@@ -3029,7 +3032,18 @@ async function loadData(forceRefresh: boolean = false) {
     const hasPreviousViewingDate = !!previousViewingDate && historyData.value.some((item) => item.rawDate === previousViewingDate)
     viewingDate.value = hasPreviousViewingDate ? previousViewingDate : (latestDataDate.value || latestDate.value)
 
+    const fallbackDate = latestDataDate.value || viewingDate.value || latestDate.value
+    if (shouldBackfillTomorrowStarLatestData(aggData.candidates?.status, fallbackDate)) {
+      const backfilled = await loadTomorrowStarDateSnapshot(fallbackDate, signal)
+      if (requestId !== loadDataRequestId) return
+      if (backfilled) {
+        viewingDate.value = fallbackDate
+        latestDataDate.value = fallbackDate
+      }
+    }
+
     persistTomorrowStarCache()
+    void refreshTomorrowStarFullDataIfSparse('aggregate')
     void prefetchCurrentHotAggregate()
   } catch (error: any) {
     if (isRequestCanceled(error)) return
@@ -3041,6 +3055,96 @@ async function loadData(forceRefresh: boolean = false) {
     if (requestId === loadDataRequestId) {
       loading.value = false
     }
+  }
+}
+
+function hasFullTomorrowStarAnalysis(row: Candidate | AnalysisResult): boolean {
+  return typeof row.total_score === 'number'
+    || (typeof row.signal_type === 'string' && row.signal_type.trim().length > 0)
+    || (typeof row.comment === 'string' && row.comment.trim().length > 0)
+    || row.tomorrow_star_pass !== undefined
+    || row.prefilter_passed !== undefined
+}
+
+function shouldAutoRefreshTomorrowStarFullData(dateToLoad: string | null): dateToLoad is string {
+  if (!dateToLoad || activeDataTab.value !== 'tomorrow-star') return false
+  if (autoFullDataRefreshDates.has(dateToLoad)) return false
+  if (latestCandidates.value.length === 0) return false
+
+  const row = historyData.value.find((item) => item.rawDate === dateToLoad)
+  if (row?.status && row.status !== 'success') return false
+
+  const expectedAnalysisCount = typeof row?.analysisCount === 'number'
+    ? row.analysisCount
+    : latestCandidates.value.length
+  const mergedRows = latestCandidates.value.map(mergeTomorrowStarCandidateAnalysis)
+  const fullRows = mergedRows.filter(hasFullTomorrowStarAnalysis).length
+  return fullRows === 0 || (
+    expectedAnalysisCount > 0
+    && latestAnalysisResults.value.length < Math.min(expectedAnalysisCount, latestCandidates.value.length)
+  )
+}
+
+async function refreshTomorrowStarFullDataIfSparse(reason: 'aggregate' | 'cache' | 'date-select') {
+  const dateToLoad = latestDataDate.value || viewingDate.value || latestDate.value
+  if (!shouldAutoRefreshTomorrowStarFullData(dateToLoad)) return
+
+  autoFullDataRefreshDates.add(dateToLoad)
+  candidatesCache.value.delete(dateToLoad)
+  const signal = beginRequest(`tomorrowStarFullDataRefresh:${reason}`)
+  try {
+    const loaded = await loadTomorrowStarDateSnapshot(dateToLoad, signal)
+    if (loaded) {
+      viewingDate.value = dateToLoad
+      latestDataDate.value = dateToLoad
+      persistTomorrowStarCache()
+    }
+  } catch (error) {
+    if (isRequestCanceled(error)) return
+    console.error('Failed to refresh sparse tomorrow-star data:', error)
+  } finally {
+    finishRequest(`tomorrowStarFullDataRefresh:${reason}`, signal)
+  }
+}
+
+function shouldBackfillTomorrowStarLatestData(status: string | null | undefined, dateToLoad: string | null): dateToLoad is string {
+  if (!dateToLoad || latestCandidates.value.length > 0 || status === 'market_regime_blocked') {
+    return false
+  }
+  const row = historyData.value.find((item) => item.rawDate === dateToLoad)
+  if (!row || row.status !== 'success') {
+    return false
+  }
+  return Number(row.count || 0) > 0
+    || Number(row.pass || 0) > 0
+    || Number(row.tomorrowStarCount || 0) > 0
+}
+
+async function loadTomorrowStarDateSnapshot(dateToLoad: string, signal: AbortSignal): Promise<boolean> {
+  loadingLatest.value = true
+  try {
+    const [candidatesData, resultsData] = await Promise.all([
+      apiAnalysis.getCandidates(dateToLoad, { signal }),
+      apiAnalysis.getResults(dateToLoad, { signal }),
+    ])
+    const candidates = candidatesData.candidates || []
+    const results = resultsData.results || []
+    if (candidates.length === 0 && results.length === 0) {
+      return false
+    }
+
+    latestCandidates.value = candidates
+    latestAnalysisResults.value = results
+    latestCandidatePage.value = 1
+    candidateSort.value = { prop: '', order: null }
+    candidatesCache.value.set(dateToLoad, {
+      candidates,
+      results,
+      timestamp: Date.now(),
+    })
+    return true
+  } finally {
+    loadingLatest.value = false
   }
 }
 
@@ -3245,6 +3349,7 @@ async function selectDate(row: HistoryRow) {
     latestDataDate.value = row.rawDate
     console.log(`使用缓存数据: ${row.rawDate}`)
     persistTomorrowStarCache()
+    void refreshTomorrowStarFullDataIfSparse('cache')
     return
   }
 
@@ -3274,6 +3379,7 @@ async function selectDate(row: HistoryRow) {
       timestamp: now
     })
     persistTomorrowStarCache()
+    void refreshTomorrowStarFullDataIfSparse('date-select')
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load selected date data:', error)
@@ -3629,12 +3735,49 @@ async function generateClosingReport(force: boolean = false) {
     } else if (!response.candidate_buckets?.length && response.tomorrow_prediction) {
       closingActiveBucket.value = 'tomorrow-prediction'
     }
-    ElMessage.success(response.message || (response.generated ? '收盘分析已生成' : '当日收盘分析已存在'))
+    if (response.task_id) {
+      const shouldStartPolling = !closingReportTaskRunning.value || closingReportTaskId.value !== response.task_id
+      closingReportTaskId.value = response.task_id
+      if (shouldStartPolling) {
+        closingReportTaskRunning.value = true
+        void pollClosingReportTask(response.task_id)
+      }
+      ElMessage.success(response.existing_task ? '收盘分析任务进行中，已为你同步任务状态' : '收盘分析任务已提交，正在后台生成')
+    } else {
+      ElMessage.success(response.message || (response.generated ? '收盘分析已生成' : '当日收盘分析已存在'))
+    }
   } catch (error) {
     console.error('Failed to generate closing analysis report:', error)
     ElMessage.error(getUserSafeErrorMessage(error, '生成收盘分析失败'))
   } finally {
     generatingClosingReport.value = false
+  }
+}
+
+async function pollClosingReportTask(taskId: number) {
+  closingReportTaskRunning.value = true
+  try {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      const task = await apiTasks.get(taskId)
+      if (task.status === 'completed') {
+        closingReportTaskRunning.value = false
+        await loadClosingReport(true)
+        ElMessage.success('收盘分析已生成')
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        closingReportTaskRunning.value = false
+        ElMessage.error(task.error_message || '收盘分析任务执行失败')
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+    }
+    closingReportTaskRunning.value = false
+    ElMessage.warning('收盘分析生成耗时较长，后台仍在继续处理')
+  } catch (error) {
+    closingReportTaskRunning.value = false
+    console.error('Failed to poll closing analysis task:', error)
+    ElMessage.warning('收盘分析状态查询失败，可稍后点击刷新查看结果')
   }
 }
 

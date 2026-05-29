@@ -990,7 +990,30 @@ def get_tomorrow_star_aggregate(
         "generated_at": utc_now().isoformat(),
         "cache_hit": False,
     }
-    aggregate_cache.set(payload, candidate_limit=candidate_limit)
+    expected_candidates_missing = (
+        latest_candidate_count > 0
+        and (
+            not isinstance(candidates_data, dict)
+            or (
+                int(candidates_data.get("total") or 0) == 0
+                and str(candidates_data.get("pick_date") or latest_candidate_date or "") == str(latest_candidate_date or "")
+                and candidates_data.get("status") != "market_regime_blocked"
+            )
+        )
+    )
+    expected_results_missing = (
+        latest_result_count > 0
+        and (
+            not isinstance(results_data, dict)
+            or (
+                int(results_data.get("total") or 0) == 0
+                and str(results_data.get("pick_date") or latest_result_date or "") == str(latest_result_date or "")
+                and results_data.get("status") != "market_regime_blocked"
+            )
+        )
+    )
+    if not expected_candidates_missing and not expected_results_missing:
+        aggregate_cache.set(payload, candidate_limit=candidate_limit)
     return TomorrowStarAggregateResponse(**payload)
 
 
@@ -1716,11 +1739,22 @@ def get_closing_analysis_status(
     user=Depends(require_user),
 ) -> ClosingAnalysisStatusResponse:
     status = ClosingAnalysisService(db).get_status()
+    running_task = (
+        db.query(Task)
+        .filter(
+            Task.task_type == TaskService.CLOSING_ANALYSIS_TASK_TYPE,
+            Task.status.in_(["pending", "running"]),
+        )
+        .order_by(Task.created_at.desc(), Task.id.desc())
+        .first()
+    )
     return ClosingAnalysisStatusResponse(
         latest_data_date=status.latest_data_date,
         report_trade_date=status.report_trade_date,
         has_report=status.has_report,
         can_generate=status.can_generate,
+        running_task_id=running_task.id if running_task else None,
+        running_task_status=running_task.status if running_task else None,
         status=status.status,
         message=status.message,
     )
@@ -1763,17 +1797,53 @@ def get_market_hot_topics(
 
 
 @router.post("/closing-report/generate", response_model=ClosingAnalysisReportResponse)
-def generate_closing_analysis_report(
+async def generate_closing_analysis_report(
     force: bool = Query(default=False, description="管理员强制重算当日收盘分析"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> ClosingAnalysisReportResponse:
-    payload = ClosingAnalysisService(db).generate_report(
-        user_id=getattr(user, "id", None),
-        is_admin=getattr(user, "role", None) == "admin",
-        force=force,
-    )
-    return ClosingAnalysisReportResponse(**payload)
+    is_admin = getattr(user, "role", None) == "admin"
+    closing_service = ClosingAnalysisService(db)
+    status = closing_service.get_status()
+
+    if status.latest_data_date is None:
+        return ClosingAnalysisReportResponse(
+            has_report=False,
+            generated=False,
+            status="no_data",
+            message="暂无日线数据，无法生成收盘分析",
+        )
+
+    if status.has_report and not (is_admin and force):
+        payload = closing_service.get_latest_report_payload()
+        payload.update({
+            "generated": False,
+            "status": "ready",
+            "message": "当日收盘分析已生成，无需重复生成",
+        })
+        return ClosingAnalysisReportResponse(**payload)
+
+    params = {
+        "trade_date": status.latest_data_date.isoformat(),
+        "user_id": getattr(user, "id", None),
+        "is_admin": is_admin,
+        "force": bool(force and is_admin),
+        "allow_recreate": bool(force and is_admin),
+        "trigger_source": "manual",
+    }
+    task_service = TaskService(db)
+    task_result = await task_service.create_task(TaskService.CLOSING_ANALYSIS_TASK_TYPE, params)
+    latest_payload = closing_service.get_latest_report_payload()
+    latest_payload.update({
+        "generated": False,
+        "status": "generating",
+        "message": "收盘分析任务已提交，后台生成中",
+        "task_id": task_result.get("task_id"),
+        "ws_url": task_result.get("ws_url"),
+        "task_status": "running",
+        "existing_task": bool(task_result.get("existing")),
+    })
+    return ClosingAnalysisReportResponse(**latest_payload)
 
 
 @router.get("/intraday/status")

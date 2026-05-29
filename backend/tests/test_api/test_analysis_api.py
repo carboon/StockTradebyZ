@@ -27,7 +27,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import AnalysisResult, Candidate, Config, CurrentHotCandidate, DailyB1Check, DailyB1CheckDetail, Stock, StockActivePoolRank, StockDaily, Task
+from app.models import AnalysisResult, Candidate, Config, CurrentHotCandidate, DailyB1Check, DailyB1CheckDetail, Stock, StockActivePoolRank, StockDaily, Task, User
 from app.schemas import SignalReturnBenchmark
 
 
@@ -1623,3 +1623,66 @@ def test_get_signal_returns_includes_timeline_events_and_benchmark(test_client_w
     assert fail_sell_event["trade_date"] == "2026-05-03"
     assert fail_sell_event["price"] == 9.7
     assert fail_sell_event["return_pct"] == -3.0
+
+
+@pytest.mark.api
+def test_generate_closing_report_reuses_existing_for_non_admin(test_client: TestClient) -> None:
+    with patch("app.api.analysis.ClosingAnalysisService") as mock_service_cls:
+        mock_service = mock_service_cls.return_value
+        mock_service.get_status.return_value = type("S", (), {
+            "latest_data_date": date(2026, 5, 27),
+            "report_trade_date": date(2026, 5, 27),
+            "has_report": True,
+            "can_generate": False,
+            "status": "ready",
+            "message": "当日收盘分析已生成",
+        })()
+        mock_service.get_latest_report_payload.return_value = {
+            "has_report": True,
+            "generated": False,
+            "trade_date": date(2026, 5, 27),
+            "message": "当日收盘分析已生成",
+            "force_generated": False,
+            "candidate_buckets": [],
+        }
+
+        response = test_client.post("/api/v1/analysis/closing-report/generate")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["has_report"] is True
+    assert payload.get("task_id") is None
+    assert payload["status"] == "ready"
+
+
+@pytest.mark.api
+def test_generate_closing_report_admin_creates_async_task(test_client_with_db: Any) -> None:
+    test_client_with_db.db.query(User).filter(User.username == "testuser").update({"role": "admin"})
+    test_client_with_db.db.commit()
+
+    with patch("app.api.analysis.ClosingAnalysisService") as mock_service_cls:
+        mock_service = mock_service_cls.return_value
+        mock_service.get_status.return_value = type("S", (), {
+            "latest_data_date": date(2026, 5, 27),
+            "report_trade_date": date(2026, 5, 27),
+            "has_report": True,
+            "can_generate": False,
+            "status": "ready",
+            "message": "当日收盘分析已生成",
+        })()
+        mock_service.get_latest_report_payload.return_value = {
+            "has_report": True,
+            "generated": False,
+            "trade_date": date(2026, 5, 27),
+            "message": "展示最近一次收盘分析",
+            "force_generated": False,
+            "candidate_buckets": [],
+        }
+        with patch("app.api.analysis.TaskService.create_task", new=AsyncMock(return_value={"task_id": 88, "ws_url": "/ws/tasks/88", "existing": False})):
+            response = test_client_with_db.post("/api/v1/analysis/closing-report/generate?force=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "generating"
+    assert payload["task_id"] == 88
+    assert payload["existing_task"] is False

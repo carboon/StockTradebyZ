@@ -2241,8 +2241,8 @@ function normalizeRouteCode(code: unknown): string {
 
     .chart-container {
       flex: 1;
-      min-height: 380px;
-      height: clamp(380px, calc(100vh - 290px), 480px);
+      min-height: 570px;
+      height: clamp(570px, calc((100vh - 290px) * 1.5), 720px);
     }
 
     .deviation-info {
@@ -2910,8 +2910,8 @@ function normalizeRouteCode(code: unknown): string {
       }
 
       .chart-container {
-        min-height: 300px;
-        height: 320px;
+        min-height: 450px;
+        height: 480px;
       }
 
       .deviation-info {
