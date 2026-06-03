@@ -71,7 +71,7 @@ def test_get_pool_entries_falls_back_when_stored_config_is_empty(test_db) -> Non
     entries = CurrentHotService(test_db).get_pool_entries()
 
     assert len(entries) > 0
-    assert any(entry.code == "300308" and entry.name == "中际旭创" for entry in entries)
+    assert any(entry.code == "600549" and entry.name == "厦门钨业" for entry in entries)
 
 
 @pytest.mark.service
@@ -84,6 +84,18 @@ def test_get_pool_entries_accepts_flat_code_name_config(test_db) -> None:
     assert len(entries) == 1
     assert entries[0].code == "600000"
     assert entries[0].name == "浦发银行"
+
+
+@pytest.mark.service
+def test_get_pool_entries_accepts_legacy_current_hot_pool_key(test_db) -> None:
+    test_db.add(Config(key=CurrentHotService.LEGACY_CONFIG_KEY, value='{"600000": "浦发银行"}', description="legacy pool"))
+    test_db.commit()
+
+    entries = CurrentHotService(test_db).get_pool_entries()
+
+    assert len(entries) == 1
+    assert entries[0].code == "600000"
+    assert entries[0].primary_sector == "周期性股票"
 
 
 @pytest.mark.service

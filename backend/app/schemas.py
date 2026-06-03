@@ -179,6 +179,9 @@ class CurrentHotCandidateItem(BaseModel):
     total_score: Optional[float] = None
     signal_type: Optional[str] = None
     comment: Optional[str] = None
+    pb: Optional[float] = None
+    netprofit_yoy: Optional[float] = None
+    roe: Optional[float] = None
     risk_flag: Optional[RiskFlagSummary] = None
     consecutive_days: int = 1
 
@@ -189,6 +192,92 @@ class CurrentHotCandidatesResponse(BaseModel):
     candidates: List[CurrentHotCandidateItem]
     total: int
     risk_regime: Optional[RiskRegimeSummary] = None
+
+
+# ==================== 价值洼地 ====================
+class ValueLowlandEvidence(BaseModel):
+    title: str = ""
+    url: str = ""
+    summary: str = ""
+    published_at: Optional[str] = None
+    source: Optional[str] = None
+
+
+class ValueLowlandCompanyProfile(BaseModel):
+    ownership_type: str = "unknown"
+    controller: Optional[str] = None
+    main_business: Optional[str] = None
+    business_focus_score: float = 0
+    scarcity_score: float = 0
+    cycle_type: str = "other"
+    unique_assets: List[str] = Field(default_factory=list)
+    evidence: List[ValueLowlandEvidence] = Field(default_factory=list)
+    confidence: float = 0
+    risk_notes: List[str] = Field(default_factory=list)
+    cached: bool = False
+    expires_at: Optional[datetime] = None
+
+
+class ValueLowlandScoreBreakdown(BaseModel):
+    ownership_score: float = 0
+    low_valuation_score: float = 0
+    financial_improvement_score: float = 0
+    cycle_elasticity_score: float = 0
+    business_focus_score: float = 0
+    scarcity_score: float = 0
+    risk_penalty: float = 0
+
+
+class ValueLowlandCandidate(BaseModel):
+    rank: int = 0
+    code: str
+    ts_code: str
+    name: Optional[str] = None
+    market: Optional[str] = None
+    industry: Optional[str] = None
+    close: Optional[float] = None
+    trade_date: Optional[date_class] = None
+    total_mv: Optional[float] = None
+    circ_mv: Optional[float] = None
+    pe_ttm: Optional[float] = None
+    pb: Optional[float] = None
+    low_position_ratio: Optional[float] = None
+    drawdown_from_high_pct: Optional[float] = None
+    roe: Optional[float] = None
+    netprofit_yoy: Optional[float] = None
+    rev_yoy: Optional[float] = None
+    grossprofit_margin: Optional[float] = None
+    score: float = 0
+    score_breakdown: ValueLowlandScoreBreakdown = Field(default_factory=ValueLowlandScoreBreakdown)
+    tags: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+    risk_notes: List[str] = Field(default_factory=list)
+    profile: ValueLowlandCompanyProfile = Field(default_factory=ValueLowlandCompanyProfile)
+
+
+class ValueLowlandResponse(BaseModel):
+    generated_at: datetime
+    trade_date: Optional[date_class] = None
+    source: str = "local_db+tushare+bocha+deepseek"
+    total: int = 0
+    enriched_count: int = 0
+    message: Optional[str] = None
+    total_rank: List[ValueLowlandCandidate] = Field(default_factory=list)
+    soe_lowland: List[ValueLowlandCandidate] = Field(default_factory=list)
+    cycle_resource: List[ValueLowlandCandidate] = Field(default_factory=list)
+    earnings_reversal: List[ValueLowlandCandidate] = Field(default_factory=list)
+    insufficient_evidence: List[ValueLowlandCandidate] = Field(default_factory=list)
+
+
+class ValueLowlandRunStatus(BaseModel):
+    id: Optional[int] = None
+    status: str = "idle"
+    limit: int = 100
+    enrich: bool = True
+    force_refresh: bool = False
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
 
 
 # ==================== 分析结果 ====================
@@ -249,6 +338,9 @@ class CurrentHotAnalysisItem(BaseModel):
     prefilter_passed: Optional[bool] = None
     prefilter_summary: Optional[str] = None
     prefilter_blocked_by: Optional[List[str]] = None
+    pb: Optional[float] = None
+    netprofit_yoy: Optional[float] = None
+    roe: Optional[float] = None
     pullback_quality: Optional[str] = None
     pullback_negative_flags: Optional[List[str]] = None
     risk_flag: Optional[RiskFlagSummary] = None
@@ -485,6 +577,72 @@ class ClosingHotTopics(BaseModel):
     summary: Optional[str] = None
     confidence: Optional[float] = None
     evidence: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class NewsBoardRelatedStock(BaseModel):
+    """消息板块关联股票"""
+    code: str
+    name: str
+    sentiment: str = "neutral"
+    reason: str = ""
+
+
+class NewsBoardItem(BaseModel):
+    """24H 消息板块条目"""
+    id: str
+    title: str
+    summary: str = ""
+    category: str
+    source: str
+    event_time: Optional[datetime] = None
+    eventTime: Optional[datetime] = None
+    published_at: Optional[datetime] = None
+    publishedAt: Optional[datetime] = None
+    ingested_at: Optional[datetime] = None
+    ingestedAt: Optional[datetime] = None
+    impact: str = "medium"
+    region: Optional[str] = None
+    url: Optional[str] = None
+    source_url: Optional[str] = None
+    sourceUrl: Optional[str] = None
+    source_level: str = "media"
+    sourceLevel: str = "media"
+    source_type: Optional[str] = None
+    related_stocks: List[NewsBoardRelatedStock] = Field(default_factory=list)
+    relatedStocks: List[NewsBoardRelatedStock] = Field(default_factory=list)
+
+
+class NewsBoardSourceStatus(BaseModel):
+    """消息板块来源状态"""
+    name: str
+    source_key: str
+    available: bool
+    item_count: int = 0
+    description: Optional[str] = None
+
+
+class NewsBoardItemsResponse(BaseModel):
+    """24H 消息板块列表响应"""
+    window_hours: int = 24
+    generated_at: datetime
+    items: List[NewsBoardItem] = Field(default_factory=list)
+    sources: List[NewsBoardSourceStatus] = Field(default_factory=list)
+    duplicate_count: int = 0
+    message: Optional[str] = None
+
+
+class NewsBoardAnalyzeRequest(BaseModel):
+    """消息板块 AI 分析请求"""
+    news_id: Optional[str] = None
+    title: str
+    summary: str = ""
+    category: Optional[str] = None
+
+
+class NewsBoardAnalyzeResponse(BaseModel):
+    """消息板块 AI 分析响应"""
+    summary: str
+    stocks: List[NewsBoardRelatedStock] = Field(default_factory=list)
 
 
 class ClosingCandidateMoveItem(BaseModel):

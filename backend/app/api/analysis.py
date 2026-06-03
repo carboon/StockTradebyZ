@@ -1378,6 +1378,9 @@ def get_current_hot_aggregate(
             total_score=item.get("total_score"),
             signal_type=item.get("signal_type"),
             comment=item.get("comment"),
+            pb=item.get("pb"),
+            netprofit_yoy=item.get("netprofit_yoy"),
+            roe=item.get("roe"),
             risk_flag=item.get("risk_flag"),
             consecutive_days=int(item.get("consecutive_days") or 1),
         )
@@ -1405,6 +1408,9 @@ def get_current_hot_aggregate(
             prefilter_passed=item.get("prefilter_passed"),
             prefilter_summary=item.get("prefilter_summary"),
             prefilter_blocked_by=item.get("prefilter_blocked_by"),
+            pb=item.get("pb"),
+            netprofit_yoy=item.get("netprofit_yoy"),
+            roe=item.get("roe"),
             pullback_quality=item.get("pullback_quality"),
             pullback_negative_flags=item.get("pullback_negative_flags"),
             risk_flag=item.get("risk_flag"),
@@ -1523,6 +1529,9 @@ def get_current_hot_candidates(
             total_score=item.get("total_score"),
             signal_type=item.get("signal_type"),
             comment=item.get("comment"),
+            pb=item.get("pb"),
+            netprofit_yoy=item.get("netprofit_yoy"),
+            roe=item.get("roe"),
             # risk_flag=item.get("risk_flag"),  # 已屏蔽
             consecutive_days=int(item.get("consecutive_days") or 1),
         )
@@ -1570,6 +1579,9 @@ def get_current_hot_results(
             prefilter_passed=item.get("prefilter_passed"),
             prefilter_summary=item.get("prefilter_summary"),
             prefilter_blocked_by=item.get("prefilter_blocked_by"),
+            pb=item.get("pb"),
+            netprofit_yoy=item.get("netprofit_yoy"),
+            roe=item.get("roe"),
             pullback_quality=item.get("pullback_quality"),
             pullback_negative_flags=item.get("pullback_negative_flags"),
             # risk_flag=item.get("risk_flag"),  # 已屏蔽

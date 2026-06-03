@@ -897,6 +897,76 @@ class StockDaily(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ValueLowlandProfile(Base):
+    """价值洼地 AI 公司画像缓存。"""
+    __tablename__ = "value_lowland_profiles"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_value_lowland_profiles_code"),
+        Index("ix_value_lowland_profiles_updated_at", "updated_at"),
+        Index("ix_value_lowland_profiles_ownership_type", "ownership_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    ownership_type: Mapped[str] = mapped_column(String(30), nullable=False, default="unknown")
+    controller: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    main_business: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    business_focus_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    scarcity_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cycle_type: Mapped[str] = mapped_column(String(30), nullable=False, default="other")
+    unique_assets_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    evidence_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    risk_notes_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    raw_result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    searched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    analyzed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ValueLowlandRun(Base):
+    """价值洼地批量筛选结果缓存。"""
+    __tablename__ = "value_lowland_runs"
+    __table_args__ = (
+        Index("ix_value_lowland_runs_status_created_at", "status", "created_at"),
+        Index("ix_value_lowland_runs_completed_at", "completed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    limit: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    enrich: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    force_refresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StockFinancial(Base):
+    """本地缓存的最近一期财务指标（月度刷新）。"""
+    __tablename__ = "stock_financials"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_stock_financials_code"),
+        Index("ix_stock_financials_fetched_at", "fetched_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    roe: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    netprofit_yoy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rev_yoy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    grossprofit_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    end_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, comment="财报截止日期 YYYYMMDD")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class StockActivePoolRank(Base):
     """每日活跃池排名因子表。
 

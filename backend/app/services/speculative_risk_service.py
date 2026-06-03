@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.models import Config
 
 
-GENERIC_SECTOR_NAMES = {"", "当前热盘", "热力股票池", "当前热盘AI标的"}
+GENERIC_SECTOR_NAMES = {"", "当前热盘", "周期性股票", "热力股票池", "当前热盘AI标的"}
 
 
 @dataclass(frozen=True)

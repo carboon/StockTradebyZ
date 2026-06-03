@@ -1405,11 +1405,12 @@ class TomorrowStarWindowService:
         *,
         reviewer: str = DEFAULT_REVIEWER,
         source: str = DEFAULT_SOURCE,
+        force: bool = False,
     ) -> dict[str, Any]:
         recovered_incomplete_runs = self.reset_stale_incomplete_runs(window_size, source=f"{source}_recovered")
         summary = self.get_window_status(window_size)
         target_dates = [item["pick_date"] for item in summary.items]
-        missing_dates = [
+        missing_dates = target_dates if force else [
             item["pick_date"]
             for item in summary.items
             if not self._is_effectively_ready_item(item)

@@ -848,6 +848,7 @@ class TaskService:
             120,
             reviewer,
             "full_update",
+            True,
         )
         if tomorrow_star_window_synced.get("failed_dates"):
             failed_dates = ", ".join(tomorrow_star_window_synced["failed_dates"])
@@ -868,6 +869,7 @@ class TaskService:
             self._run_current_hot_window_sync,
             120,
             reviewer,
+            True,
         )
         if current_hot_synced.get("failed_dates"):
             failed_dates = ", ".join(current_hot_synced["failed_dates"])
@@ -1545,6 +1547,7 @@ class TaskService:
         window_size: int = 120,
         reviewer: str = "quant",
         source: str = "full_update",
+        force: bool = False,
     ) -> dict[str, Any]:
         from app.database import SessionLocal
         from app.services.tomorrow_star_window_service import TomorrowStarWindowService
@@ -1554,12 +1557,14 @@ class TaskService:
                 window_size=window_size,
                 reviewer=reviewer,
                 source=source,
+                force=force,
             )
 
     @staticmethod
     def _run_current_hot_window_sync(
         window_size: int = 120,
         reviewer: str = "quant",
+        force: bool = False,
     ) -> dict[str, Any]:
         from app.database import SessionLocal
         from app.services.current_hot_service import CurrentHotService
@@ -1568,6 +1573,7 @@ class TaskService:
             return CurrentHotService(session).ensure_window(
                 window_size=window_size,
                 reviewer=reviewer,
+                force=force,
             )
 
     @staticmethod

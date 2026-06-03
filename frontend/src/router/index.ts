@@ -55,6 +55,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '全盘分析', icon: 'Star', keepAlive: true, requiresAuth: true },
   },
   {
+    path: '/news-board',
+    name: 'NewsBoard',
+    component: () => import('@/views/NewsBoard.vue'),
+    meta: { title: '消息板块', icon: 'Bell', keepAlive: true, requiresAuth: true },
+  },
+  {
+    path: '/value-lowland',
+    name: 'ValueLowland',
+    component: () => import('@/views/ValueLowland.vue'),
+    meta: { title: '价值洼地', icon: 'Coin', keepAlive: true, requiresAuth: true },
+  },
+  {
     path: '/sector-analysis',
     redirect: '/sector-analysis/overview',
   },

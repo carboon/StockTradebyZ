@@ -160,6 +160,9 @@ export interface CurrentHotCandidate {
   total_score?: number | null
   signal_type?: string | null
   comment?: string | null
+  pb?: number | null
+  netprofit_yoy?: number | null
+  roe?: number | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
@@ -184,6 +187,9 @@ export interface CurrentHotAnalysisResult {
   turnover_rate?: number | null
   volume_ratio?: number | null
   active_pool_rank?: number | null
+  pb?: number | null
+  netprofit_yoy?: number | null
+  roe?: number | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
@@ -1788,4 +1794,89 @@ export interface ConceptMemoryComposeResponse {
   matched_official_concepts: Record<string, any>[]
   ai_result?: Record<string, any> | null
   run?: ConceptMemoryRunItem | null
+}
+
+export interface ValueLowlandEvidence {
+  title: string
+  url: string
+  summary: string
+  published_at?: string | null
+  source?: string | null
+}
+
+export interface ValueLowlandCompanyProfile {
+  ownership_type: string
+  controller?: string | null
+  main_business?: string | null
+  business_focus_score: number
+  scarcity_score: number
+  cycle_type: string
+  unique_assets: string[]
+  evidence: ValueLowlandEvidence[]
+  confidence: number
+  risk_notes: string[]
+  cached: boolean
+  expires_at?: string | null
+}
+
+export interface ValueLowlandScoreBreakdown {
+  ownership_score: number
+  low_valuation_score: number
+  financial_improvement_score: number
+  cycle_elasticity_score: number
+  business_focus_score: number
+  scarcity_score: number
+  risk_penalty: number
+}
+
+export interface ValueLowlandCandidate {
+  rank: number
+  code: string
+  ts_code: string
+  name?: string | null
+  market?: string | null
+  industry?: string | null
+  close?: number | null
+  trade_date?: string | null
+  total_mv?: number | null
+  circ_mv?: number | null
+  pe_ttm?: number | null
+  pb?: number | null
+  low_position_ratio?: number | null
+  drawdown_from_high_pct?: number | null
+  roe?: number | null
+  netprofit_yoy?: number | null
+  rev_yoy?: number | null
+  grossprofit_margin?: number | null
+  score: number
+  score_breakdown: ValueLowlandScoreBreakdown
+  tags: string[]
+  reasons: string[]
+  risk_notes: string[]
+  profile: ValueLowlandCompanyProfile
+}
+
+export interface ValueLowlandResponse {
+  generated_at: string
+  trade_date?: string | null
+  source: string
+  total: number
+  enriched_count: number
+  message?: string | null
+  total_rank: ValueLowlandCandidate[]
+  soe_lowland: ValueLowlandCandidate[]
+  cycle_resource: ValueLowlandCandidate[]
+  earnings_reversal: ValueLowlandCandidate[]
+  insufficient_evidence: ValueLowlandCandidate[]
+}
+
+export interface ValueLowlandRunStatus {
+  id?: number | null
+  status: 'idle' | 'pending' | 'running' | 'completed' | 'failed' | string
+  limit: number
+  enrich: boolean
+  force_refresh: boolean
+  started_at?: string | null
+  completed_at?: string | null
+  error_message?: string | null
 }

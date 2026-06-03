@@ -23,10 +23,11 @@ from app.models import (
     Stock,
     StockActivePoolRank,
     StockDaily,
+    StockFinancial,
     Task,
 )
 from app.services.analysis_service import analysis_service
-from app.services.current_hot_pool import DEFAULT_CURRENT_HOT_POOL
+from app.services.cycle_stock_pool import DEFAULT_CYCLE_STOCK_POOL
 from app.services.daily_data_service import DailyDataService
 from app.services.risk_regime_ai_service import RiskRegimeAIService
 from app.services.risk_regime_service import RiskRegimeService
@@ -37,6 +38,7 @@ from app.services.sector_analysis_config import (
 from app.services.speculative_risk_service import SpeculativeRiskService
 from app.services.tushare_service import TushareService
 from app.time_utils import utc_now
+from app.utils.tushare_rate_limit import acquire_tushare_slot
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,8 @@ class CurrentHotPoolEntry:
 class CurrentHotService:
     """当前热盘服务。"""
 
-    CONFIG_KEY = "current_hot_pool"
+    CONFIG_KEY = "cycle_stock_pool"
+    LEGACY_CONFIG_KEY = "current_hot_pool"
     SECTOR_ANALYSIS_CATALOG_KEY = "sector_analysis_catalog"
     SECTOR_ANALYSIS_POOL_KEY = "sector_analysis_pool"
     DEFAULT_REVIEWER = "quant"
@@ -127,7 +130,7 @@ class CurrentHotService:
 
     @staticmethod
     def _is_generic_sector_name(value: Optional[str]) -> bool:
-        return str(value or "").strip() in {"", "当前热盘", "热力股票池", "当前热盘AI标的"}
+        return str(value or "").strip() in {"", "当前热盘", "周期性股票", "热力股票池", "当前热盘AI标的"}
 
     @staticmethod
     def get_board_group(code: str) -> str:
@@ -180,18 +183,18 @@ class CurrentHotService:
     def _load_sector_analysis_pool(self) -> dict[str, list[dict[str, str]]]:
         return resolve_sector_stock_pool(
             self._load_text_config(self.SECTOR_ANALYSIS_POOL_KEY),
-            self._load_text_config(self.CONFIG_KEY),
+            self._load_text_config(self.CONFIG_KEY) or self._load_text_config(self.LEGACY_CONFIG_KEY),
         )
 
     def _load_pool_config(self) -> dict[str, dict[str, str]]:
         def normalize_pool_config(payload: Any) -> dict[str, dict[str, str]]:
             if not isinstance(payload, dict) or not payload:
-                return DEFAULT_CURRENT_HOT_POOL
+                return DEFAULT_CYCLE_STOCK_POOL
 
             # 兼容扁平结构：{ "600000": "浦发银行" }
             if all(isinstance(key, str) and str(key).isdigit() for key in payload.keys()):
                 return {
-                    "当前热盘": {
+                    "周期性股票": {
                         str(name or code): str(code).zfill(6)
                         for code, name in payload.items()
                         if str(code or "").strip()
@@ -213,17 +216,19 @@ class CurrentHotService:
                     if code and code != "000000":
                         sector_items[name] = code
                 if sector_items:
-                    normalized[str(sector_name or "当前热盘")] = sector_items
-            return normalized or DEFAULT_CURRENT_HOT_POOL
+                    normalized[str(sector_name or "周期性股票")] = sector_items
+            return normalized or DEFAULT_CYCLE_STOCK_POOL
 
         row = self.db.query(Config).filter(Config.key == self.CONFIG_KEY).first()
+        if row is None:
+            row = self.db.query(Config).filter(Config.key == self.LEGACY_CONFIG_KEY).first()
         if row and row.value:
             try:
                 payload = json.loads(row.value)
                 return normalize_pool_config(payload)
             except Exception:
                 pass
-        return DEFAULT_CURRENT_HOT_POOL
+        return DEFAULT_CYCLE_STOCK_POOL
 
     def _stock_industry_by_code(self, codes: list[str]) -> dict[str, str]:
         normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
@@ -239,6 +244,60 @@ class CurrentHotService:
             for code, industry in rows
             if str(industry or "").strip() and not self._is_generic_sector_name(str(industry).strip())
         }
+
+    def _fetch_daily_basic_metrics(self, trade_date: date, codes: list[str]) -> dict[str, dict[str, Any]]:
+        normalized_codes = {str(code or "").zfill(6) for code in codes if str(code or "").strip()}
+        if not normalized_codes or not self.tushare_service.token:
+            return {}
+        try:
+            acquire_tushare_slot("daily_basic")
+            frame = self.tushare_service.pro.daily_basic(
+                trade_date=trade_date.strftime("%Y%m%d"),
+                fields="ts_code,trade_date,pb",
+            )
+        except Exception as exc:
+            logger.warning("[current-hot] daily_basic metrics fetch failed for %s: %s", trade_date, exc)
+            return {}
+        if frame is None or frame.empty:
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for _, row in frame.iterrows():
+            ts_code = str(row.get("ts_code") or "")
+            code = ts_code.split(".", 1)[0].zfill(6)
+            if code in normalized_codes:
+                result[code] = {"pb": self._safe_float(row.get("pb"))}
+        return result
+
+    def _load_financial_metrics(self, codes: list[str]) -> dict[str, dict[str, Any]]:
+        normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return {}
+        rows = (
+            self.db.query(StockFinancial)
+            .filter(StockFinancial.code.in_(normalized_codes))
+            .all()
+        )
+        return {
+            str(row.code).zfill(6): {
+                "netprofit_yoy": self._safe_float(row.netprofit_yoy),
+                "roe": self._safe_float(row.roe),
+            }
+            for row in rows
+        }
+
+    @staticmethod
+    def _merge_market_financial_metrics(
+        item: dict[str, Any],
+        *,
+        daily_basic_metrics: dict[str, dict[str, Any]],
+        financial_metrics: dict[str, dict[str, Any]],
+    ) -> None:
+        code = str(item.get("code") or "").zfill(6)
+        daily_basic = daily_basic_metrics.get(code, {})
+        financial = financial_metrics.get(code, {})
+        item["pb"] = daily_basic.get("pb")
+        item["netprofit_yoy"] = financial.get("netprofit_yoy")
+        item["roe"] = financial.get("roe")
 
     def _resolve_sector_names(
         self,
@@ -257,7 +316,7 @@ class CurrentHotService:
         if industry_name and not self._is_generic_sector_name(industry_name) and industry_name not in names:
             names.append(industry_name)
             return names
-        return ["当前热盘"]
+            return ["周期性股票"]
 
     def _enrich_pool_entries_with_stock_industry(self, entries: list[CurrentHotPoolEntry]) -> list[CurrentHotPoolEntry]:
         industry_by_code = self._stock_industry_by_code([entry.code for entry in entries])
@@ -1320,6 +1379,9 @@ class CurrentHotService:
             .filter(CurrentHotCandidate.pick_date == target_date)
             .all()
         )
+        codes = [str(row.code).zfill(6) for row, *_ in rows]
+        daily_basic_metrics = self._fetch_daily_basic_metrics(target_date, codes)
+        financial_metrics = self._load_financial_metrics(codes)
         items: list[dict[str, Any]] = []
         item_context_by_code: dict[str, dict[str, Any]] = {}
         for row, analysis, stock_name, stock_industry, active_pool_rank in rows:
@@ -1354,6 +1416,11 @@ class CurrentHotService:
                 "comment": analysis.comment if analysis else None,
                 "consecutive_days": int(row.consecutive_days or 1),
             }
+            self._merge_market_financial_metrics(
+                item,
+                daily_basic_metrics=daily_basic_metrics,
+                financial_metrics=financial_metrics,
+            )
             items.append(item)
             item_context_by_code[item["code"]] = {
                 "industry": stock_industry,
@@ -1452,6 +1519,9 @@ class CurrentHotService:
             .filter(CurrentHotAnalysisResult.pick_date == target_date)
             .all()
         )
+        codes = [str(result.code).zfill(6) for result, *_ in rows]
+        daily_basic_metrics = self._fetch_daily_basic_metrics(target_date, codes)
+        financial_metrics = self._load_financial_metrics(codes)
         items = []
         item_context_by_code: dict[str, dict[str, Any]] = {}
         for result, candidate, stock_name, stock_industry, active_pool_rank in rows:
@@ -1489,6 +1559,11 @@ class CurrentHotService:
                 ),
                 "pullback_negative_flags": pullback_negative_flags,
             }
+            self._merge_market_financial_metrics(
+                item,
+                daily_basic_metrics=daily_basic_metrics,
+                financial_metrics=financial_metrics,
+            )
             items.append(item)
             item_context_by_code[item["code"]] = {
                 "industry": stock_industry,

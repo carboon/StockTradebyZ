@@ -62,7 +62,7 @@ from app.config import settings
 from sqlalchemy import text
 
 from app.database import engine, Base, get_db, SessionLocal
-from app.api import analysis, auth, config, concept_memory, custom_concepts, stock, tasks, watchlist
+from app.api import analysis, auth, config, concept_memory, custom_concepts, news_board, stock, tasks, value_lowland, watchlist
 from app.schema_migrations import apply_startup_sql_migrations
 from app.services.auto_update_service import AutoDailyUpdateScheduler
 from app.services.online_status_service import get_online_status_service
@@ -94,6 +94,9 @@ def hydrate_runtime_env_from_db() -> None:
         "zhipuai_api_key": "ZHIPUAI_API_KEY",
         "dashscope_api_key": "DASHSCOPE_API_KEY",
         "gemini_api_key": "GEMINI_API_KEY",
+        "deepseek_api_key": "DEEPSEEK_API_KEY",
+        "bocha_api_key": "BOCHA_API_KEY",
+        "tavily_api_key": "TAVILY_API_KEY",
         "default_reviewer": "DEFAULT_REVIEWER",
         "min_score_threshold": "MIN_SCORE_THRESHOLD",
         "backend_host": "BACKEND_HOST",
@@ -317,6 +320,8 @@ app.include_router(stock.router, prefix="/api/v1/stock", tags=["股票数据"])
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["分析"])
 app.include_router(custom_concepts.router, prefix="/api/v1/custom-concepts", tags=["自定义概念"])
 app.include_router(concept_memory.router, prefix="/api/v1/concept-memory", tags=["概念记忆库"])
+app.include_router(news_board.router, prefix="/api/v1/news-board", tags=["消息板块"])
+app.include_router(value_lowland.router, prefix="/api/v1/value-lowland", tags=["价值洼地"])
 app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["重点观察"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["任务调度"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["认证"])

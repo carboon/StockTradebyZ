@@ -1077,11 +1077,13 @@ def rebuild_tomorrow_star(trade_dates: list[str], *, reviewer: str, window_size:
 def rebuild_current_hot(*, reviewer: str, window_size: int) -> dict[str, Any]:
     with SessionLocal() as db:
         config_row = db.query(Config).filter(Config.key == CurrentHotService.CONFIG_KEY).first()
+        if config_row is None:
+            config_row = db.query(Config).filter(Config.key == CurrentHotService.LEGACY_CONFIG_KEY).first()
         config_warning = None
         if config_row and str(config_row.value or "").strip() not in {"", "{}", "null"}:
             config_warning = (
-                "current_hot_pool 数据库配置非空，本次会按数据库配置重建；"
-                "脚本不会修改配置，因此不会强制使用代码默认热盘池。"
+                "cycle_stock_pool 数据库配置非空，本次会按数据库配置重建；"
+                "旧 current_hot_pool 配置仍会兼容读取，脚本不会修改配置。"
             )
         service = CurrentHotService(db)
         result = service.ensure_window(

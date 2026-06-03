@@ -6,7 +6,7 @@
       :closable="false"
       show-icon
       title="板块分析采用配置驱动"
-      description="板块目录使用 sector_analysis_catalog，股票池使用 sector_analysis_pool。板块详情页按板块独立历史日期查看对应个股，不再固定展示最新当前热盘快照。"
+      description="板块目录使用 sector_analysis_catalog，股票池使用 sector_analysis_pool。板块详情页按板块独立历史日期查看对应个股，不再固定展示最新周期性股票快照。"
     />
 
     <div v-if="authStore.isAdmin && !configStore.dataInitialized" class="page-empty">
@@ -659,7 +659,7 @@ const sectorCatalog = computed(() => resolveSectorAnalysisCatalog(configStore.co
 const sectorMenuEntries = computed(() => buildSectorMenuEntries(sectorCatalog.value))
 const sectorStockPool = computed(() => resolveSectorStockPool(
   configStore.configs.sector_analysis_pool,
-  configStore.configs.current_hot_pool,
+  configStore.configs.cycle_stock_pool || configStore.configs.current_hot_pool,
 ))
 const currentSectorKey = computed(() => String(route.params.sectorKey ?? '').trim())
 const selectedSector = computed<SectorAnalysisCatalogEntry | null>(() => {

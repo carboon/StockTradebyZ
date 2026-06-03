@@ -109,7 +109,7 @@
               </div>
             </el-form-item>
 
-            <el-form-item label="Bocha Key">
+            <el-form-item label="Bocha Key (热点新闻)">
               <el-input
                 v-model="configs.bocha_api_key"
                 type="password"
@@ -118,7 +118,20 @@
                 class="config-input"
               />
               <div class="form-tip">
-                热点新闻检索增强，获取地址: <a href="https://open.bochaai.com/" target="_blank">https://open.bochaai.com/</a>
+                仅用于热点新闻检索增强。获取地址: <a href="https://open.bochaai.com/" target="_blank">https://open.bochaai.com/</a>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="Tavily Key">
+              <el-input
+                v-model="configs.tavily_api_key"
+                type="password"
+                show-password
+                placeholder="Tavily AI Search API Key"
+                class="config-input"
+              />
+              <div class="form-tip">
+                价值洼地 + 热点新闻检索增强，获取地址: <a href="https://tavily.com/" target="_blank">https://tavily.com/</a>
               </div>
             </el-form-item>
 
@@ -264,7 +277,7 @@
               <div class="sector-config-panel__header">
                 <div>
                   <div class="sector-config-panel__title">sector_analysis_pool</div>
-                  <div class="sector-config-panel__desc">控制每个板块对应的股票清单；优先级高于 current_hot_pool。</div>
+                  <div class="sector-config-panel__desc">控制每个板块对应的股票清单；优先级高于 cycle_stock_pool。</div>
                 </div>
                 <el-tag size="small" effect="plain">JSON</el-tag>
               </div>
@@ -408,6 +421,7 @@ type ConfigFormState = {
   gemini_api_key: string
   deepseek_api_key: string
   bocha_api_key: string
+  tavily_api_key: string
   default_reviewer: string
   min_score_threshold: number
   register_validation_question: string
@@ -421,6 +435,7 @@ const configs = ref<ConfigFormState>({
   gemini_api_key: '',
   deepseek_api_key: '',
   bocha_api_key: '',
+  tavily_api_key: '',
   default_reviewer: 'quant',
   min_score_threshold: 4.0,
   register_validation_question: '系统管理员的微信名是什么',
@@ -607,7 +622,7 @@ const nextStepCards = computed(() => {
     },
     {
       title: '板块分析',
-      description: '按国家战略主题查看默认板块池与当前热盘快照的对应情况。',
+      description: '按国家战略主题查看默认板块池与周期性股票快照的对应情况。',
       route: '/sector-analysis/overview',
     },
     {
@@ -639,6 +654,7 @@ async function loadConfigs() {
       gemini_api_key: configStore.configs.gemini_api_key || '',
       deepseek_api_key: configStore.configs.deepseek_api_key || '',
       bocha_api_key: configStore.configs.bocha_api_key || '',
+      tavily_api_key: configStore.configs.tavily_api_key || '',
       default_reviewer: configStore.configs.default_reviewer || 'quant',
       min_score_threshold: parseFloat(configStore.configs.min_score_threshold || '4.0'),
       register_validation_question: configStore.configs.register_validation_question || '系统管理员的微信名是什么',

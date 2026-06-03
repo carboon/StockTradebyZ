@@ -81,7 +81,7 @@
                   <div class="usage-item">
                     <div class="usage-step">1</div>
                     <div>
-                      <strong>先看明日之星</strong>
+                      <strong>先看 B1 检索</strong>
                       <p>查看指定交易日的候选股与分析结果，优先锁定系统已经完成复核的股票。</p>
                     </div>
                   </div>
@@ -106,7 +106,7 @@
                 <h3>页面分工</h3>
                 <div class="definition-list">
                   <div class="definition-item">
-                    <el-tag type="primary">明日之星</el-tag>
+                    <el-tag type="primary">B1检索</el-tag>
                     <p>看指定交易日的候选股、分析结果和历史快照。</p>
                   </div>
                   <div class="definition-item">
@@ -125,7 +125,7 @@
                 <div class="definition-list">
                   <div class="definition-item">
                     <el-tag type="danger" effect="plain">第一步</el-tag>
-                    <p>先看当前热盘顶部的“过热转弱预警”。它不是基于你的自选热盘，而是基于全市场活跃股票样本，判断短线投机环境是否开始从过热转向急跌风险。</p>
+                    <p>先看周期性股票顶部的“过热转弱预警”。它不是基于你的自选股票池，而是基于全市场活跃股票样本，判断短线投机环境是否开始从过热转向急跌风险。</p>
                   </div>
                   <div class="definition-item">
                     <el-tag type="warning" effect="plain">第二步</el-tag>

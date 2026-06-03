@@ -14,6 +14,7 @@ class DeepSeekService:
 
     BASE_URL = "https://api.deepseek.com"
     DEFAULT_MODEL = "deepseek-chat"
+    REQUEST_TIMEOUT_SECONDS = 30.0
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = str(api_key or "").strip()
@@ -37,7 +38,12 @@ class DeepSeekService:
             api_key = self._resolve_api_key()
             if not api_key:
                 raise ValueError("DeepSeek API Key 未配置")
-            self._client = OpenAI(api_key=api_key, base_url=self.BASE_URL)
+            self._client = OpenAI(
+                api_key=api_key,
+                base_url=self.BASE_URL,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+                max_retries=1,
+            )
         return self._client
 
     def infer_json(

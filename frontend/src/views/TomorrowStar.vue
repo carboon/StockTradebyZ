@@ -101,7 +101,7 @@
                     <span v-if="!isCurrentHotTab">候选数 {{ row.count === '-' ? '-' : row.count }}</span>
                     <span v-if="isCurrentHotTab">趋势启动数 {{ row.pass === '-' ? '-' : row.pass }}</span>
                     <span v-if="isCurrentHotTab">B1通过数 {{ row.b1PassCount === '-' ? '-' : row.b1PassCount }}</span>
-                    <span v-if="!isCurrentHotTab">明日之星 {{ row.tomorrowStarCount === '-' ? '-' : row.tomorrowStarCount }}</span>
+                    <span v-if="!isCurrentHotTab">B1检索 {{ row.tomorrowStarCount === '-' ? '-' : row.tomorrowStarCount }}</span>
                   </div>
                 </button>
               </div>
@@ -563,7 +563,7 @@
                     <span class="tip-item">· 条件：KDJ 低位 + 知行线结构通过 + 周线多头排列 + 最大量日非阴线</span>
                   </template>
                   <template v-else>
-                    <span class="tip-item">· 当前热盘关注当日强势活跃标的AI标的，右侧支持科创板 / 其他板块过滤，点击历史日期可回看对应热力股票池</span>
+                    <span class="tip-item">· 周期性股票关注配置池内标的，右侧支持科创板 / 其他板块过滤，点击历史日期可回看对应股票池</span>
                   </template>
                 </div>
 
@@ -659,6 +659,21 @@
                       <el-tag :type="getScoreType(row.total_score)" size="small">
                         {{ typeof row.total_score === 'number' ? row.total_score.toFixed(1) : '-' }}
                       </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="pb" label="PB" width="62" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatNullableNumber(row.pb, 2) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="netprofit_yoy" label="净利" width="68" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatSignedPercent(row.netprofit_yoy) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="roe" label="ROE" width="68" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      {{ formatSignedPercent(row.roe) }}
                     </template>
                   </el-table-column>
                   <el-table-column v-if="isCurrentHotTab" prop="active_pool_rank" label="活跃" width="62" align="center" sortable="custom" :sort-orders="candidateSortOrders">
@@ -776,8 +791,8 @@
                     size="small"
                     class="source-switch"
                   >
-                    <el-radio-button value="tomorrow-star">明日之星候选</el-radio-button>
-                    <el-radio-button value="current-hot">当前热盘</el-radio-button>
+                    <el-radio-button value="tomorrow-star">B1检索</el-radio-button>
+                    <el-radio-button value="current-hot">周期性股票</el-radio-button>
                   </el-radio-group>
                   <el-tag
                     v-if="middayTaskRunning"
@@ -927,8 +942,8 @@
                     size="small"
                     class="source-switch"
                   >
-                    <el-radio-button value="tomorrow-star">明日之星候选</el-radio-button>
-                    <el-radio-button value="current-hot">当前热盘</el-radio-button>
+                    <el-radio-button value="tomorrow-star">B1检索</el-radio-button>
+                    <el-radio-button value="current-hot">周期性股票</el-radio-button>
                   </el-radio-group>
                   <el-tag
                     v-if="middayTaskRunning"
@@ -1326,7 +1341,7 @@
                               · 机构评级（近60天券商研报评级汇总）<br/>
                               · 近三天热点关键词（AI提取并判断产业相关性）<br/>
                               · 近14天相关新闻（AI消息面风险过滤）<br/>
-                              <strong>流程：</strong>本地量化评分 → 热点相关性加权 → 预筛TOP30 → DeepSeek AI选出TOP10；明日之星未入选时追加为第11项
+                              <strong>流程：</strong>本地量化评分 → 热点相关性加权 → 预筛TOP30 → DeepSeek AI选出TOP10；B1检索未入选时追加为第11项
                             </div>
                           </template>
                           <el-icon style="margin-left: 4px; vertical-align: middle; cursor: help;"><QuestionFilled /></el-icon>
@@ -1394,7 +1409,7 @@
                     <el-table-column label="AI点评" min-width="420" show-overflow-tooltip>
                       <template #default="{ row }">
                         <template v-if="row.is_star_rejected && row.ai_comment">
-                          <el-tag size="small" type="warning" effect="plain" style="margin-right: 4px;">明日之星</el-tag>{{ row.ai_comment }}
+                          <el-tag size="small" type="warning" effect="plain" style="margin-right: 4px;">B1检索</el-tag>{{ row.ai_comment }}
                         </template>
                         <template v-else>{{ row.ai_comment || row.decision_reason || '-' }}</template>
                       </template>
@@ -1690,6 +1705,9 @@ type CandidateSortProp =
   | 'turnover_rate'
   | 'volume_ratio'
   | 'active_pool_rank'
+  | 'pb'
+  | 'netprofit_yoy'
+  | 'roe'
   | 'kdj_j'
   | 'industry'
   | 'b1_passed'
@@ -1724,8 +1742,8 @@ type MiddaySortState = {
 type AnalysisDisplayRow = Candidate | AnalysisResult | CurrentHotAnalysisResult | CurrentHotCandidate
 
 const analysisTabs: Array<{ name: DataTabKey; label: string }> = [
-  { name: 'tomorrow-star', label: '明日之星' },
-  { name: 'current-hot', label: '当前热盘' },
+  { name: 'tomorrow-star', label: 'B1检索' },
+  { name: 'current-hot', label: '周期性股票' },
 ]
 
 const router = useRouter()
@@ -1970,7 +1988,7 @@ const middayRows = computed<IntradayAnalysisItem[]>(() => {
 const middayCanViewData = computed(() => Boolean(middayData.value.has_data && middayRows.value.length > 0))
 const middayShowEmpty = computed(() => !loadingMidday.value && !middayCanViewData.value)
 const middayTaskRunning = computed(() => loadingMiddayAction.value)
-const middaySourceLabel = computed(() => middaySource.value === 'current-hot' ? '当前热盘' : '明日之星候选')
+const middaySourceLabel = computed(() => middaySource.value === 'current-hot' ? '周期性股票' : 'B1检索')
 const middayTradeDateDisplay = computed(() => formatDateString(middayData.value.trade_date || middayStatus.value.trade_date || ''))
 const middaySnapshotTimeDisplay = computed(() => formatDateTime(middayData.value.snapshot_time || middayStatus.value.snapshot_time || ''))
 const middaySourcePickDateDisplay = computed(() => formatDateString(middayData.value.source_pick_date || middayStatus.value.source_pick_date || ''))
@@ -1978,7 +1996,7 @@ const middayEmptyMessage = computed(() => middayData.value.message || middayStat
 const activeDataTab = computed<DataTabKey>(() => (activeTab.value === 'current-hot' ? 'current-hot' : 'tomorrow-star'))
 const isCurrentHotTab = computed(() => activeDataTab.value === 'current-hot')
 const activeShowInitializationEmpty = computed(() => (isCurrentHotTab.value ? currentHotShowInitializationEmpty.value : showInitializationEmpty.value))
-const activeEmptyDescription = computed(() => (isCurrentHotTab.value ? '当前热盘尚无可用数据' : '明日之星尚无可用数据'))
+const activeEmptyDescription = computed(() => (isCurrentHotTab.value ? '周期性股票暂无可用数据' : 'B1检索暂无可用数据'))
 const activeShowCachedHint = computed(() => (isCurrentHotTab.value ? currentHotHydratedFromCache.value : showCachedHint.value))
 const activeLoadingLatest = computed(() => (isCurrentHotTab.value ? currentHotLoadingLatest.value : loadingLatest.value))
 const activeCandidateLoading = computed(() => (
@@ -2046,6 +2064,9 @@ function mergeCurrentHotCandidateAnalysis(candidate: CurrentHotCandidate): Curre
     total_score: candidate.total_score ?? analysis.total_score,
     signal_type: candidate.signal_type ?? analysis.signal_type,
     comment: candidate.comment ?? analysis.comment,
+    pb: candidate.pb ?? analysis.pb,
+    netprofit_yoy: candidate.netprofit_yoy ?? analysis.netprofit_yoy,
+    roe: candidate.roe ?? analysis.roe,
     sector_names: candidate.sector_names?.length ? candidate.sector_names : analysis.sector_names,
     board_group: candidate.board_group ?? analysis.board_group,
     prefilter_passed: candidate.prefilter_passed ?? analysis.prefilter_passed,
@@ -2067,6 +2088,9 @@ const activeCandidateSortLabel = computed(() => {
     turnover_rate: '换手',
     volume_ratio: '量比',
     active_pool_rank: '活跃排名',
+    pb: 'PB',
+    netprofit_yoy: '净利',
+    roe: 'ROE',
     kdj_j: 'KDJ',
     industry: '板块',
     b1_passed: 'B1',
@@ -3173,7 +3197,7 @@ async function loadCurrentHotData(forceRefresh: boolean = false, silent: boolean
     if (isRequestCanceled(error)) return
     console.error('Failed to load current-hot data:', error)
     if (!silent) {
-      ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘数据失败'))
+      ElMessage.error(getUserSafeErrorMessage(error, '加载周期性股票数据失败'))
     }
   } finally {
     finishRequest('currentHotLoadData', signal)
@@ -3236,7 +3260,7 @@ async function prefetchCurrentHotAggregate() {
   try {
     await loadCurrentHotData(false, true)
   } catch {
-    // 静默预取，不影响明日之星首屏。
+    // 静默预取，不影响 B1 检索首屏。
   }
 }
 
@@ -3305,7 +3329,7 @@ async function selectCurrentHotDate(row: HistoryRow) {
   } catch (error) {
     if (isRequestCanceled(error)) return
     console.error('Failed to load current-hot selected date data:', error)
-    ElMessage.error(getUserSafeErrorMessage(error, '加载当前热盘数据失败'))
+    ElMessage.error(getUserSafeErrorMessage(error, '加载周期性股票数据失败'))
   } finally {
     finishRequest('currentHotLatestCandidates', signal)
     currentHotLoadingLatest.value = false
@@ -3566,7 +3590,7 @@ async function refreshCurrentHotCandidates() {
 
   const dateToRefresh = currentHotViewingDate.value || currentHotLatestDate.value
   if (!dateToRefresh) return
-  ElMessage.success(`已刷新 ${dateToRefresh} 的当前热盘数据`)
+  ElMessage.success(`已刷新 ${dateToRefresh} 的周期性股票数据`)
 }
 
 async function checkIncrementalStatus() {
@@ -4059,7 +4083,7 @@ function getCurrentHotBoardLabel(candidate: CurrentHotCandidate): string {
   if (Array.isArray(candidate.sector_names) && candidate.sector_names.length > 0) {
     const sectorNames = candidate.sector_names
       .map((item) => String(item || '').trim())
-      .filter((item) => item && item !== '当前热盘')
+      .filter((item) => item && item !== '当前热盘' && item !== '周期性股票')
     if (sectorNames.length > 0) {
       return sectorNames.join(' / ')
     }
@@ -4081,6 +4105,16 @@ function formatTurnoverRate(value?: number | null): string {
 function formatVolumeRatio(value?: number | null): string {
   const numericValue = toFiniteNumber(value)
   return numericValue === null ? '-' : numericValue.toFixed(2)
+}
+
+function formatNullableNumber(value?: number | null, digits = 2): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : numericValue.toFixed(digits)
+}
+
+function formatSignedPercent(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : `${numericValue.toFixed(1)}%`
 }
 
 function formatActivePoolRank(value?: number | null): string {

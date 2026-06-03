@@ -1125,7 +1125,10 @@ class TushareService:
                 acquire_tushare_slot("fina_indicator")
                 df = self.pro.fina_indicator(
                     ts_code=",".join(batch),
-                    fields="ts_code,ann_date,end_date,roe,netprofit_yoy,rev_yoy,grossprofit_margin",
+                    fields=(
+                        "ts_code,ann_date,end_date,roe,netprofit_yoy,"
+                        "rev_yoy,or_yoy,q_sales_yoy,revenue_yoy,grossprofit_margin"
+                    ),
                 )
                 if df is None or df.empty:
                     continue
@@ -1141,7 +1144,12 @@ class TushareService:
                     result[code6] = {
                         "roe": self._safe_float(row.get("roe")),
                         "netprofit_yoy": self._safe_float(row.get("netprofit_yoy")),
-                        "rev_yoy": self._safe_float(row.get("rev_yoy")),
+                        "rev_yoy": (
+                            self._safe_float(row.get("rev_yoy"))
+                            or self._safe_float(row.get("or_yoy"))
+                            or self._safe_float(row.get("q_sales_yoy"))
+                            or self._safe_float(row.get("revenue_yoy"))
+                        ),
                         "grossprofit_margin": self._safe_float(row.get("grossprofit_margin")),
                         "end_date": str(row.get("end_date") or ""),
                     }

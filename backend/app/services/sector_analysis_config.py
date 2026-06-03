@@ -298,7 +298,7 @@ def _normalize_pool_record(payload: Any) -> dict[str, list[dict[str, str]]]:
     top_keys = list(payload.keys())
     if top_keys and all(str(key).strip().isdigit() for key in top_keys):
         return {
-            "当前热盘": [
+            "周期性股票": [
                 {
                     "code": _normalize_code(code),
                     "name": str(payload.get(code) or _normalize_code(code)).strip() or _normalize_code(code),

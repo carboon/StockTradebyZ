@@ -60,6 +60,9 @@ import type {
   UsageStatsResponse,
   UserListItem,
   UserInfo,
+  ValueLowlandCompanyProfile,
+  ValueLowlandResponse,
+  ValueLowlandRunStatus,
   WatchlistAnalysisResponse,
   WatchlistAnalyzeResponse,
   WatchlistChartResponse,
@@ -691,6 +694,37 @@ export const apiTasks = {
 
   // 查询 Tushare 日线数据最新时效
   getDataFreshness: () => api.get<never, DataFreshnessResponse>('/v1/tasks/data-freshness', { timeout: TIMEOUTS.standard }),
+}
+
+export const apiValueLowland = {
+  screen: (params: { limit?: number }, options?: RequestOptions) =>
+    api.get<never, ValueLowlandResponse>(
+      '/v1/value-lowland/screen',
+      {
+        ...withRequestOptions(options, TIMEOUTS.standard),
+        params,
+      },
+    ),
+
+  refresh: (params: { limit?: number; enrich?: boolean; force_refresh?: boolean }) =>
+    api.post<null, ValueLowlandRunStatus>(
+      '/v1/value-lowland/refresh',
+      null,
+      { params, timeout: TIMEOUTS.short },
+    ),
+
+  refreshStatus: () =>
+    api.get<never, ValueLowlandRunStatus>(
+      '/v1/value-lowland/refresh/status',
+      { timeout: TIMEOUTS.short },
+    ),
+
+  refreshProfile: (code: string, params: { name?: string; industry?: string | null }) =>
+    api.post<null, ValueLowlandCompanyProfile>(
+      `/v1/value-lowland/${code}/refresh-profile`,
+      null,
+      { params, timeout: TIMEOUTS.aiLong },
+    ),
 }
 
 export const apiAuth = {
