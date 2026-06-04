@@ -303,6 +303,8 @@ def test_intraday_generate_creates_snapshot_for_admin(test_client_with_db: Any) 
     assert row.source_pick_date == source_pick_date
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert round(row.change_pct or 0, 2) == 3.33
+    assert round(row.details_json["latest_change_pct"], 2) == 4.17
     assert row.details_json["turnover_rate"] == 2.5
     assert row.details_json["volume_ratio"] == 4.6168
     assert row.details_json["intraday_metrics"]["elapsed_ratio"] == 0.5
@@ -568,6 +570,8 @@ def test_intraday_generate_falls_back_to_tencent_minute_data(
     row = db.query(IntradayAnalysisSnapshot).filter(IntradayAnalysisSnapshot.trade_date == trade_date).one()
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert round(row.change_pct or 0, 2) == 3.33
+    assert round(row.details_json["latest_change_pct"], 2) == 4.17
     assert row.details_json["turnover_rate"] == 2.5
     assert row.details_json["volume_ratio"] == 4.6168
     assert (tmp_path / "raw_intraday" / "2026-05-08" / "tencent" / "600000.SH.json").exists()

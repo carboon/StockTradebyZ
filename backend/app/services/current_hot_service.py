@@ -29,6 +29,7 @@ from app.models import (
 from app.services.analysis_service import analysis_service
 from app.services.cycle_stock_pool import DEFAULT_CYCLE_STOCK_POOL
 from app.services.daily_data_service import DailyDataService
+from app.services.financial_data_service import FinancialDataService
 from app.services.risk_regime_ai_service import RiskRegimeAIService
 from app.services.risk_regime_service import RiskRegimeService
 from app.services.sector_analysis_config import (
@@ -277,13 +278,38 @@ class CurrentHotService:
             .filter(StockFinancial.code.in_(normalized_codes))
             .all()
         )
-        return {
+        result = {
             str(row.code).zfill(6): {
                 "netprofit_yoy": self._safe_float(row.netprofit_yoy),
                 "roe": self._safe_float(row.roe),
             }
             for row in rows
         }
+        incomplete_codes = [
+            code
+            for code in normalized_codes
+            if code not in result
+            or result[code].get("netprofit_yoy") is None
+            or result[code].get("roe") is None
+        ]
+        if incomplete_codes:
+            try:
+                refreshed = FinancialDataService(self.db, self.tushare_service).get_or_refresh(
+                    incomplete_codes,
+                    refresh_incomplete=True,
+                )
+                for code, values in refreshed.items():
+                    result[str(code).zfill(6)] = {
+                        "netprofit_yoy": self._safe_float(values.get("netprofit_yoy")),
+                        "roe": self._safe_float(values.get("roe")),
+                    }
+            except Exception as exc:
+                logger.warning(
+                    "[current-hot] financial metrics refresh failed for %d codes: %s",
+                    len(incomplete_codes),
+                    exc,
+                )
+        return result
 
     @staticmethod
     def _merge_market_financial_metrics(
@@ -466,6 +492,117 @@ class CurrentHotService:
                 "recent_runup_pct": recent_runup_pct,
             }
         return metrics
+
+    def _load_price_streak_days(self, codes: list[str], target_date: date) -> dict[str, int]:
+        normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return {}
+
+        recent_dates = [
+            row[0]
+            for row in (
+                self.db.query(StockDaily.trade_date)
+                .distinct()
+                .filter(StockDaily.trade_date <= target_date)
+                .order_by(StockDaily.trade_date.desc())
+                .limit(260)
+                .all()
+            )
+            if row and row[0]
+        ]
+        if not recent_dates:
+            return {}
+
+        rows = (
+            self.db.query(StockDaily.code, StockDaily.trade_date, StockDaily.open, StockDaily.close)
+            .filter(
+                StockDaily.code.in_(normalized_codes),
+                StockDaily.trade_date.in_(recent_dates),
+            )
+            .order_by(StockDaily.code.asc(), StockDaily.trade_date.desc(), StockDaily.id.desc())
+            .all()
+        )
+
+        grouped: dict[str, list[tuple[date, float, float]]] = {}
+        seen_dates_by_code: dict[str, set[date]] = {}
+        for code, trade_date, open_price, close_price in rows:
+            if trade_date is None or open_price is None or close_price is None:
+                continue
+            normalized_code = str(code).zfill(6)
+            seen_dates = seen_dates_by_code.setdefault(normalized_code, set())
+            if trade_date in seen_dates:
+                continue
+            seen_dates.add(trade_date)
+            grouped.setdefault(normalized_code, []).append((trade_date, float(open_price), float(close_price)))
+
+        result: dict[str, int] = {}
+        for code, points_desc in grouped.items():
+            if not points_desc:
+                continue
+            first_sign = self._price_day_sign(points_desc[0][1], points_desc[0][2])
+            if first_sign == 0:
+                result[code] = 0
+                continue
+
+            streak = 0
+            for _, open_price, close_price in points_desc:
+                sign = self._price_day_sign(open_price, close_price)
+                if sign != first_sign:
+                    break
+                streak += 1
+            result[code] = streak if first_sign > 0 else -streak
+        return result
+
+    @staticmethod
+    def _price_day_sign(open_price: float, close_price: float) -> int:
+        diff = close_price - open_price
+        if abs(diff) < 1e-9:
+            return 0
+        return 1 if diff > 0 else -1
+
+    def _load_price_position_pct(self, codes: list[str], target_date: date, *, window_size: int = 120) -> dict[str, float]:
+        normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return {}
+
+        rows = (
+            self.db.query(StockDaily.code, StockDaily.trade_date, StockDaily.high, StockDaily.low, StockDaily.close)
+            .filter(
+                StockDaily.code.in_(normalized_codes),
+                StockDaily.trade_date <= target_date,
+            )
+            .order_by(StockDaily.code.asc(), StockDaily.trade_date.desc(), StockDaily.id.desc())
+            .all()
+        )
+
+        grouped: dict[str, list[tuple[date, float, float, float]]] = {}
+        seen_dates_by_code: dict[str, set[date]] = {}
+        for code, trade_date, high_price, low_price, close_price in rows:
+            if trade_date is None or high_price is None or low_price is None or close_price is None:
+                continue
+            normalized_code = str(code).zfill(6)
+            bucket = grouped.setdefault(normalized_code, [])
+            if len(bucket) >= window_size:
+                continue
+            seen_dates = seen_dates_by_code.setdefault(normalized_code, set())
+            if trade_date in seen_dates:
+                continue
+            seen_dates.add(trade_date)
+            bucket.append((trade_date, float(high_price), float(low_price), float(close_price)))
+
+        result: dict[str, float] = {}
+        for code, points_desc in grouped.items():
+            if not points_desc:
+                continue
+            current_close = points_desc[0][3]
+            window_high = max(point[1] for point in points_desc)
+            window_low = min(point[2] for point in points_desc)
+            if window_high <= window_low:
+                result[code] = 0.0
+                continue
+            position = (current_close - window_low) / (window_high - window_low) * 100
+            result[code] = round(max(0.0, min(100.0, position)), 2)
+        return result
 
     def _build_sector_story_context(self, items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         sector_members: dict[str, list[tuple[str, float]]] = {}
@@ -1382,6 +1519,8 @@ class CurrentHotService:
         codes = [str(row.code).zfill(6) for row, *_ in rows]
         daily_basic_metrics = self._fetch_daily_basic_metrics(target_date, codes)
         financial_metrics = self._load_financial_metrics(codes)
+        price_streak_days = self._load_price_streak_days(codes, target_date)
+        price_position_pct = self._load_price_position_pct(codes, target_date)
         items: list[dict[str, Any]] = []
         item_context_by_code: dict[str, dict[str, Any]] = {}
         for row, analysis, stock_name, stock_industry, active_pool_rank in rows:
@@ -1415,6 +1554,8 @@ class CurrentHotService:
                 "signal_type": analysis.signal_type if analysis else None,
                 "comment": analysis.comment if analysis else None,
                 "consecutive_days": int(row.consecutive_days or 1),
+                "price_streak_days": price_streak_days.get(str(row.code).zfill(6)),
+                "price_position_pct": price_position_pct.get(str(row.code).zfill(6)),
             }
             self._merge_market_financial_metrics(
                 item,
@@ -1522,6 +1663,8 @@ class CurrentHotService:
         codes = [str(result.code).zfill(6) for result, *_ in rows]
         daily_basic_metrics = self._fetch_daily_basic_metrics(target_date, codes)
         financial_metrics = self._load_financial_metrics(codes)
+        price_streak_days = self._load_price_streak_days(codes, target_date)
+        price_position_pct = self._load_price_position_pct(codes, target_date)
         items = []
         item_context_by_code: dict[str, dict[str, Any]] = {}
         for result, candidate, stock_name, stock_industry, active_pool_rank in rows:
@@ -1558,6 +1701,8 @@ class CurrentHotService:
                     else None
                 ),
                 "pullback_negative_flags": pullback_negative_flags,
+                "price_streak_days": price_streak_days.get(str(result.code).zfill(6)),
+                "price_position_pct": price_position_pct.get(str(result.code).zfill(6)),
             }
             self._merge_market_financial_metrics(
                 item,

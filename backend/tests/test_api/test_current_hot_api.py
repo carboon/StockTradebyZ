@@ -867,6 +867,8 @@ def test_generate_current_hot_intraday_creates_snapshot(test_client_with_db: Any
     assert row.code == "600000"
     assert row.close_price == 12.5
     assert row.details_json["midday_price"] == 12.4
+    assert round(row.change_pct or 0, 2) == 3.33
+    assert round(row.details_json["latest_change_pct"], 2) == 4.17
     assert row.details_json["turnover_rate"] == 2.5
     assert row.details_json["volume_ratio"] == 4.6168
     assert row.details_json["intraday_metrics"]["elapsed_ratio"] == 0.5

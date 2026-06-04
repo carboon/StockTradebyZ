@@ -1,7 +1,8 @@
 # 前端开发环境 Dockerfile
 # 支持热更新 (HMR)
 
-FROM node:20-bookworm-slim
+ARG NODE_BASE_IMAGE=node:20-bookworm-slim
+FROM ${NODE_BASE_IMAGE}
 
 ARG NPM_REGISTRY=https://registry.npmjs.org/
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}

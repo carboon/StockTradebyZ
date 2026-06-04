@@ -1383,6 +1383,8 @@ def get_current_hot_aggregate(
             roe=item.get("roe"),
             risk_flag=item.get("risk_flag"),
             consecutive_days=int(item.get("consecutive_days") or 1),
+            price_streak_days=item.get("price_streak_days"),
+            price_position_pct=item.get("price_position_pct"),
         )
         for item in payload.get("candidates", [])
     ]
@@ -1414,6 +1416,8 @@ def get_current_hot_aggregate(
             pullback_quality=item.get("pullback_quality"),
             pullback_negative_flags=item.get("pullback_negative_flags"),
             risk_flag=item.get("risk_flag"),
+            price_streak_days=item.get("price_streak_days"),
+            price_position_pct=item.get("price_position_pct"),
         )
         for item in payload.get("results", [])
     ]
@@ -1534,6 +1538,8 @@ def get_current_hot_candidates(
             roe=item.get("roe"),
             # risk_flag=item.get("risk_flag"),  # 已屏蔽
             consecutive_days=int(item.get("consecutive_days") or 1),
+            price_streak_days=item.get("price_streak_days"),
+            price_position_pct=item.get("price_position_pct"),
         )
         for item in payload.get("candidates", [])
     ]
@@ -1585,6 +1591,8 @@ def get_current_hot_results(
             pullback_quality=item.get("pullback_quality"),
             pullback_negative_flags=item.get("pullback_negative_flags"),
             # risk_flag=item.get("risk_flag"),  # 已屏蔽
+            price_streak_days=item.get("price_streak_days"),
+            price_position_pct=item.get("price_position_pct"),
         )
         for item in payload.get("results", [])
     ]

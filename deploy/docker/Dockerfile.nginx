@@ -10,9 +10,10 @@
 # - SPA history 路由回退
 
 ARG NGINX_BASE_IMAGE=nginx:1.27-alpine
+ARG NODE_BASE_IMAGE=node:20-bookworm-slim
 
 # 构建阶段 - 使用前端构建 Dockerfile
-FROM node:20-bookworm-slim AS frontend-builder
+FROM ${NODE_BASE_IMAGE} AS frontend-builder
 
 ARG NPM_REGISTRY=https://registry.npmjs.org/
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}

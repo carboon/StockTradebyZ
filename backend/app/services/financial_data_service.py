@@ -27,7 +27,12 @@ class FinancialDataService:
         self.db = db
         self.tushare = tushare_service or TushareService()
 
-    def get_or_refresh(self, ts_codes: list[str]) -> dict[str, dict[str, Any]]:
+    def get_or_refresh(
+        self,
+        ts_codes: list[str],
+        *,
+        refresh_incomplete: bool = False,
+    ) -> dict[str, dict[str, Any]]:
         """查询优先：先查 stock_financials，缺失/过期的走 Tushare 刷新。
 
         Returns:
@@ -52,7 +57,12 @@ class FinancialDataService:
 
         for code6 in codes_6:
             row = cached_map.get(code6)
-            if row and row.fetched_at and row.fetched_at >= cutoff:
+            row_incomplete = (
+                refresh_incomplete
+                and row is not None
+                and (row.roe is None or row.netprofit_yoy is None)
+            )
+            if row and row.fetched_at and row.fetched_at >= cutoff and not row_incomplete:
                 result[code6] = {
                     "roe": row.roe,
                     "netprofit_yoy": row.netprofit_yoy,

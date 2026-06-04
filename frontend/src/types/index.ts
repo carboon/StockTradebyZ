@@ -163,6 +163,8 @@ export interface CurrentHotCandidate {
   pb?: number | null
   netprofit_yoy?: number | null
   roe?: number | null
+  price_streak_days?: number | null
+  price_position_pct?: number | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null
@@ -190,6 +192,8 @@ export interface CurrentHotAnalysisResult {
   pb?: number | null
   netprofit_yoy?: number | null
   roe?: number | null
+  price_streak_days?: number | null
+  price_position_pct?: number | null
   prefilter_passed?: boolean | null
   prefilter_summary?: string | null
   prefilter_blocked_by?: string[] | null

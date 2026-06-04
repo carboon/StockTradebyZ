@@ -227,21 +227,20 @@
                     </el-tag>
                   </div>
                   <div class="mobile-analysis-item__meta">
-                    <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
+                    <el-tag v-if="!isCurrentHotTab" :type="getSignalTypeTag(row.signal_type)" size="small">
                       {{ getSignalTypeLabel(row.signal_type) }}
-                    </el-tag>
-                    <el-tag
-                      v-if="isCurrentHotTab && isRiskCandidate(row)"
-                      :type="getRiskFlagTagType(getRiskFlagLevel(row))"
-                      size="small"
-                    >
-                      {{ getRiskFlagLabel(getRiskFlagLevel(row)) }}
                     </el-tag>
                     <el-tag v-if="isCurrentHotTab" :type="getBooleanTagType(getAnalysisB1Passed(row))" size="small">
                       B1 {{ getBooleanTagLabel(getAnalysisB1Passed(row)) }}
                     </el-tag>
                     <el-tag v-if="isCurrentHotTab" type="info" size="small">
                       活跃 {{ formatActivePoolRank(row.active_pool_rank) }}
+                    </el-tag>
+                    <el-tag v-if="isCurrentHotTab" :type="getPriceStreakTagType(getAnalysisPriceStreakDays(row))" size="small">
+                      连涨 {{ formatPriceStreakDays(getAnalysisPriceStreakDays(row)) }}
+                    </el-tag>
+                    <el-tag v-if="isCurrentHotTab" type="info" size="small">
+                      位置 {{ formatPricePositionPct(getAnalysisPricePositionPct(row)) }}
                     </el-tag>
                     <el-tag v-if="activeConceptFilterApplied" type="warning" size="small">
                       相关 {{ formatCandidateConceptRelevance(row.code) }}
@@ -523,40 +522,6 @@
                   当前排序：{{ activeCandidateSortLabel }}
                 </div>
 
-                <div v-if="isCurrentHotTab && currentHotRiskRegime" class="risk-regime-banner">
-                  <div class="risk-regime-banner__header">
-                    <span class="risk-regime-banner__title">过热转弱预警</span>
-                    <div class="risk-regime-banner__tags">
-                      <el-tag :type="getRiskRegimeTagType(currentHotRiskRegime.level)" size="small">
-                        {{ getRiskRegimeLabel(currentHotRiskRegime.level) }}
-                      </el-tag>
-                      <el-tag v-if="currentHotRiskRegime.triggered" type="danger" size="small" effect="plain">
-                        已触发
-                      </el-tag>
-                      <el-tag
-                        v-if="currentHotRiskRegime.ai_review?.result?.confirmed_level"
-                        :type="getRiskRegimeTagType(currentHotRiskRegime.ai_review?.result?.confirmed_level)"
-                        size="small"
-                        effect="plain"
-                      >
-                        AI {{ getRiskRegimeLabel(currentHotRiskRegime.ai_review?.result?.confirmed_level) }}
-                      </el-tag>
-                    </div>
-                  </div>
-                  <p class="risk-regime-banner__summary">
-                    {{ currentHotRiskRegime.summary || '暂无明确市场级过热转弱信号。' }}
-                  </p>
-                  <div class="risk-regime-banner__meta">
-                    <span>总分 {{ formatRiskRegimeScore(currentHotRiskRegime.score) }}</span>
-                    <span>风险占比 {{ formatRatioPct(currentHotRiskRegime.risk_ratio) }}</span>
-                    <span>趋势启动 {{ formatRatioPct(currentHotRiskRegime.trend_start_ratio) }}</span>
-                    <span>AI置信 {{ formatAiConfidence(currentHotRiskRegime.ai_review?.result?.confidence) }}</span>
-                  </div>
-                  <div class="risk-regime-banner__hint">
-                    该预警基于全市场活跃股票样本，不基于你的自选热盘。
-                  </div>
-                </div>
-
                 <div class="table-header-tip">
                   <template v-if="tab.name === 'tomorrow-star'">
                     <span class="tip-item">· 筛选逻辑：通过 B1 策略筛选候选股票</span>
@@ -588,25 +553,6 @@
                       <el-tag :type="getBooleanTagType(row.b1_passed)" size="small">
                         {{ getBooleanTagLabel(row.b1_passed) }}
                       </el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column v-if="isCurrentHotTab" prop="signal_type" label="信号" width="88" align="center" sortable="custom" :sort-orders="candidateSortOrders">
-                    <template #default="{ row }">
-                      <el-tag :type="getSignalTypeTag(row.signal_type)" size="small">
-                        {{ getSignalTypeLabel(row.signal_type) }}
-                      </el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column v-if="isCurrentHotTab" label="风险" width="78" align="center">
-                    <template #default="{ row }">
-                      <el-tag
-                        v-if="isRiskCandidate(row)"
-                        :type="getRiskFlagTagType(getRiskFlagLevel(row))"
-                        size="small"
-                      >
-                        {{ getRiskFlagLabel(getRiskFlagLevel(row)) }}
-                      </el-tag>
-                      <span v-else>-</span>
                     </template>
                   </el-table-column>
                   <el-table-column v-if="!isCurrentHotTab" prop="tomorrow_star_pass" label="星" width="58" align="center">
@@ -696,6 +642,26 @@
                       <span :class="typeof row.change_pct === 'number' ? (row.change_pct > 0 ? 'text-up' : row.change_pct < 0 ? 'text-down' : '') : ''">
                         {{ typeof row.change_pct === 'number' ? row.change_pct.toFixed(2) + '%' : '-' }}
                       </span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="price_streak_days" label="连涨" width="58" align="center" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #default="{ row }">
+                      <span :class="getPriceStreakClass(row.price_streak_days)">
+                        {{ formatPriceStreakDays(row.price_streak_days) }}
+                      </span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column v-if="isCurrentHotTab" prop="price_position_pct" width="62" align="right" sortable="custom" :sort-orders="candidateSortOrders">
+                    <template #header>
+                      <el-tooltip
+                        content="当前收盘价在近120天最高价和最低价区间中的相对位置，越低越接近区间低位。"
+                        placement="top"
+                      >
+                        <span>位置</span>
+                      </el-tooltip>
+                    </template>
+                    <template #default="{ row }">
+                      {{ formatPricePositionPct(row.price_position_pct) }}
                     </template>
                   </el-table-column>
                   <el-table-column prop="turnover_rate" label="换手" width="60" align="right" sortable="custom" :sort-orders="candidateSortOrders">
@@ -1708,6 +1674,8 @@ type CandidateSortProp =
   | 'pb'
   | 'netprofit_yoy'
   | 'roe'
+  | 'price_streak_days'
+  | 'price_position_pct'
   | 'kdj_j'
   | 'industry'
   | 'b1_passed'
@@ -2067,6 +2035,8 @@ function mergeCurrentHotCandidateAnalysis(candidate: CurrentHotCandidate): Curre
     pb: candidate.pb ?? analysis.pb,
     netprofit_yoy: candidate.netprofit_yoy ?? analysis.netprofit_yoy,
     roe: candidate.roe ?? analysis.roe,
+    price_streak_days: candidate.price_streak_days ?? analysis.price_streak_days,
+    price_position_pct: candidate.price_position_pct ?? analysis.price_position_pct,
     sector_names: candidate.sector_names?.length ? candidate.sector_names : analysis.sector_names,
     board_group: candidate.board_group ?? analysis.board_group,
     prefilter_passed: candidate.prefilter_passed ?? analysis.prefilter_passed,
@@ -2091,6 +2061,8 @@ const activeCandidateSortLabel = computed(() => {
     pb: 'PB',
     netprofit_yoy: '净利',
     roe: 'ROE',
+    price_streak_days: '连涨',
+    price_position_pct: '位置',
     kdj_j: 'KDJ',
     industry: '板块',
     b1_passed: 'B1',
@@ -2266,6 +2238,12 @@ function getCandidateSortableValue(row: Candidate | CurrentHotCandidate, prop: C
   if (prop === 'active_pool_rank' && 'active_pool_rank' in row) {
     const rank = toFiniteNumber(row.active_pool_rank)
     return rank === null ? null : -rank
+  }
+  if (prop === 'price_streak_days' && 'price_streak_days' in row) {
+    return toFiniteNumber(row.price_streak_days)
+  }
+  if (prop === 'price_position_pct' && 'price_position_pct' in row) {
+    return toFiniteNumber(row.price_position_pct)
   }
   return toFiniteNumber(row[prop as keyof (Candidate | CurrentHotCandidate)] as number | string | null | undefined)
 }
@@ -2550,6 +2528,11 @@ function normalizeCandidateSortState(value: unknown): CandidateSortState {
     'turnover_rate',
     'volume_ratio',
     'active_pool_rank',
+    'pb',
+    'netprofit_yoy',
+    'roe',
+    'price_streak_days',
+    'price_position_pct',
     'kdj_j',
     'industry',
     'b1_passed',
@@ -4107,6 +4090,38 @@ function formatVolumeRatio(value?: number | null): string {
   return numericValue === null ? '-' : numericValue.toFixed(2)
 }
 
+function formatPriceStreakDays(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : String(Math.trunc(numericValue))
+}
+
+function getPriceStreakClass(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  if (numericValue === null) return ''
+  if (numericValue > 0) return 'text-up'
+  if (numericValue < 0) return 'text-down'
+  return ''
+}
+
+function getPriceStreakTagType(value?: number | null): 'success' | 'danger' | 'info' {
+  const numericValue = toFiniteNumber(value)
+  if (numericValue === null || numericValue === 0) return 'info'
+  return numericValue > 0 ? 'success' : 'danger'
+}
+
+function getAnalysisPriceStreakDays(row: AnalysisDisplayRow): number | null {
+  return 'price_streak_days' in row ? toFiniteNumber(row.price_streak_days) : null
+}
+
+function formatPricePositionPct(value?: number | null): string {
+  const numericValue = toFiniteNumber(value)
+  return numericValue === null ? '-' : `${numericValue.toFixed(0)}%`
+}
+
+function getAnalysisPricePositionPct(row: AnalysisDisplayRow): number | null {
+  return 'price_position_pct' in row ? toFiniteNumber(row.price_position_pct) : null
+}
+
 function formatNullableNumber(value?: number | null, digits = 2): string {
   const numericValue = toFiniteNumber(value)
   return numericValue === null ? '-' : numericValue.toFixed(digits)
@@ -4167,23 +4182,6 @@ function getScoreType(score?: number | null): string {
   return 'danger'
 }
 
-function getRiskFlagLevel(row: AnalysisDisplayRow | null | undefined): string | null {
-  if (!row || !('risk_flag' in row) || !row.risk_flag) return null
-  return row.risk_flag.level || null
-}
-
-function getRiskFlagLabel(level?: string | null): string {
-  if (level === 'high') return '高风险'
-  if (level === 'medium') return '观察'
-  return '低风险'
-}
-
-function getRiskFlagTagType(level?: string | null): 'danger' | 'warning' | 'info' {
-  if (level === 'high') return 'danger'
-  if (level === 'medium') return 'warning'
-  return 'info'
-}
-
 function isRiskCandidate(row: AnalysisDisplayRow | null | undefined): boolean {
   if (!row || !('risk_flag' in row) || !row.risk_flag) return false
   return ['high', 'medium'].includes(row.risk_flag?.level || '')
@@ -4192,30 +4190,6 @@ function isRiskCandidate(row: AnalysisDisplayRow | null | undefined): boolean {
 function getRiskFlagSummary(row: AnalysisDisplayRow | null | undefined): string {
   if (!row || !('risk_flag' in row) || !row.risk_flag) return ''
   return row.risk_flag.summary?.trim() || ''
-}
-
-function getRiskRegimeLabel(level?: string | null): string {
-  if (level === 'high') return '高警惕'
-  if (level === 'medium') return '转弱观察'
-  return '正常'
-}
-
-function getRiskRegimeTagType(level?: string | null): 'danger' | 'warning' | 'info' {
-  if (level === 'high') return 'danger'
-  if (level === 'medium') return 'warning'
-  return 'info'
-}
-
-function formatRiskRegimeScore(value?: number | null): string {
-  return typeof value === 'number' ? value.toFixed(1) : '-'
-}
-
-function formatRatioPct(value?: number | null): string {
-  return typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '-'
-}
-
-function formatAiConfidence(value?: number | null): string {
-  return typeof value === 'number' ? `${Math.round(value)}%` : '-'
 }
 
 function getSignalTypeLabel(signalType?: string | null): string {
@@ -5258,49 +5232,6 @@ $space-lg: 32px;
       &:last-child {
         margin-right: 0;
       }
-    }
-  }
-
-  .risk-regime-banner {
-    margin-bottom: 10px;
-    padding: 12px;
-    border-radius: 12px;
-    border: 1px solid #fed7aa;
-    background: linear-gradient(180deg, #fffbeb 0%, #fff7ed 100%);
-
-    &__header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 6px;
-    }
-
-    &__title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #9a3412;
-    }
-
-    &__tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    &__summary {
-      margin: 0 0 8px;
-      color: #7c2d12;
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    &__meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      color: #9a3412;
-      font-size: 12px;
     }
   }
 

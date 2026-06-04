@@ -1205,6 +1205,12 @@ class IntradayAnalysisService:
             return None
         return result
 
+    @staticmethod
+    def _calc_pct_change(price: Optional[float], base_price: Optional[float]) -> Optional[float]:
+        if price is None or base_price in (None, 0):
+            return None
+        return (price - base_price) / base_price * 100
+
     def _normalize_intraday_volume(self, history_df: pd.DataFrame, quote_row: pd.Series) -> Optional[float]:
         """Normalize Tushare rt_k volume before appending the temporary intraday candle."""
         volume = self._to_float(quote_row.get("vol"))
@@ -1247,14 +1253,12 @@ class IntradayAnalysisService:
             trade_date.isoformat(),
         )
         close_price = self._to_float(quote_row.get("close"))
+        open_price = self._to_float(quote_row.get("open"))
         midday_price, midday_time = self._extract_midday_price(minute_df, code)
         prev_close = self._to_float(frame.iloc[-2]["close"]) if len(frame) >= 2 else None
-        change_pct = None
-        if close_price is not None and prev_close not in (None, 0):
-            change_pct = (close_price - prev_close) / prev_close * 100
-        midday_change_pct = None
-        if midday_price is not None and prev_close not in (None, 0):
-            midday_change_pct = (midday_price - prev_close) / prev_close * 100
+        change_pct = self._calc_pct_change(close_price, open_price)
+        latest_prev_close_change_pct = self._calc_pct_change(close_price, prev_close)
+        midday_change_pct = self._calc_pct_change(midday_price, open_price)
         exit_plan = self.exit_plan_service.build_exit_plan(
             code=code,
             history_df=frame,
@@ -1300,7 +1304,7 @@ class IntradayAnalysisService:
             "code": code,
             "source_pick_date": source_pick_date,
             "snapshot_time": snapshot_time,
-            "open_price": self._to_float(quote_row.get("open")),
+            "open_price": open_price,
             "close_price": close_price,
             "high_price": self._to_float(quote_row.get("high")),
             "low_price": self._to_float(quote_row.get("low")),
@@ -1331,6 +1335,7 @@ class IntradayAnalysisService:
                 "midday_price": midday_price,
                 "latest_price": close_price,
                 "latest_change_pct": change_pct,
+                "latest_prev_close_change_pct": latest_prev_close_change_pct,
                 "midday_time": midday_time,
                 "analysis_basis": "基于前一交易日候选 + 当日11:30分时快照 + 当前实时价综合判断",
                 "previous_analysis": previous_analysis,

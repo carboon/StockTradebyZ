@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from app.models import Config, CurrentHotAnalysisResult, CurrentHotCandidate, CurrentHotRun, Stock, StockDaily
+from app.models import Config, CurrentHotAnalysisResult, CurrentHotCandidate, CurrentHotRun, Stock, StockDaily, StockFinancial
 from app.services.current_hot_service import CurrentHotService
 
 
@@ -96,6 +96,76 @@ def test_get_pool_entries_accepts_legacy_current_hot_pool_key(test_db) -> None:
     assert len(entries) == 1
     assert entries[0].code == "600000"
     assert entries[0].primary_sector == "周期性股票"
+
+
+@pytest.mark.service
+def test_load_financial_metrics_refreshes_missing_or_incomplete_cache(test_db) -> None:
+    test_db.add(Stock(code="600000", name="浦发银行", market="SH"))
+    test_db.add(Stock(code="000001", name="平安银行", market="SZ"))
+    test_db.add(StockFinancial(code="600000", netprofit_yoy=8.0, roe=None))
+    test_db.commit()
+
+    service = CurrentHotService(test_db)
+    with patch(
+        "app.services.current_hot_service.FinancialDataService.get_or_refresh",
+        return_value={
+            "600000": {"netprofit_yoy": 12.3, "roe": 4.5},
+            "000001": {"netprofit_yoy": 7.8, "roe": 6.1},
+        },
+    ) as mock_refresh:
+        result = service._load_financial_metrics(["600000", "000001"])
+
+    mock_refresh.assert_called_once_with(["600000", "000001"], refresh_incomplete=True)
+    assert result["600000"]["netprofit_yoy"] == 12.3
+    assert result["600000"]["roe"] == 4.5
+    assert result["000001"]["netprofit_yoy"] == 7.8
+    assert result["000001"]["roe"] == 6.1
+
+
+@pytest.mark.service
+def test_load_price_streak_days_uses_current_candle_direction(test_db) -> None:
+    dates = [date(2026, 5, day) for day in range(4, 9)]
+    test_db.add_all([
+        Stock(code="600000", name="连涨", market="SH"),
+        Stock(code="600001", name="今日转跌", market="SH"),
+        Stock(code="600002", name="平盘", market="SH"),
+    ])
+    test_db.add_all([
+        StockDaily(code="600000", trade_date=dates[0], open=10.0, close=9.8, high=10.1, low=9.7, volume=100),
+        StockDaily(code="600000", trade_date=dates[1], open=10.0, close=10.2, high=10.3, low=9.9, volume=100),
+        StockDaily(code="600000", trade_date=dates[2], open=10.1, close=10.3, high=10.4, low=10.0, volume=100),
+        StockDaily(code="600000", trade_date=dates[3], open=10.2, close=10.4, high=10.5, low=10.1, volume=100),
+        StockDaily(code="600000", trade_date=dates[4], open=10.3, close=10.5, high=10.6, low=10.2, volume=100),
+        StockDaily(code="600001", trade_date=dates[3], open=10.0, close=10.2, high=10.3, low=9.9, volume=100),
+        StockDaily(code="600001", trade_date=dates[4], open=10.2, close=10.0, high=10.3, low=9.9, volume=100),
+        StockDaily(code="600002", trade_date=dates[4], open=10.0, close=10.0, high=10.1, low=9.9, volume=100),
+    ])
+    test_db.commit()
+
+    result = CurrentHotService(test_db)._load_price_streak_days(
+        ["600000", "600001", "600002"],
+        dates[4],
+    )
+
+    assert result["600000"] == 4
+    assert result["600001"] == -1
+    assert result["600002"] == 0
+
+
+@pytest.mark.service
+def test_load_price_position_pct_uses_recent_120_day_range(test_db) -> None:
+    target_date = date(2026, 5, 8)
+    test_db.add(Stock(code="600000", name="区间位置", market="SH"))
+    test_db.add_all([
+        StockDaily(code="600000", trade_date=date(2026, 5, 6), open=10.0, close=12.0, high=12.0, low=10.0, volume=100),
+        StockDaily(code="600000", trade_date=date(2026, 5, 7), open=12.0, close=14.0, high=14.0, low=11.0, volume=100),
+        StockDaily(code="600000", trade_date=target_date, open=13.0, close=13.0, high=15.0, low=12.0, volume=100),
+    ])
+    test_db.commit()
+
+    result = CurrentHotService(test_db)._load_price_position_pct(["600000"], target_date)
+
+    assert result["600000"] == 60.0
 
 
 @pytest.mark.service

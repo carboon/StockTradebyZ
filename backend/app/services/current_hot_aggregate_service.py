@@ -24,7 +24,7 @@ from app.services.current_hot_service import CurrentHotService
 
 logger = logging.getLogger(__name__)
 
-_AGGREGATE_CACHE_KEY = "current_hot:aggregate:v2"
+_AGGREGATE_CACHE_KEY = "current_hot:aggregate:v5"
 _AGGREGATE_CACHE_TTL = 120  # seconds
 
 

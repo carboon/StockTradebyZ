@@ -184,6 +184,8 @@ class CurrentHotCandidateItem(BaseModel):
     roe: Optional[float] = None
     risk_flag: Optional[RiskFlagSummary] = None
     consecutive_days: int = 1
+    price_streak_days: Optional[int] = None
+    price_position_pct: Optional[float] = None
 
 
 class CurrentHotCandidatesResponse(BaseModel):
@@ -344,6 +346,8 @@ class CurrentHotAnalysisItem(BaseModel):
     pullback_quality: Optional[str] = None
     pullback_negative_flags: Optional[List[str]] = None
     risk_flag: Optional[RiskFlagSummary] = None
+    price_streak_days: Optional[int] = None
+    price_position_pct: Optional[float] = None
 
 
 class CurrentHotAnalysisResultResponse(BaseModel):

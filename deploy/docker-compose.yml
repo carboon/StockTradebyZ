@@ -161,6 +161,7 @@ services:
       context: ..
       dockerfile: deploy/docker/Dockerfile.frontend-dev
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:20-bookworm-slim}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     container_name: stocktrade-frontend-dev
     profiles:
@@ -183,6 +184,7 @@ services:
       context: ..
       dockerfile: deploy/docker/Dockerfile.nginx
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:20-bookworm-slim}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
         NGINX_BASE_IMAGE: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
     container_name: stocktrade-nginx
