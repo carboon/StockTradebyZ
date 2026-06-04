@@ -14,6 +14,7 @@ from app.config import settings
 from .event_classifier import event_classifier
 from .search_orchestrator import search_orchestrator
 from .evidence_ranker import evidence_ranker
+from .article_extractor import article_extractor
 from .entity_resolver import entity_resolver
 from .industry_chain_mapper import industry_chain_mapper
 from .market_realization_analyzer import market_realization_analyzer
@@ -107,23 +108,22 @@ class NewsEventAnalysisAgent:
                 status=AgentStatus.RUNNING,
             )
 
-            search_results = []
-            for q in queries[:self._max_queries_per_round]:
-                try:
-                    results = search_orchestrator.search(
-                        query=q,
-                        freshness="day",
-                        max_results=self._max_results_per_query,
-                        db=db,
-                    )
-                    search_results.extend(results)
-                except Exception as exc:
-                    logger.warning("搜索失败: query=%s error=%s", q, exc)
-
-            search_results = search_orchestrator.deduplicate(search_results)
+            try:
+                search_results = search_orchestrator.search_many(
+                    queries,
+                    freshness="day",
+                    max_results=self._max_results_per_query,
+                    db=db,
+                )
+            except Exception as exc:
+                logger.warning("搜索轮次失败: queries=%s error=%s", queries, exc)
+                search_results = []
             new_evidence = evidence_ranker.rank(
-                search_results, published_at=request.published_at,
+                search_results,
+                published_at=request.published_at,
+                query_text=f"{request.title} {request.summary}",
             )
+            self._enrich_evidence_content(new_evidence)
             for ev in new_evidence:
                 all_evidence.append(ev.model_dump())
 
@@ -169,15 +169,6 @@ class NewsEventAnalysisAgent:
                         "nodes": [],
                         "a_share_mapping": [ds],
                     })
-
-            if round_num == 1 and not search_results and self._has_llm:
-                return self._build_ready_result(
-                    task_id=task_id, request=request,
-                    classification=classification,
-                    evidence=all_evidence, entities=all_entities,
-                    realization=all_realization, chain_data=chain_data,
-                    rounds=rounds,
-                )
 
             if round_num == 1 and not search_results:
                 return self._analyze_without_llm(request, db=db, task_id=task_id)
@@ -246,6 +237,7 @@ class NewsEventAnalysisAgent:
         rounds: list[RoundRecord],
     ) -> AnalysisResult:
         try:
+            allowed_stock_codes = self._allowed_stock_codes(chain_data, entities)
             llm_result = self._llm_final_analysis(
                 title=request.title,
                 summary=request.summary,
@@ -255,9 +247,12 @@ class NewsEventAnalysisAgent:
                 event_time=request.event_time or "",
                 classification=classification.model_dump(),
                 evidence=evidence,
+                evidence_quality=self._summarize_evidence_quality(evidence),
+                missing_slots=self._detect_missing_slots(evidence, chain_data, realization),
                 entities=entities,
                 chain_data=chain_data,
                 realization=realization,
+                allowed_stock_codes=allowed_stock_codes,
                 round_num=len(rounds),
             )
         except Exception as exc:
@@ -274,7 +269,7 @@ class NewsEventAnalysisAgent:
             RelatedStock(**s) if isinstance(s, dict) else RelatedStock()
             for s in llm_result.get("related_stocks", [])
         ]
-        related_stocks = self._select_top_stocks(raw_stocks, max_count=5)
+        related_stocks = self._select_top_stocks(raw_stocks, max_count=5, allowed_codes=allowed_stock_codes)
 
         return AnalysisResult(
             status=AgentStatus.READY,
@@ -355,9 +350,12 @@ class NewsEventAnalysisAgent:
             event_time=kwargs.get("event_time", ""),
             classification=json.dumps(kwargs.get("classification", {}), ensure_ascii=False, indent=2),
             evidence=json.dumps(kwargs.get("evidence", []), ensure_ascii=False, indent=2),
+            evidence_quality=json.dumps(kwargs.get("evidence_quality", {}), ensure_ascii=False, indent=2),
+            missing_slots=json.dumps(kwargs.get("missing_slots", []), ensure_ascii=False, indent=2),
             entities=json.dumps(kwargs.get("entities", []), ensure_ascii=False, indent=2),
             industry_chains=json.dumps(kwargs.get("chain_data", []), ensure_ascii=False, indent=2),
             market_realization=json.dumps(kwargs.get("realization", []), ensure_ascii=False, indent=2),
+            allowed_stock_codes=json.dumps(kwargs.get("allowed_stock_codes", []), ensure_ascii=False, indent=2),
             round_num=kwargs.get("round_num", 1),
             max_rounds=self._max_rounds,
         )
@@ -368,6 +366,55 @@ class NewsEventAnalysisAgent:
             temperature=0.2,
         )
         return result
+
+    @staticmethod
+    def _summarize_evidence_quality(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+        levels: dict[str, int] = {}
+        for item in evidence:
+            level = str(item.get("source_level") or "C")
+            levels[level] = levels.get(level, 0) + 1
+        high_quality = levels.get("A", 0) + levels.get("B", 0)
+        return {
+            "total": len(evidence),
+            "by_level": levels,
+            "high_quality_count": high_quality,
+            "has_high_quality": high_quality > 0,
+        }
+
+    @staticmethod
+    def _detect_missing_slots(
+        evidence: list[dict[str, Any]],
+        chain_data: list[dict[str, Any]],
+        realization: list[dict[str, Any]],
+    ) -> list[str]:
+        missing: list[str] = []
+        high_quality = sum(1 for item in evidence if str(item.get("source_level") or "") in {"A", "B"})
+        if high_quality == 0:
+            missing.append("缺少 A/B 级证据")
+        if not chain_data:
+            missing.append("缺少产业链映射")
+        if not realization:
+            missing.append("缺少行情兑现数据")
+        return missing
+
+    @staticmethod
+    def _allowed_stock_codes(chain_data: list[dict[str, Any]], entities: list[dict[str, Any]]) -> list[str]:
+        codes: list[str] = []
+        seen: set[str] = set()
+        for entity in entities:
+            code = str(entity.get("matched_code") or "")
+            if code and code not in seen:
+                seen.add(code)
+                codes.append(code)
+        for chain in chain_data:
+            for item in chain.get("a_share_mapping") or []:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code") or "")
+                if code and code not in seen:
+                    seen.add(code)
+                    codes.append(code)
+        return codes
 
     @staticmethod
     def _call_llm_json(system_prompt: str, user_prompt: str,
@@ -523,8 +570,52 @@ class NewsEventAnalysisAgent:
     def _extract_stocks_from_evidence(
         self, evidence: list[dict[str, Any]], db: Optional[Session] = None,
     ) -> list[dict[str, Any]]:
-        import re
-        if not db:
+        if not db or not evidence:
+            return []
+
+        all_text = "\n".join(
+            f"标题：{e.get('title','')}\n摘要：{e.get('summary','')}"
+            for e in evidence[:15]
+        )
+
+        codes_in_text: set[str] = set()
+        import re as _re
+        for m in _re.finditer(r"(\d{6})\.(SZ|SH|BJ)", all_text, _re.IGNORECASE):
+            codes_in_text.add(f"{m.group(1)}.{m.group(2).upper()}")
+
+        names_from_llm = self._llm_extract_stock_names(all_text)
+        all_names: set[str] = set(names_from_llm)
+        for m in _re.finditer(r"([\u4e00-\u9fff]{2,6}(?:科技|股份|集团|控股|电子|通信|医药|能源|汽车|银行|电器|光电|微电|智能|生物))", all_text):
+            name = m.group(1)
+            if len(name) >= 3:
+                all_names.add(name)
+
+        if not codes_in_text and not all_names:
+            return []
+
+        try:
+            from app.models import Stock
+            found = db.query(Stock).filter(
+                Stock.code.in_(list(codes_in_text))
+                | Stock.name.in_(list(all_names))
+            ).limit(30).all()
+
+            results: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for s in found:
+                code = s.code or ""
+                name = s.name or ""
+                if code in seen:
+                    continue
+                seen.add(code)
+                results.append({
+                    "code": code, "name": name,
+                    "relation": "搜索证据关联",
+                    "strength": "medium",
+                    "reason": "搜索结果中提及，经本地股票库确认",
+                })
+            return results
+        except Exception:
             return []
 
         all_text = " ".join(
@@ -576,8 +667,13 @@ class NewsEventAnalysisAgent:
 
     @staticmethod
     def _select_top_stocks(
-        stocks: list[RelatedStock], max_count: int = 5,
+        stocks: list[RelatedStock],
+        max_count: int = 5,
+        allowed_codes: list[str] | None = None,
     ) -> list[RelatedStock]:
+        if allowed_codes is not None:
+            allowed = set(allowed_codes)
+            stocks = [stock for stock in stocks if stock.code in allowed]
         if len(stocks) <= max_count:
             return stocks
 
@@ -587,6 +683,46 @@ class NewsEventAnalysisAgent:
             key=lambda s: strength_order.get(s.mapping_strength.value if hasattr(s.mapping_strength, 'value') else str(s.mapping_strength), 3),
         )
         return sorted_stocks[:max_count]
+
+    def _llm_extract_stock_names(self, evidence_text: str) -> list[str]:
+        prompt = (
+            "从以下搜索文本中，提取所有可能被提及的A股公司名称（只输出名称，不要代码）。\n"
+            "如果没有明确的A股公司，输出空列表。\n\n"
+            f"{evidence_text[:4000]}\n\n"
+            '只输出 JSON: {"names": ["公司名1", "公司名2"]}'
+        )
+        try:
+            result = self._call_llm_json(
+                system_prompt="你是A股市场数据提取助手。",
+                user_prompt=prompt,
+                temperature=0.1,
+            )
+            names = result.get("names", [])
+            return [str(n) for n in names if isinstance(n, str) and len(n) >= 2]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _enrich_evidence_content(evidence_items: list[Any], max_items: int = 3) -> None:
+        enriched = 0
+        for ev in evidence_items:
+            level = getattr(ev, "source_level", "")
+            level_text = level.value if hasattr(level, "value") else str(level)
+            if level_text not in {"A", "B"}:
+                continue
+            if not getattr(ev, "url", ""):
+                continue
+            if len(getattr(ev, "summary", "") or "") >= 500:
+                continue
+            article = article_extractor.extract(ev.url)
+            if not article or not article.get("content"):
+                continue
+            ev.summary = article["content"][:1200]
+            if article.get("title") and not ev.title:
+                ev.title = article["title"]
+            enriched += 1
+            if enriched >= max_items:
+                return
 
     @staticmethod
     def _match_broader_keywords(text: str) -> list[str]:
@@ -599,6 +735,9 @@ class NewsEventAnalysisAgent:
             "机器人": ["机器人", "自动化", "智能制造"],
             "消费电子": ["消费电子", "手机", "耳机", "MR"],
             "贵金属": ["白银", "黄金", "银价", "金价", "贵金属"],
+            "医药": ["医药", "制药", "创新药", "仿制药", "FDA", "biotech", "pharma"],
+            "减肥药": ["减肥药", "减重", "GLP-1", "司美格鲁肽", "替尔泊肽"],
+            "CXO": ["CXO", "CRO", "CDMO", "药明", "康龙"],
         }
         matched = []
         text_lower = text.lower()

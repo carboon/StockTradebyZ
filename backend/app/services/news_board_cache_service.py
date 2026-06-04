@@ -11,6 +11,7 @@ import logging
 import re
 import time as _time_module
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -105,6 +106,11 @@ FINGERPRINT_KEY_SIM = "news:near:"
 KEY_SYNC_PREFIX = "news:sync:"
 LOCK_KEY = "news:update_lock"
 STATUS_KEY = "news:status"
+ENTITY_BUCKET_SECONDS = 1800
+NEAR_BUCKET_SECONDS = 900
+TITLE_SIMILARITY_THRESHOLD = 0.86
+ENTITY_TITLE_SIMILARITY_THRESHOLD = 0.72
+ENTITY_OVERLAP_THRESHOLD = 0.70
 
 
 class NewsBoardCacheService:
@@ -149,43 +155,50 @@ class NewsBoardCacheService:
                 message="Redis 不可用，新闻缓存服务暂时无法提供服务。",
             )
 
-        members = raw.zrevrangebyscore(KEY_INDEX_ZSET, max_ts, min_ts, start=0, num=limit + 1)
-        if not members:
-            return NewsBoardItemsResponse(
-                window_hours=window_hours,
-                generated_at=now,
-                items=[],
-                sources=[],
-                duplicate_count=0,
-                message=None,
-            )
-
-        has_more = len(members) > limit
-        member_slice = members[:limit]
-
-        item_ids = [member[0] for member in member_slice]
-
-        full_keys = [f"{KEY_ITEM_PREFIX}{ik}" for ik in item_ids]
-        raw_items = raw.mget(full_keys)
-
         items: list[NewsBoardItem] = []
-        for ik in item_ids:
-            data = raw_items.get(f"{KEY_ITEM_PREFIX}{ik}")
-            if data is None:
-                continue
-            try:
-                item = NewsBoardItem(**data)
-                items.append(item)
-            except Exception:
-                logger.warning("解析缓存新闻条目失败: %s", ik)
-                continue
+        stale_ids: list[str] = []
+        offset = 0
+        batch_size = max(limit * 2, 50)
+        exhausted = False
 
-        has_more = len(members) > limit
+        while len(items) <= limit:
+            members = raw.zrevrangebyscore(KEY_INDEX_ZSET, max_ts, min_ts, start=offset, num=batch_size)
+            if not members:
+                exhausted = True
+                break
+            offset += len(members)
+            if len(members) < batch_size:
+                exhausted = True
+
+            item_ids = [_redis_member_text(member[0]) for member in members]
+            full_keys = [f"{KEY_ITEM_PREFIX}{ik}" for ik in item_ids]
+            raw_items = raw.mget(full_keys)
+
+            for item_id in item_ids:
+                data = raw_items.get(f"{KEY_ITEM_PREFIX}{item_id}")
+                if data is None:
+                    stale_ids.append(item_id)
+                    continue
+                try:
+                    item = NewsBoardItem(**data)
+                    items.append(item)
+                    if len(items) > limit:
+                        break
+                except Exception:
+                    logger.warning("解析缓存新闻条目失败: %s", item_id)
+                    stale_ids.append(item_id)
+            if exhausted:
+                break
+
+        if stale_ids:
+            raw.zrem(KEY_INDEX_ZSET, *stale_ids)
+
+        has_more = len(items) > limit
 
         return NewsBoardItemsResponse(
             window_hours=window_hours,
             generated_at=now,
-            items=items,
+            items=items[:limit],
             sources=[],
             duplicate_count=0,
             has_more=has_more,
@@ -275,7 +288,7 @@ class NewsBoardCacheService:
                 message=None,
             )
 
-        item_ids = [member[0] for member in members]
+        item_ids = [_redis_member_text(member[0]) for member in members]
         full_keys = [f"{KEY_ITEM_PREFIX}{ik}" for ik in item_ids]
         raw_items = raw.mget(full_keys)
 
@@ -394,7 +407,7 @@ class NewsBoardCacheService:
 
         service = TushareService()
         if not service.token:
-            return [], None
+            return [], f"{source_name}: Tushare token 未配置"
 
         start_text = start_dt.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
         end_text = end_dt.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -578,24 +591,68 @@ class NewsBoardCacheService:
         # Check entity + time bucket match (30 min)
         if fps.get("entity"):
             entity_fp = fps["entity"]
-            time_bucket = int(event_ts // 1800)
+            time_bucket = int(event_ts // ENTITY_BUCKET_SECONDS)
             combined_fp = f"{entity_fp}:{time_bucket}"
             fp_key = f"{KEY_FINGERPRINT_PREFIX}{combined_fp}"
-            existing = raw.get(fp_key)
-            if existing is not None:
+            existing_id = raw.get(fp_key)
+            existing_item = NewsBoardCacheService._get_cached_item(existing_id) if existing_id is not None else None
+            if existing_item and NewsBoardCacheService._is_similar_event(item, existing_item):
                 return True, combined_fp
 
         # Check cross-source near-duplicate via title similarity
         normalized = NewsBoardCacheService._strip_title_markers(item.title)
         if len(normalized) >= 12:
             near_fp = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:24]
-            time_bucket = int(event_ts // 900)
+            time_bucket = int(event_ts // NEAR_BUCKET_SECONDS)
             near_key = f"{FINGERPRINT_KEY_SIM}{near_fp}:{time_bucket}"
             existing_near = raw.get(near_key)
-            if existing_near is not None and existing_near != item.id:
+            existing_item = NewsBoardCacheService._get_cached_item(existing_near) if existing_near is not None else None
+            if existing_item and existing_item.id != item.id and NewsBoardCacheService._title_similarity(item.title, existing_item.title) >= TITLE_SIMILARITY_THRESHOLD:
                 return True, near_fp
 
         return False, None
+
+    @staticmethod
+    def _get_cached_item(item_id: Any) -> NewsBoardItem | None:
+        if item_id is None:
+            return None
+        item_key = f"{KEY_ITEM_PREFIX}{_redis_member_text(item_id)}"
+        data = cache.get(item_key)
+        if data is None:
+            return None
+        try:
+            return NewsBoardItem(**data)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _title_similarity(left: str, right: str) -> float:
+        left_norm = NewsBoardCacheService._strip_title_markers(left)
+        right_norm = NewsBoardCacheService._strip_title_markers(right)
+        if not left_norm or not right_norm:
+            return 0.0
+        return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+    @staticmethod
+    def _entity_overlap(left: NewsBoardItem, right: NewsBoardItem) -> float:
+        left_entities = NewsBoardCacheService.extract_news_entities(left.title, left.summary)
+        right_entities = NewsBoardCacheService.extract_news_entities(right.title, right.summary)
+        left_set = set(left_entities.get("companies", [])) | set(left_entities.get("keywords", []))
+        right_set = set(right_entities.get("companies", [])) | set(right_entities.get("keywords", []))
+        if not left_set or not right_set:
+            return 0.0
+        return len(left_set & right_set) / max(len(left_set), len(right_set))
+
+    @staticmethod
+    def _is_similar_event(left: NewsBoardItem, right: NewsBoardItem) -> bool:
+        title_similarity = NewsBoardCacheService._title_similarity(left.title, right.title)
+        if title_similarity >= TITLE_SIMILARITY_THRESHOLD:
+            return True
+        entity_overlap = NewsBoardCacheService._entity_overlap(left, right)
+        return (
+            entity_overlap >= ENTITY_OVERLAP_THRESHOLD
+            and title_similarity >= ENTITY_TITLE_SIMILARITY_THRESHOLD
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -632,13 +689,20 @@ class NewsBoardCacheService:
 
         self.cleanup_expired_indexes(now=now)
 
+        sources_updated = len(TUSHARE_NEWS_SOURCES) - len(errors)
+        status = "ok"
+        if errors and sources_updated == 0:
+            status = "error"
+        elif errors:
+            status = "partial"
+
         return {
-            "status": "ok",
+            "status": status,
             "fetched": total_fetched,
             "inserted": total_inserted,
             "duplicate": total_duplicate,
             "errors": errors,
-            "sources_updated": len(TUSHARE_NEWS_SOURCES) - len(errors),
+            "sources_updated": sources_updated,
         }
 
     def _write_item(self, item: NewsBoardItem) -> None:
@@ -672,11 +736,19 @@ class NewsBoardCacheService:
             raw.expireat(abs_fp_key, expiry_ts)
             raw.zadd(KEY_FINGERPRINT_ZSET, {fp_key: event_ts})
 
+        if fps.get("entity"):
+            entity_bucket = int(event_ts // ENTITY_BUCKET_SECONDS)
+            entity_bucket_fp = f"{fps['entity']}:{entity_bucket}"
+            entity_bucket_key = f"{KEY_FINGERPRINT_PREFIX}{entity_bucket_fp}"
+            raw.set(entity_bucket_key, item.id, ttl=None)
+            raw.expireat(entity_bucket_key, expiry_ts)
+            raw.zadd(KEY_FINGERPRINT_ZSET, {entity_bucket_fp: event_ts})
+
         # Near-duplicate fingerprint
         normalized = self._strip_title_markers(item.title)
         if len(normalized) >= 12:
             near_hash = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:24]
-            time_bucket = int(event_ts // 900)
+            time_bucket = int(event_ts // NEAR_BUCKET_SECONDS)
             near_key = f"{FINGERPRINT_KEY_SIM}{near_hash}:{time_bucket}"
             raw.set(near_key, item.id, ttl=None)
             raw.expireat(near_key, expiry_ts)
@@ -846,6 +918,12 @@ def _infer_sentiment(text: str) -> str:
 def _stable_id(*, title: str, source: str, published_at: datetime) -> str:
     raw = f"{title}|{source}|{published_at.isoformat()}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _redis_member_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
 
 
 def _infer_attention_level(title: str, summary: str) -> str:

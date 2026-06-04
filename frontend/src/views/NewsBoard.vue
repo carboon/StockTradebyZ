@@ -24,6 +24,16 @@
       </div>
     </section>
 
+    <el-alert
+      v-if="loadError"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="page-alert"
+      title="消息服务暂不可用"
+      :description="loadError"
+    />
+
     <section class="news-board-layout">
       <main class="news-stream-panel">
         <div class="panel-header">
@@ -41,9 +51,14 @@
 
         <div v-if="searchActive && newsItems.length > 0" class="search-prompt">
           <span class="search-prompt-text">搜索 "{{ searchKeyword }}" 找到 {{ newsItems.length }} 条结果。若想查看详细分析请点击</span>
-          <el-button type="primary" size="small" :icon="DataAnalysis" :loading="analyzingBatch" @click="analyzeBatch">
-            综合分析
-          </el-button>
+          <div class="search-prompt-actions">
+            <el-button size="small" :icon="CopyDocument" @click="copyAllSearchNews">
+              复制全部
+            </el-button>
+            <el-button type="primary" size="small" :icon="DataAnalysis" :loading="analyzingBatch" @click="analyzeBatch">
+              综合分析
+            </el-button>
+          </div>
         </div>
 
         <div v-if="newsItems.length > 0" ref="scrollContainer" class="news-scroll" @scroll="onScroll">
@@ -64,6 +79,13 @@
                 @click.stop="analyzeDetailForItem(item)"
               >
                 详情分析
+              </el-button>
+              <el-button
+                size="small"
+                :icon="CopyDocument"
+                @click.stop="copyNewsItem(item)"
+              >
+                复制
               </el-button>
               <span class="news-time">{{ formatRelativeTime(item.eventTime || item.publishedAt) }}</span>
             </div>
@@ -94,7 +116,7 @@
               :disabled="newsItems.length === 0"
               @click="analyzeBatch"
             >
-              查询结果分析 {{ newsItems.length }}条
+              综合分析
             </el-button>
           </div>
 
@@ -136,9 +158,11 @@
               <div class="detail-label">高权重消息</div>
               <div class="batch-items">
                 <div v-for="(ki, i) in batchResult.key_items" :key="i" class="batch-item-row">
-                  <el-tag :type="weightTagType(ki.weight)" size="small">{{ weightLabel(ki.weight) }}</el-tag>
-                  <span class="batch-item-title">{{ ki.title }}</span>
-                  <span v-if="ki.reason" class="batch-item-reason">— {{ ki.reason }}</span>
+                  <el-tag class="batch-item-weight" :type="weightTagType(ki.weight)" size="small">{{ weightLabel(ki.weight) }}</el-tag>
+                  <div class="batch-item-content">
+                    <div class="batch-item-title">{{ ki.title }}</div>
+                    <div v-if="ki.reason" class="batch-item-reason">{{ ki.reason }}</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -152,7 +176,7 @@
           </div>
 
           <div v-else-if="!analyzingBatch" class="empty-hint">
-            点击上方按钮，对搜索结果进行综合分析
+            点击上方“综合分析”，对搜索结果进行分析
           </div>
         </template>
 
@@ -233,7 +257,8 @@
 
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { DataAnalysis, Refresh, Search } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { CopyDocument, DataAnalysis, Refresh, Search } from '@element-plus/icons-vue'
 
 interface NewsItem {
   id: string
@@ -706,6 +731,74 @@ function openSource(item: NewsItem) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+async function copyNewsItem(item: NewsItem) {
+  const copied = await writeClipboard(formatNewsForCopy(item))
+  if (copied) {
+    ElMessage.success('消息已复制')
+  } else {
+    ElMessage.warning('复制失败，请检查浏览器剪贴板权限')
+  }
+}
+
+async function copyAllSearchNews() {
+  if (!newsItems.value.length) return
+  const title = searchActive.value && searchKeyword.value.trim()
+    ? `搜索关键词：${searchKeyword.value.trim()}`
+    : '消息列表'
+  const content = [
+    title,
+    `消息数量：${newsItems.value.length}`,
+    '',
+    newsItems.value.map((item, index) => formatNewsForCopy(item, index + 1)).join('\n\n'),
+  ].join('\n')
+  const copied = await writeClipboard(content)
+  if (copied) {
+    ElMessage.success(`已复制 ${newsItems.value.length} 条消息`)
+  } else {
+    ElMessage.warning('复制失败，请检查浏览器剪贴板权限')
+  }
+}
+
+function formatNewsForCopy(item: NewsItem, index?: number) {
+  const lines = [
+    `${index ? `${index}. ` : ''}${item.title}`,
+    `时间：${formatDateTime(item.eventTime || item.publishedAt)}`,
+  ]
+  if (item.summary) lines.push(`摘要：${item.summary}`)
+  if (item.region) lines.push(`地区：${item.region}`)
+  if (item.relatedStocks?.length) {
+    lines.push(`关联股票：${item.relatedStocks.map(stock => `${stock.name}(${stock.code})`).join('、')}`)
+  }
+  const url = item.sourceUrl || item.url
+  if (url) lines.push(`链接：${url}`)
+  return lines.join('\n')
+}
+
+async function writeClipboard(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // fallback below
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
+
 function formatRelativeTime(value: string) {
   const minutes = Math.max(1, Math.round((Date.now() - new Date(value).getTime()) / 60000))
   if (minutes < 60) return `${minutes}分钟前`
@@ -811,6 +904,7 @@ function formatDateTime(value: string) {
 .search-prompt {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
   padding: 10px 14px;
   background: #eff6ff;
@@ -822,6 +916,15 @@ function formatDateTime(value: string) {
 .search-prompt-text {
   color: #2563eb;
   font-size: 13px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.search-prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .news-scroll {
@@ -943,22 +1046,42 @@ function formatDateTime(value: string) {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 6px 8px;
+  width: 100%;
+  padding: 8px 10px;
   background: #fff;
-  border-radius: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
   font-size: 13px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.batch-item-weight {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.batch-item-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .batch-item-title {
   color: #0f172a;
-  flex: 1;
-  min-width: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .batch-item-reason {
-  color: #94a3b8;
+  color: #64748b;
   font-size: 12px;
-  white-space: nowrap;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .selected-title {
@@ -1172,18 +1295,131 @@ function formatDateTime(value: string) {
 }
 
 @media (max-width: 760px) {
+  .news-board-page {
+    gap: 10px;
+  }
+
   .news-board-toolbar,
   .toolbar-actions {
     flex-direction: column;
     align-items: stretch;
   }
 
+  .news-board-toolbar,
+  .news-stream-panel,
+  .analysis-panel {
+    border-radius: 6px;
+  }
+
+  .news-board-toolbar {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .toolbar-main {
+    min-width: 0;
+  }
+
+  .toolbar-title {
+    font-size: 18px;
+  }
+
+  .toolbar-actions {
+    gap: 8px;
+  }
+
   .keyword-input {
     width: 100%;
   }
 
+  .news-stream-panel,
+  .analysis-panel {
+    padding: 10px;
+  }
+
+  .panel-header {
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .panel-header h3 {
+    font-size: 15px;
+  }
+
+  .panel-header p {
+    font-size: 12px;
+  }
+
+  .search-prompt {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 10px;
+  }
+
+  .search-prompt-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
   .news-scroll {
     min-height: 0;
+    gap: 8px;
+    padding-right: 0;
+  }
+
+  .news-item {
+    padding: 10px;
+    border-radius: 6px;
+  }
+
+  .news-item__top {
+    gap: 6px;
+  }
+
+  .news-item__top .el-button {
+    padding: 6px 8px;
+  }
+
+  .news-time {
+    margin-left: auto;
+  }
+
+  .news-title {
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  .news-summary {
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .analysis-panel {
+    margin-bottom: 12px;
+  }
+
+  .detail-result {
+    max-height: none;
+    padding: 10px;
+  }
+
+  .detail-section {
+    margin-bottom: 12px;
+  }
+
+  .batch-theme-header,
+  .detail-status,
+  .selected-meta,
+  .stock-meta {
+    align-items: flex-start;
+  }
+
+  .evidence-item {
+    align-items: flex-start;
+  }
+
+  .evidence-source {
+    white-space: normal;
   }
 }
 </style>

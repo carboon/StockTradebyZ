@@ -54,11 +54,13 @@ class NewsBoardUpdateScheduler:
         return await asyncio.to_thread(self._service.update_once)
 
     async def _run_loop(self) -> None:
+        await asyncio.sleep(5)
         while True:
             try:
-                await asyncio.sleep(self._interval)
                 await self.run_once()
+                await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("NewsBoardUpdateScheduler 更新异常，下一轮继续")
+                await asyncio.sleep(self._interval)

@@ -121,6 +121,32 @@ class TestDedup:
         is_dup2, _ = svc.is_duplicate(item2)
         assert not is_dup2
 
+    def test_entity_bucket_duplicate_uses_similarity(self):
+        from app.services.news_board_cache_service import (
+            ENTITY_BUCKET_SECONDS,
+            KEY_FINGERPRINT_PREFIX,
+            KEY_ITEM_PREFIX,
+            NewsBoardCacheService,
+        )
+
+        svc = NewsBoardCacheService()
+        event_ts = utc_ts(hours_ago=1)
+        existing = make_item(id="dup-base", title="英伟达发布新一代AI芯片", event_ts=event_ts)
+        incoming = make_item(id="dup-new", title="英伟达发布新一代 AI 芯片", event_ts=event_ts)
+        fps = svc.build_news_fingerprints(existing)
+        bucket = int(event_ts // ENTITY_BUCKET_SECONDS)
+        bucket_fp = f"{fps['entity']}:{bucket}"
+
+        svc._cache.set(f"{KEY_ITEM_PREFIX}{existing.id}", existing.model_dump(mode="json"), ttl=3600)
+        svc._cache.set(f"{KEY_FINGERPRINT_PREFIX}{bucket_fp}", existing.id, ttl=3600)
+
+        is_dup, key = svc.is_duplicate(incoming)
+        assert is_dup
+        assert key == bucket_fp
+
+        svc._cache.delete(f"{KEY_ITEM_PREFIX}{existing.id}")
+        svc._cache.delete(f"{KEY_FINGERPRINT_PREFIX}{bucket_fp}")
+
 
 # ---------------------------------------------------------------------------
 # Redis write / read (mocked Redis)
@@ -149,6 +175,34 @@ class TestRedisWriteRead:
         result = svc.get_items(window_hours=24, limit=100)
         assert len(result.items) == 2
         assert result.items[0].title == "Older news"  # zrevrangebyscore returns descending
+
+    def test_read_skips_stale_members_and_reports_has_more(self):
+        from app.services.news_board_cache_service import NewsBoardCacheService
+
+        svc = NewsBoardCacheService()
+        svc._cache._redis_available = True
+        raw_mock = MagicMock()
+        raw_mock.ping.return_value = True
+        svc._cache._redis = raw_mock
+
+        raw_mock.zrevrangebyscore.return_value = [
+            ("stale", _score(3)),
+            ("r1", _score(2)),
+            ("r2", _score(1)),
+        ]
+        raw_mock.mget.return_value = [
+            None,
+            _item_json("r1", "First visible"),
+            _item_json("r2", "Second visible"),
+        ]
+        raw_mock.zrem.return_value = 1
+
+        result = svc.get_items(window_hours=24, limit=1)
+
+        assert len(result.items) == 1
+        assert result.items[0].id == "r1"
+        assert result.has_more is True
+        raw_mock.zrem.assert_called_once()
 
     def test_expired_item_not_visible(self):
         from app.services.news_board_cache_service import NewsBoardCacheService
@@ -205,9 +259,28 @@ class TestWatermarkOnError:
         svc._cache.set(cache_key, "test", ttl=3600)
 
         with patch.object(svc, "fetch_tushare_source", return_value=([], "tushare down")):
-            with patch.object(svc, "_store_status"):
+            with patch.object(svc, "update_sync_watermark") as mock_watermark:
+                with patch.object(svc, "_store_status"):
+                    r = svc._do_update(now=datetime.now(timezone.utc))
+                    assert len(r["errors"]) > 0
+                    mock_watermark.assert_not_called()
+
+    def test_missing_token_does_not_update_watermark(self):
+        from app.services.news_board_cache_service import NewsBoardCacheService
+
+        svc = NewsBoardCacheService()
+        svc._cache._redis_available = True
+        raw_mock = MagicMock()
+        raw_mock.ping.return_value = True
+        raw_mock.zremrangebyscore.return_value = 0
+        svc._cache._redis = raw_mock
+
+        with patch.object(svc, "fetch_tushare_source", return_value=([], "Tushare token 未配置")):
+            with patch.object(svc, "update_sync_watermark") as mock_watermark:
                 r = svc._do_update(now=datetime.now(timezone.utc))
+                assert r["sources_updated"] == 0
                 assert len(r["errors"]) > 0
+                mock_watermark.assert_not_called()
 
 
 

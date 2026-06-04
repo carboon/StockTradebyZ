@@ -66,6 +66,7 @@ services:
       - "${SEARXNG_PORT:-8081}:8080"
     volumes:
       - searxng_data:/etc/searxng
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT:-8081}/
     cap_drop:

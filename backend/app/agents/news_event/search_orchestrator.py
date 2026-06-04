@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
+from app.cache import cache
 from app.config import settings
 from app.services.search.base import BaseSearchProvider
 from app.services.search.searxng_search_service import SearXNGSearchProvider
@@ -32,6 +34,7 @@ class SearchOrchestrator:
         self._max_rounds = settings.news_agent_max_rounds
         self._max_queries_per_round = settings.news_agent_max_queries_per_round
         self._max_results_per_query = settings.news_agent_max_results_per_queries
+        self._cache_ttl = min(settings.news_agent_cache_ttl_seconds, 1800)
 
     @property
     def searxng(self) -> SearXNGSearchProvider:
@@ -69,6 +72,20 @@ class SearchOrchestrator:
     ) -> list[SearchResult]:
         provider = settings.search_provider.lower()
         results: list[SearchResult] = []
+        cache_key = self._cache_key(
+            query=query,
+            freshness=freshness,
+            max_results=max_results,
+            categories=categories,
+            language=language,
+            provider=provider,
+        )
+        cached = cache.get(cache_key)
+        if isinstance(cached, list):
+            try:
+                return [SearchResult(**item) for item in cached if isinstance(item, dict)]
+            except Exception:
+                pass
 
         if provider in ("searxng", "auto") and self.searxng.enabled:
             results = self.searxng.search(
@@ -76,6 +93,7 @@ class SearchOrchestrator:
                 categories=categories, language=language,
             )
             if results:
+                self._store_cache(cache_key, results)
                 return results
 
         if provider in ("auto", "bocha"):
@@ -85,6 +103,7 @@ class SearchOrchestrator:
                     raw = bocha.search(query=query, count=max_results, freshness="oneYear")
                     results = [self._normalize_bocha(r) for r in raw]
                     if results:
+                        self._store_cache(cache_key, results)
                         return results
                 except Exception as exc:
                     logger.warning("Bocha fallback 失败: %s", exc)
@@ -96,11 +115,56 @@ class SearchOrchestrator:
                     raw = tavily.search(query=query, count=max_results, freshness="oneYear")
                     results = [self._normalize_tavily(r) for r in raw]
                     if results:
+                        self._store_cache(cache_key, results)
                         return results
                 except Exception as exc:
                     logger.warning("Tavily fallback 失败: %s", exc)
 
         return results
+
+    def search_many(
+        self,
+        queries: list[str],
+        *,
+        freshness: str = "day",
+        max_results: int = 8,
+        categories: list[str] | None = None,
+        language: str = "zh-CN",
+        db: Any = None,
+    ) -> list[SearchResult]:
+        """Run one search round concurrently and deduplicate all results."""
+        unique_queries = []
+        seen: set[str] = set()
+        for query in queries[:self._max_queries_per_round]:
+            normalized = " ".join(query.split())
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_queries.append(normalized)
+        if not unique_queries:
+            return []
+
+        workers = min(len(unique_queries), max(1, self._max_queries_per_round))
+        all_results: list[SearchResult] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(
+                    self.search,
+                    query,
+                    freshness=freshness,
+                    max_results=max_results,
+                    categories=categories,
+                    language=language,
+                    db=db,
+                )
+                for query in unique_queries
+            ]
+            for future in as_completed(futures):
+                try:
+                    all_results.extend(future.result())
+                except Exception as exc:
+                    logger.warning("并发搜索失败: %s", exc)
+        return self.deduplicate(all_results)
 
     def generate_initial_queries(self, title: str, core_entity: str = "",
                                   keyword: str = "") -> list[str]:
@@ -112,6 +176,12 @@ class SearchOrchestrator:
             )
             queries.append(q)
         return queries[:self._max_queries_per_round]
+
+    def health_status(self) -> dict[str, Any]:
+        if not self.searxng.enabled:
+            return {"searxng_enabled": False, "searxng_ok": False, "error": "SEARXNG_BASE_URL 未配置"}
+        ok = self.searxng.health_check(force=True)
+        return {"searxng_enabled": True, "searxng_ok": ok, "error": self.searxng.last_error}
 
     def _normalize_bocha(self, item: dict[str, Any]) -> SearchResult:
         return SearchResult(
@@ -157,6 +227,30 @@ class SearchOrchestrator:
             deduped.append(r)
 
         return deduped
+
+    @staticmethod
+    def _cache_key(
+        *,
+        query: str,
+        freshness: str,
+        max_results: int,
+        categories: list[str] | None,
+        language: str,
+        provider: str,
+    ) -> str:
+        raw = {
+            "query": query.strip(),
+            "freshness": freshness,
+            "max_results": max_results,
+            "categories": categories or [],
+            "language": language,
+            "provider": provider,
+        }
+        digest = hashlib.sha1(str(raw).encode("utf-8")).hexdigest()[:24]
+        return f"news_agent:search:{digest}"
+
+    def _store_cache(self, key: str, results: list[SearchResult]) -> None:
+        cache.set(key, [item.model_dump() for item in results], ttl=self._cache_ttl)
 
 
 search_orchestrator = SearchOrchestrator()

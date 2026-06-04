@@ -270,6 +270,19 @@ class RedisCache:
                 self._redis_available = False
         return 0
 
+    def zrem(self, key: str, *members: str) -> int:
+        """从 ZSET 删除指定成员。"""
+        if not members:
+            return 0
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.zrem(cache_key, *members)
+            except Exception as e:
+                logger.warning(f"Redis ZREM 失败: {e}")
+                self._redis_available = False
+        return 0
+
     def zcard(self, key: str) -> int:
         """获取 ZSET 成员数量。"""
         cache_key = self._make_key(key)

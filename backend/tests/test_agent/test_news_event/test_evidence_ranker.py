@@ -1,6 +1,8 @@
 """Tests for EvidenceRanker."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from app.agents.news_event.evidence_ranker import EvidenceRanker
@@ -70,3 +72,30 @@ class TestEvidenceRanker:
         ]
         evidence = self.ranker.rank(results)
         assert evidence[1].confidence < evidence[0].confidence
+
+    def test_rank_boosts_time_and_entity_match(self):
+        now = datetime.now(timezone.utc).isoformat()
+        results = [
+            SearchResult(
+                title="无关报道",
+                url="https://finance.sina.com.cn/other",
+                summary="其他内容",
+                source="新浪财经",
+                published_at=now,
+                provider="searxng",
+            ),
+            SearchResult(
+                title="英伟达发布AI芯片",
+                url="https://finance.sina.com.cn/nvda",
+                summary="英伟达 AI 芯片 产业链",
+                source="新浪财经",
+                published_at=now,
+                provider="searxng",
+                score=0.8,
+            ),
+        ]
+
+        evidence = self.ranker.rank(results, published_at=now, query_text="英伟达 AI 芯片")
+
+        assert evidence[0].title == "英伟达发布AI芯片"
+        assert evidence[0].confidence > evidence[1].confidence

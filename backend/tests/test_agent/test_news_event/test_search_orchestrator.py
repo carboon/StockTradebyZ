@@ -36,3 +36,16 @@ class TestSearchOrchestrator:
         ]
         deduped = self.orchestrator.deduplicate(results)
         assert len(deduped) == 1
+
+    def test_search_many_deduplicates_parallel_results(self, monkeypatch):
+        def fake_search(query, **kwargs):
+            return [
+                SearchResult(title=f"{query} result", url=f"http://example.com/{query}", provider="test"),
+                SearchResult(title="duplicate", url="http://example.com/dup", provider="test"),
+            ]
+
+        monkeypatch.setattr(self.orchestrator, "search", fake_search)
+        results = self.orchestrator.search_many(["q1", "q2", "q1"], max_results=2)
+
+        assert len(results) == 3
+        assert len({item.url for item in results}) == 3

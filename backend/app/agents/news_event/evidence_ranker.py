@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 from .schemas import Evidence, EvidenceLevel, SearchResult
@@ -46,10 +47,15 @@ LEVEL_SCORE_MAP: dict[EvidenceLevel, float] = {
 class EvidenceRanker:
     """证据评分器 - 根据来源、时效性、重复度给证据打分。"""
 
-    def rank(self, results: list[SearchResult],
-             published_at: Optional[str] = None) -> list[Evidence]:
+    def rank(
+        self,
+        results: list[SearchResult],
+        published_at: Optional[str] = None,
+        query_text: str = "",
+    ) -> list[Evidence]:
         evidence_list: list[Evidence] = []
         seen_fingerprints: set[str] = set()
+        event_dt = self._parse_datetime(published_at)
 
         for i, result in enumerate(results):
             source_level = self._classify_source(result.source, result.url)
@@ -63,6 +69,10 @@ class EvidenceRanker:
             confidence = level_score
             if is_duplicate:
                 confidence *= 0.3
+            confidence += self._search_score_bonus(result.score)
+            confidence += self._time_match_bonus(event_dt, self._parse_datetime(result.published_at))
+            confidence += self._entity_match_bonus(query_text, result)
+            confidence = min(confidence, 0.98)
 
             evidence = Evidence(
                 id=f"ev_{i + 1:03d}",
@@ -102,6 +112,51 @@ class EvidenceRanker:
     def _fingerprint(result: SearchResult) -> str:
         text = f"{result.title[:80]}{result.summary[:120]}"
         return hashlib.md5(text.encode()).hexdigest()
+
+    @staticmethod
+    def _parse_datetime(value: Optional[str]) -> datetime | None:
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _time_match_bonus(event_dt: datetime | None, evidence_dt: datetime | None) -> float:
+        if event_dt is None or evidence_dt is None:
+            return 0.0
+        delta_hours = abs((evidence_dt - event_dt).total_seconds()) / 3600
+        if delta_hours <= 6:
+            return 0.10
+        if delta_hours <= 24:
+            return 0.06
+        if delta_hours <= 72:
+            return 0.03
+        return -0.08
+
+    @staticmethod
+    def _search_score_bonus(score: float) -> float:
+        if score <= 0:
+            return 0.0
+        return min(score, 1.0) * 0.05
+
+    @staticmethod
+    def _entity_match_bonus(query_text: str, result: SearchResult) -> float:
+        tokens = [token for token in re.split(r"[\s，,。；;：:、（）()【】\[\]\"']+", query_text) if len(token) >= 2]
+        if not tokens:
+            return 0.0
+        haystack = f"{result.title} {result.summary}".lower()
+        matched = sum(1 for token in tokens[:12] if token.lower() in haystack)
+        if matched == 0:
+            return -0.05
+        return min(0.10, matched / max(len(tokens[:12]), 1) * 0.12)
 
 
 evidence_ranker = EvidenceRanker()
