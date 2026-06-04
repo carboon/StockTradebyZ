@@ -37,6 +37,13 @@ DISABLE_AUTO_UPDATE_SCHEDULER = os.environ.get("DISABLE_AUTO_UPDATE_SCHEDULER", 
     "yes",
     "on",
 }
+DISABLE_NEWS_BOARD_SCHEDULER_ENV = os.environ.get("DISABLE_NEWS_BOARD_SCHEDULER", "").strip().lower()
+DISABLE_NEWS_BOARD_SCHEDULER_FLAG = DISABLE_NEWS_BOARD_SCHEDULER_ENV in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +72,7 @@ from app.database import engine, Base, get_db, SessionLocal
 from app.api import analysis, auth, config, concept_memory, custom_concepts, news_board, stock, tasks, value_lowland, watchlist
 from app.schema_migrations import apply_startup_sql_migrations
 from app.services.auto_update_service import AutoDailyUpdateScheduler
+from app.services.news_board_update_scheduler import NewsBoardUpdateScheduler
 from app.services.online_status_service import get_online_status_service
 from app.services.tushare_service import TushareService
 
@@ -189,6 +197,7 @@ async def lifespan(app: FastAPI):
     logger.info("API 文档: http://%s:%s/docs", settings.host, settings.port)
     auto_update_scheduler: AutoDailyUpdateScheduler | None = None
     auto_update_lock: IO[str] | None = None
+    news_board_scheduler: NewsBoardUpdateScheduler | None = None
     online_status_service = get_online_status_service()
 
     async def warm_stock_metadata_cache() -> None:
@@ -231,6 +240,12 @@ async def lifespan(app: FastAPI):
     elif not _TEST_MODE and DISABLE_AUTO_UPDATE_SCHEDULER:
         logger.info("自动更新调度器已禁用（DISABLE_AUTO_UPDATE_SCHEDULER）")
 
+    if not _TEST_MODE and not DISABLE_NEWS_BOARD_SCHEDULER_FLAG and not settings.disable_news_board_scheduler:
+        news_board_scheduler = NewsBoardUpdateScheduler()
+        news_board_scheduler.start()
+    elif not _TEST_MODE and (DISABLE_NEWS_BOARD_SCHEDULER_FLAG or settings.disable_news_board_scheduler):
+        logger.info("新闻板块调度器已禁用（DISABLE_NEWS_BOARD_SCHEDULER）")
+
     # 启动在线状态管理服务
     if not _TEST_MODE:
         online_status_service.start()
@@ -241,6 +256,8 @@ async def lifespan(app: FastAPI):
     finally:
         if auto_update_scheduler is not None:
             await auto_update_scheduler.stop()
+        if news_board_scheduler is not None:
+            await news_board_scheduler.stop()
         release_runtime_lock(auto_update_lock)
         if not _TEST_MODE:
             await online_status_service.stop()

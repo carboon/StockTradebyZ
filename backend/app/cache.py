@@ -220,6 +220,111 @@ class RedisCache:
             for k in keys_to_delete:
                 del self._memory_store[k]
 
+    def get_raw_redis(self) -> Optional[Redis]:
+        """获取原始 Redis 客户端，如果不可用则返回 None。"""
+        if self.is_redis_available and self._redis:
+            return self._redis
+        return None
+
+    def zadd(self, key: str, mapping: dict[str, float]) -> int:
+        """向 ZSET 添加成员。"""
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.zadd(cache_key, mapping)
+            except Exception as e:
+                logger.warning(f"Redis ZADD 失败: {e}")
+                self._redis_available = False
+        return 0
+
+    def zrangebyscore(self, key: str, min_score: float, max_score: float, start: int | None = None, num: int | None = None) -> list[tuple[str, float]]:
+        """按 score 范围查询 ZSET，返回 (member, score) 列表。"""
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.zrangebyscore(cache_key, min_score, max_score, withscores=True, start=start, num=num)
+            except Exception as e:
+                logger.warning(f"Redis ZRANGEBYSCORE 失败: {e}")
+                self._redis_available = False
+        return []
+
+    def zrevrangebyscore(self, key: str, max_score: float, min_score: float, start: int | None = None, num: int | None = None) -> list[tuple[str, float]]:
+        """按 score 范围倒序查询 ZSET，返回 (member, score) 列表。"""
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.zrevrangebyscore(cache_key, max_score, min_score, withscores=True, start=start, num=num)
+            except Exception as e:
+                logger.warning(f"Redis ZREVRANGEBYSCORE 失败: {e}")
+                self._redis_available = False
+        return []
+
+    def zremrangebyscore(self, key: str, min_score: float, max_score: float) -> int:
+        """按 score 范围删除 ZSET 成员。"""
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.zremrangebyscore(cache_key, min_score, max_score)
+            except Exception as e:
+                logger.warning(f"Redis ZREMRANGEBYSCORE 失败: {e}")
+                self._redis_available = False
+        return 0
+
+    def zcard(self, key: str) -> int:
+        """获取 ZSET 成员数量。"""
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.zcard(cache_key)
+            except Exception as e:
+                logger.warning(f"Redis ZCARD 失败: {e}")
+                self._redis_available = False
+        return 0
+
+    def expireat(self, key: str, timestamp: float) -> bool:
+        """设置 key 的过期时间点为 Unix 时间戳（秒）。"""
+        cache_key = self._make_key(key)
+        if self.is_redis_available and self._redis:
+            try:
+                return self._redis.expireat(cache_key, int(timestamp))
+            except Exception as e:
+                logger.warning(f"Redis EXPIREAT 失败: {e}")
+                self._redis_available = False
+        return False
+
+    def acquire_lock(self, lock_key: str, ttl_seconds: int = 240) -> bool:
+        """使用 SET NX EX 获取分布式锁。"""
+        cache_key = self._make_key(lock_key)
+        if self.is_redis_available and self._redis:
+            try:
+                return bool(self._redis.set(cache_key, "1", nx=True, ex=ttl_seconds))
+            except Exception as e:
+                logger.warning(f"Redis SET NX EX 失败: {e}")
+                self._redis_available = False
+        return False
+
+    def release_lock(self, lock_key: str) -> None:
+        """释放分布式锁。"""
+        cache_key = self._make_key(lock_key)
+        if self.is_redis_available and self._redis:
+            try:
+                self._redis.delete(cache_key)
+            except Exception as e:
+                logger.warning(f"Redis 释放锁失败: {e}")
+
+    def keys(self, pattern: str) -> list[str]:
+        """获取匹配 pattern 的所有 key（去掉前缀）。"""
+        cache_key_pattern = self._make_key(pattern)
+        if self.is_redis_available and self._redis:
+            try:
+                full_keys = self._redis.keys(cache_key_pattern)
+                prefix_len = len(self._key_prefix)
+                return [k[prefix_len:] for k in full_keys]
+            except Exception as e:
+                logger.warning(f"Redis KEYS 失败: {e}")
+                self._redis_available = False
+        return []
+
     def cleanup_expired(self) -> int:
         """清理过期的内存缓存"""
         now = time.time()

@@ -55,6 +55,30 @@ services:
     networks:
       - stocktrade-net
 
+  # SearXNG 自托管搜索引擎
+  searxng:
+    image: searxng/searxng:latest
+    container_name: stocktrade-searxng
+    profiles:
+      - search
+      - prod
+    ports:
+      - "${SEARXNG_PORT:-8081}:8080"
+    volumes:
+      - searxng_data:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT:-8081}/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    restart: unless-stopped
+    networks:
+      - stocktrade-net
+
   backend:
     build:
       context: ..
@@ -93,6 +117,8 @@ services:
       - DB_POOL_TIMEOUT=${DB_POOL_TIMEOUT:-30}
       - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-3600}
       - ENVIRONMENT=${ENVIRONMENT:-development}
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://searxng:8080}
+      - SEARCH_PROVIDER=${SEARCH_PROVIDER:-auto}
     depends_on:
       postgres:
         condition: service_healthy
@@ -208,3 +234,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  searxng_data:

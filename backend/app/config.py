@@ -105,6 +105,36 @@ class Settings(BaseSettings):
     redis_db: int = Field(default=0, alias="REDIS_DB")
     redis_password: str = Field(default="", alias="REDIS_PASSWORD")
 
+    # 新闻板块后台更新配置
+    news_board_update_interval_seconds: int = Field(default=300, alias="NEWS_BOARD_UPDATE_INTERVAL_SECONDS")
+    news_board_overlap_minutes: int = Field(default=15, alias="NEWS_BOARD_OVERLAP_MINUTES")
+    news_board_window_hours: int = Field(default=24, alias="NEWS_BOARD_WINDOW_HOURS")
+    news_board_fetch_limit_per_source: int = Field(default=1500, alias="NEWS_BOARD_FETCH_LIMIT_PER_SOURCE")
+    news_board_lock_ttl_seconds: int = Field(default=240, alias="NEWS_BOARD_LOCK_TTL_SECONDS")
+    disable_news_board_scheduler: bool = Field(default=False, alias="DISABLE_NEWS_BOARD_SCHEDULER")
+
+    # 新闻事件分析 Agent 配置
+    news_agent_enabled: bool = Field(default=True, alias="NEWS_AGENT_ENABLED")
+    news_agent_max_rounds: int = Field(default=5, ge=1, le=10, alias="NEWS_AGENT_MAX_ROUNDS")
+    news_agent_max_queries_per_round: int = Field(default=5, ge=1, le=10, alias="NEWS_AGENT_MAX_QUERIES_PER_ROUND")
+    news_agent_max_results_per_queries: int = Field(default=8, ge=1, le=20, alias="NEWS_AGENT_MAX_RESULTS_PER_QUERY")
+    news_agent_search_timeout_seconds: int = Field(default=12, alias="NEWS_AGENT_SEARCH_TIMEOUT_SECONDS")
+    news_agent_article_fetch_timeout_seconds: int = Field(default=10, alias="NEWS_AGENT_ARTICLE_FETCH_TIMEOUT_SECONDS")
+    news_agent_cache_ttl_seconds: int = Field(default=86400, alias="NEWS_AGENT_CACHE_TTL_SECONDS")
+
+    # 搜索 Provider 配置
+    search_provider: str = Field(default="auto", alias="SEARCH_PROVIDER")
+    searxng_base_url: str = Field(default="", alias="SEARXNG_BASE_URL")
+    searxng_port: int = Field(default=8081, alias="SEARXNG_PORT")
+    search_timeout_seconds: int = Field(default=12, alias="SEARCH_TIMEOUT_SECONDS")
+    search_max_rounds: int = Field(default=5, ge=1, alias="SEARCH_MAX_ROUNDS")
+    search_max_queries_per_round: int = Field(default=5, ge=1, alias="SEARCH_MAX_QUERIES_PER_ROUND")
+    search_max_results_per_query: int = Field(default=8, ge=1, alias="SEARCH_MAX_RESULTS_PER_QUERY")
+
+    # 证据等级约束
+    news_agent_min_evidence_level: str = Field(default="B", alias="NEWS_AGENT_MIN_EVIDENCE_LEVEL")
+    news_agent_allow_low_quality_evidence: bool = Field(default=False, alias="NEWS_AGENT_ALLOW_LOW_QUALITY_EVIDENCE")
+
     @property
     def redis_url_resolved(self) -> str:
         """解析 Redis URL"""

@@ -632,6 +632,7 @@ class NewsBoardItemsResponse(BaseModel):
     items: List[NewsBoardItem] = Field(default_factory=list)
     sources: List[NewsBoardSourceStatus] = Field(default_factory=list)
     duplicate_count: int = 0
+    has_more: bool = False
     message: Optional[str] = None
 
 
@@ -647,6 +648,118 @@ class NewsBoardAnalyzeResponse(BaseModel):
     """消息板块 AI 分析响应"""
     summary: str
     stocks: List[NewsBoardRelatedStock] = Field(default_factory=list)
+
+
+class NewsBoardAnalyzeDetailRequest(BaseModel):
+    """消息板块详情分析请求"""
+    news_id: str = ""
+    title: str
+    summary: str = ""
+    category: str = ""
+    source: str = ""
+    published_at: Optional[str] = None
+    event_time: Optional[str] = None
+    url: Optional[str] = None
+
+
+class NewsBoardDetailRelatedStock(BaseModel):
+    """详情分析相关股票"""
+    code: str = ""
+    name: str = ""
+    relation: str = ""
+    mapping_strength: str = "weak"
+    reason: str = ""
+
+
+class NewsBoardDetailRealization(BaseModel):
+    """行情兑现状态"""
+    code: str = ""
+    name: str = ""
+    change_1d: Optional[float] = None
+    change_3d: Optional[float] = None
+    change_5d: Optional[float] = None
+    change_20d: Optional[float] = None
+    limit_up: bool = False
+    volume_ratio: Optional[float] = None
+    moved_before_news: bool = False
+    realization_status: str = "insufficient_market_data"
+    reason: str = ""
+
+
+class NewsBoardDetailEvidence(BaseModel):
+    """详情分析证据"""
+    id: str = ""
+    title: str = ""
+    url: str = ""
+    source: str = ""
+    source_level: str = "C"
+    published_at: Optional[str] = None
+    summary: str = ""
+    provider: str = "searxng"
+    confidence: float = 0.5
+
+
+class NewsBoardDetailRound(BaseModel):
+    """分析轮次记录"""
+    round_num: int = 0
+    queries: List[str] = Field(default_factory=list)
+    evidence_count: int = 0
+    status: str = "running"
+
+
+class NewsBoardAnalyzeDetailResponse(BaseModel):
+    """消息板块详情分析响应"""
+    status: str
+    task_id: str = ""
+    event_type: Optional[str] = None
+    confidence: Optional[float] = None
+    event_summary: str = ""
+    core_facts: List[str] = Field(default_factory=list)
+    impact_path: List[dict] = Field(default_factory=list)
+    direct_sectors: List[str] = Field(default_factory=list)
+    indirect_sectors: List[str] = Field(default_factory=list)
+    related_stocks: List[NewsBoardDetailRelatedStock] = Field(default_factory=list)
+    market_realization: List[NewsBoardDetailRealization] = Field(default_factory=list)
+    upstream_downstream: List[str] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
+    watch_points: List[str] = Field(default_factory=list)
+    evidence: List[NewsBoardDetailEvidence] = Field(default_factory=list)
+    rounds: List[NewsBoardDetailRound] = Field(default_factory=list)
+    reason: str = ""
+
+
+class NewsBoardBatchAnalyzeRequest(BaseModel):
+    """批量消息分析请求"""
+    keyword: str = ""
+    items: List[dict] = Field(default_factory=list)
+
+
+class NewsBoardBatchTheme(BaseModel):
+    """批量分析主题"""
+    topic: str = ""
+    count: int = 0
+    sentiment: str = "neutral"
+    description: str = ""
+
+
+class NewsBoardBatchKeyItem(BaseModel):
+    """批量分析高权重消息"""
+    title: str = ""
+    event_time: str = ""
+    weight: str = "medium"
+    reason: str = ""
+
+
+class NewsBoardBatchAnalyzeResponse(BaseModel):
+    """批量消息分析响应"""
+    status: str
+    total: int = 0
+    summary: str = ""
+    themes: List[NewsBoardBatchTheme] = Field(default_factory=list)
+    key_items: List[NewsBoardBatchKeyItem] = Field(default_factory=list)
+    market_impact: str = ""
+    watch_points: List[str] = Field(default_factory=list)
+    reason: str = ""
 
 
 class ClosingCandidateMoveItem(BaseModel):
