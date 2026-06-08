@@ -158,6 +158,7 @@ class AnalysisResult(BaseModel):
     indirect_sectors: list[str] = Field(default_factory=list)
     related_stocks: list[RelatedStock] = Field(default_factory=list)
     market_realization: list[StockRealization] = Field(default_factory=list)
+    market_sentiment: Optional[dict[str, Any]] = None
     upstream_downstream: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     watch_points: list[str] = Field(default_factory=list)

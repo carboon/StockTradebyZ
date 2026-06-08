@@ -50,3 +50,16 @@ class TestEntityResolver:
         )
         for e in entities:
             assert e.entity_type == EntityType.COMPANY_ENTITY
+
+    def test_resolve_port_shipping_industry(self):
+        entities = self.resolver.resolve(
+            "南京港新增美国休斯敦直航航线，带动港口航运和外贸物流",
+            [],
+            db=None,
+        )
+        industry_names = [
+            e.name for e in entities
+            if e.entity_type == EntityType.INDUSTRY_ENTITY
+        ]
+        assert "南京港" in industry_names
+        assert "港口航运" in industry_names

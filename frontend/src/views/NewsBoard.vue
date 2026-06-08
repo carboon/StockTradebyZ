@@ -34,6 +34,36 @@
       :description="loadError"
     />
 
+    <section class="market-sentiment-card">
+      <div class="market-sentiment-card__main">
+        <div class="market-sentiment-card__title">A股市场情绪</div>
+        <template v-if="marketSentiment">
+          <div class="market-sentiment-card__value">
+            <span v-if="marketSentiment.score !== null && marketSentiment.score !== undefined" class="sentiment-score">
+              {{ marketSentiment.score.toFixed(0) }}
+            </span>
+            <span v-else class="sentiment-score sentiment-score--empty">--</span>
+            <el-tag :type="marketSentimentTagType(marketSentiment.level)" size="small">
+              {{ marketSentiment.level_label || '未接入' }}
+            </el-tag>
+            <span v-if="marketSentiment.cached" class="sentiment-cache">缓存</span>
+          </div>
+          <div class="market-sentiment-card__desc">
+            {{ marketSentiment.status === 'ok' ? marketSentiment.risk_hint : (marketSentiment.message || '市场情绪指数暂不可用') }}
+          </div>
+        </template>
+        <div v-else class="market-sentiment-card__desc">正在读取市场情绪...</div>
+      </div>
+      <el-button
+        size="small"
+        :icon="Refresh"
+        :loading="marketSentimentLoading"
+        @click="loadMarketSentiment(true)"
+      >
+        更新
+      </el-button>
+    </section>
+
     <section class="news-board-layout">
       <main class="news-stream-panel">
         <div class="panel-header">
@@ -71,7 +101,7 @@
             @click="selectNews(item)"
           >
             <div class="news-item__top">
-              <el-tag :type="categoryTagType(item.category)" size="small">{{ item.category }}</el-tag>
+              <el-tag :type="categoryTagType(item.category)" size="small">{{ sourceLabel(item) }}</el-tag>
               <el-button
                 type="primary"
                 size="small"
@@ -91,6 +121,90 @@
             </div>
             <div class="news-title">{{ item.title }}</div>
             <div v-if="item.summary" class="news-summary">{{ item.summary }}</div>
+            <div
+              v-if="selectedNews?.id === item.id && detailResult"
+              class="mobile-inline-detail"
+              @click.stop
+            >
+              <div class="mobile-inline-detail__header">
+                <div class="mobile-inline-detail__title">详情分析</div>
+                <el-button text size="small" @click="closeInlineDetail">关闭</el-button>
+              </div>
+
+              <div class="detail-status">
+                <el-tag :type="detailStatusTagType(detailResult.status)" size="default">
+                  {{ detailStatusLabel(detailResult.status) }}
+                </el-tag>
+                <span v-if="detailResult.confidence !== null && detailResult.confidence !== undefined" class="detail-confidence">
+                  置信度 {{ (detailResult.confidence * 100).toFixed(0) }}%
+                </span>
+              </div>
+
+              <template v-if="detailResult.status === 'stopped'">
+                <div class="detail-section">
+                  <div class="detail-label">停止原因</div>
+                  <div class="detail-text">{{ detailResult.reason }}</div>
+                </div>
+              </template>
+
+              <template v-if="detailResult.status === 'ready'">
+                <div v-if="detailResult.event_summary" class="detail-section">
+                  <div class="detail-label">事件概述</div>
+                  <div class="detail-text">{{ detailResult.event_summary }}</div>
+                </div>
+                <div v-if="detailResult.core_facts.length" class="detail-section">
+                  <div class="detail-label">核心事实</div>
+                  <div class="detail-items">
+                    <div v-for="(f,i) in detailResult.core_facts" :key="i" class="detail-item fact-item">{{ f }}</div>
+                  </div>
+                </div>
+                <div v-if="detailResult.direct_sectors.length || detailResult.indirect_sectors.length" class="detail-section">
+                  <div class="detail-label">关联板块</div>
+                  <div class="tag-row">
+                    <el-tag v-for="s in detailResult.direct_sectors" :key="`d-${s}`" size="small" type="success">{{ s }}</el-tag>
+                    <el-tag v-for="s in detailResult.indirect_sectors" :key="`i-${s}`" size="small" type="warning">{{ s }}</el-tag>
+                  </div>
+                </div>
+                <div v-if="detailResult.related_stocks.length" class="detail-section">
+                  <div class="detail-label">相关标的</div>
+                  <div class="stock-list">
+                    <div v-for="stock in detailResult.related_stocks" :key="stock.code" class="stock-row">
+                      <div class="stock-main">
+                        <span class="stock-code">{{ stock.code }}</span>
+                        <span class="stock-name">{{ stock.name }}</span>
+                        <el-tag :type="mappingStrengthType(stock.mapping_strength)" size="small">{{ mappingStrengthLabel(stock.mapping_strength) }}</el-tag>
+                      </div>
+                      <div class="stock-meta">
+                        <span>{{ stock.relation }}</span>
+                        <span v-if="stock.reason">- {{ stock.reason }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="detailResult.risks.length" class="detail-section">
+                  <div class="detail-label">风险提示</div>
+                  <div class="detail-items">
+                    <div v-for="(r,i) in detailResult.risks" :key="i" class="detail-item risk-item">{{ r }}</div>
+                  </div>
+                </div>
+              </template>
+
+              <div v-if="detailResult.watch_points.length" class="detail-section">
+                <div class="detail-label">后续观察</div>
+                <div class="detail-items">
+                  <div v-for="(wp,i) in detailResult.watch_points" :key="i" class="detail-item">{{ wp }}</div>
+                </div>
+              </div>
+              <div v-if="detailResult.evidence.length" class="detail-section">
+                <div class="detail-label">证据来源 ({{ detailResult.evidence.length }})</div>
+                <div class="evidence-list">
+                  <div v-for="ev in detailResult.evidence.slice(0,5)" :key="ev.id" class="evidence-item">
+                    <el-tag :type="evidenceLevelType(ev.source_level)" size="small">{{ ev.source_level }}</el-tag>
+                    <a :href="ev.url" target="_blank" class="evidence-title" :title="ev.title">{{ ev.title }}</a>
+                  </div>
+                </div>
+              </div>
+            </div>
           </button>
           <div v-if="loadingMore && !searchActive" class="loading-more">
             <el-skeleton :rows="2" animated />
@@ -345,12 +459,29 @@ interface DetailAnalysisResult {
   indirect_sectors: string[]
   related_stocks: DetailRelatedStock[]
   market_realization: DetailRealization[]
+  market_sentiment?: MarketSentiment | null
   upstream_downstream: string[]
   risks: string[]
   watch_points: string[]
   evidence: DetailEvidence[]
   rounds: DetailRound[]
   reason: string
+}
+
+interface MarketSentiment {
+  status: string
+  provider: string
+  reason?: string | null
+  message?: string | null
+  score: number | null
+  level: string
+  level_label: string
+  interpretation: string
+  risk_hint: string
+  updated_at?: string | null
+  fetched_at?: string | null
+  cached: boolean
+  stale: boolean
 }
 
 interface NewsBoardStatus {
@@ -402,8 +533,11 @@ const hasMore = ref(false)
 const searchActive = ref(false)
 const totalCached = ref(0)
 const scrollContainer = ref<HTMLElement | null>(null)
+const marketSentiment = ref<MarketSentiment | null>(null)
+const marketSentimentLoading = ref(false)
 
 onMounted(async () => {
+  loadMarketSentiment()
   await loadStatus()
   loadNews()
 })
@@ -455,6 +589,31 @@ async function loadStatus() {
     totalCached.value = data.index_count || 0
   } catch {
     // ignore
+  }
+}
+
+async function loadMarketSentiment(force = false) {
+  marketSentimentLoading.value = true
+  try {
+    marketSentiment.value = await requestJson<MarketSentiment>(`market-sentiment/current${force ? '?force_refresh=true' : ''}`)
+  } catch {
+    marketSentiment.value = {
+      status: 'unavailable',
+      provider: 'gjzq',
+      reason: 'request_failed',
+      message: '市场情绪接口暂不可用',
+      score: null,
+      level: 'unknown',
+      level_label: '未接入',
+      interpretation: '',
+      risk_hint: '',
+      updated_at: null,
+      fetched_at: null,
+      cached: false,
+      stale: false,
+    }
+  } finally {
+    marketSentimentLoading.value = false
   }
 }
 
@@ -546,6 +705,11 @@ function backToSearch() {
   detailResult.value = null
 }
 
+function closeInlineDetail() {
+  detailResult.value = null
+  selectedNews.value = null
+}
+
 async function analyzeBatch() {
   analyzingBatch.value = true
   batchResult.value = null
@@ -605,6 +769,7 @@ async function analyzeDetailForItem(item: NewsItem) {
       status: 'failed', task_id: '', event_summary: '',
       core_facts: [], impact_path: [], direct_sectors: [], indirect_sectors: [],
       related_stocks: [], market_realization: [], upstream_downstream: [],
+      market_sentiment: null,
       risks: [], watch_points: [], evidence: [], rounds: [],
       reason: error instanceof Error ? error.message : '请求失败',
     }
@@ -699,6 +864,22 @@ function categoryTagType(category: string) {
   return map[category] || 'info'
 }
 
+function sourceLabel(item: NewsItem) {
+  const value = item.source || item.category || ''
+  const map: Record<string, string> = {
+    xq: '雪球',
+    jinshi: '金十',
+    sina: '新浪财经',
+    jinrongjie: '金融界',
+    yicai: '第一财经',
+    '10jqka': '同花顺',
+    cls: '财联社',
+    eastmoney: '东方财富',
+    wallstreetcn: '华尔街见闻',
+  }
+  return map[value] || value || '消息'
+}
+
 
 function sentimentLabel(s: string) {
   const m: Record<string,string> = { positive:'偏利好', negative:'偏利空', neutral:'中性', mixed:'分化' }
@@ -713,6 +894,18 @@ function sentimentTagType(s: string) {
 function impactTag(s: string) {
   const m: Record<string,string> = { '偏利好':'success', '偏利空':'danger', '中性':'info', '分化':'warning' }
   return m[s] || 'info'
+}
+
+function marketSentimentTagType(level: string) {
+  const m: Record<string,string> = {
+    extreme_high: 'danger',
+    high: 'warning',
+    neutral: 'info',
+    low: 'success',
+    extreme_low: 'success',
+    unknown: 'info',
+  }
+  return m[level] || 'info'
 }
 
 function weightTagType(w: string) {
@@ -763,6 +956,7 @@ function formatNewsForCopy(item: NewsItem, index?: number) {
   const lines = [
     `${index ? `${index}. ` : ''}${item.title}`,
     `时间：${formatDateTime(item.eventTime || item.publishedAt)}`,
+    `来源：${sourceLabel(item)}`,
   ]
   if (item.summary) lines.push(`摘要：${item.summary}`)
   if (item.region) lines.push(`地区：${item.region}`)
@@ -865,6 +1059,65 @@ function formatDateTime(value: string) {
 
 .keyword-input {
   width: min(360px, 42vw);
+}
+
+.market-sentiment-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.market-sentiment-card__main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.market-sentiment-card__title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  white-space: nowrap;
+}
+
+.market-sentiment-card__value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.sentiment-score {
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.sentiment-score--empty {
+  color: #94a3b8;
+}
+
+.sentiment-cache {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.market-sentiment-card__desc {
+  min-width: 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .news-board-layout {
@@ -981,6 +1234,24 @@ function formatDateTime(value: string) {
   margin-top: 6px;
   color: #475569;
   line-height: 1.6;
+}
+
+.mobile-inline-detail {
+  display: none;
+}
+
+.mobile-inline-detail__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.mobile-inline-detail__title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
 }
 
 .news-footer {
@@ -1307,13 +1578,28 @@ function formatDateTime(value: string) {
 
   .news-board-toolbar,
   .news-stream-panel,
-  .analysis-panel {
+  .analysis-panel,
+  .market-sentiment-card {
     border-radius: 6px;
   }
 
   .news-board-toolbar {
     padding: 12px;
     gap: 12px;
+  }
+
+  .market-sentiment-card {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .market-sentiment-card__main {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .market-sentiment-card__desc {
+    white-space: normal;
   }
 
   .toolbar-main {
@@ -1392,6 +1678,37 @@ function formatDateTime(value: string) {
   .news-summary {
     font-size: 13px;
     line-height: 1.55;
+  }
+
+  .mobile-inline-detail {
+    display: block;
+    margin-top: 12px;
+    padding: 10px;
+    background: #f8fafc;
+    border: 1px solid #bae6fd;
+    border-radius: 6px;
+    box-shadow: inset 3px 0 0 #38bdf8;
+    cursor: default;
+  }
+
+  .mobile-inline-detail .detail-status {
+    margin-bottom: 10px;
+  }
+
+  .mobile-inline-detail .detail-section {
+    margin-bottom: 10px;
+    padding-bottom: 9px;
+  }
+
+  .mobile-inline-detail .detail-section:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+  }
+
+  .mobile-inline-detail .stock-row,
+  .mobile-inline-detail .evidence-item,
+  .mobile-inline-detail .detail-item {
+    text-align: left;
   }
 
   .analysis-panel {

@@ -118,6 +118,23 @@ class RiskRegimeSummary(BaseModel):
     ai_review: Optional[Dict[str, Any]] = None
 
 
+class MarketSentimentSummary(BaseModel):
+    """外部 A 股市场情绪指数摘要"""
+    status: str = "unavailable"
+    provider: str = "gjzq"
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    score: Optional[float] = None
+    level: str = "unknown"
+    level_label: str = "未接入"
+    interpretation: str = ""
+    risk_hint: str = ""
+    updated_at: Optional[str] = None
+    fetched_at: Optional[str] = None
+    cached: bool = False
+    stale: bool = False
+
+
 # ==================== 候选股票 ====================
 class CandidateItem(BaseModel):
     """候选股票项"""
@@ -720,6 +737,7 @@ class NewsBoardAnalyzeDetailResponse(BaseModel):
     indirect_sectors: List[str] = Field(default_factory=list)
     related_stocks: List[NewsBoardDetailRelatedStock] = Field(default_factory=list)
     market_realization: List[NewsBoardDetailRealization] = Field(default_factory=list)
+    market_sentiment: Optional[MarketSentimentSummary] = None
     upstream_downstream: List[str] = Field(default_factory=list)
     risks: List[str] = Field(default_factory=list)
     watch_points: List[str] = Field(default_factory=list)

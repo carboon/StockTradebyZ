@@ -48,6 +48,7 @@ TUSHARE_NEWS_SOURCES: tuple[tuple[str, str], ...] = (
     ("eastmoney", "东方财富"),
     ("wallstreetcn", "华尔街见闻"),
 )
+TUSHARE_SOURCE_LABELS = dict(TUSHARE_NEWS_SOURCES)
 
 STOCK_HINTS: list[tuple[tuple[str, ...], tuple[str, str, str]]] = [
     (("AI", "人工智能", "算力", "服务器"), ("000977.SZ", "浪潮信息", "AI 服务器链条")),
@@ -181,6 +182,7 @@ class NewsBoardCacheService:
                     continue
                 try:
                     item = NewsBoardItem(**data)
+                    item.source = _source_label(item.source or item.source_type)
                     items.append(item)
                     if len(items) > limit:
                         break
@@ -300,6 +302,7 @@ class NewsBoardCacheService:
                 continue
             try:
                 item = NewsBoardItem(**data)
+                item.source = _source_label(item.source or item.source_type)
             except Exception:
                 continue
             haystack = f"{item.title} {item.summary}".lower()
@@ -356,7 +359,7 @@ class NewsBoardCacheService:
                 published_at = now
 
             summary = str(raw.get("content") or raw.get("summary") or "").strip()
-            source = str(raw.get("src") or raw.get("source") or raw.get("source_key") or "news").strip()
+            source = _source_label(str(raw.get("src") or raw.get("source") or raw.get("source_key") or "news").strip())
             text = f"{title} {summary}"
             category = source_type or str(raw.get("category") or _infer_category(text))
             related_stocks = _infer_related_stocks(text)
@@ -918,6 +921,11 @@ def _infer_sentiment(text: str) -> str:
 def _stable_id(*, title: str, source: str, published_at: datetime) -> str:
     raw = f"{title}|{source}|{published_at.isoformat()}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _source_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return TUSHARE_SOURCE_LABELS.get(text, text or "消息")
 
 
 def _redis_member_text(value: Any) -> str:

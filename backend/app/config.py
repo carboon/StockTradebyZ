@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     news_agent_min_evidence_level: str = Field(default="B", alias="NEWS_AGENT_MIN_EVIDENCE_LEVEL")
     news_agent_allow_low_quality_evidence: bool = Field(default=False, alias="NEWS_AGENT_ALLOW_LOW_QUALITY_EVIDENCE")
 
+    # 外部 A 股市场情绪指数（国金证券 MCP，可选）
+    market_sentiment_enabled: bool = Field(default=True, alias="MARKET_SENTIMENT_ENABLED")
+    gjzq_sentiment_mcp_url: str = Field(default="", alias="GJZQ_SENTIMENT_MCP_URL")
+    gjzq_sentiment_api_key: str = Field(default="gjzqtest", alias="GJZQ_SENTIMENT_API_KEY")
+    market_sentiment_cache_ttl_seconds: int = Field(default=360, alias="MARKET_SENTIMENT_CACHE_TTL_SECONDS")
+    market_sentiment_timeout_seconds: int = Field(default=8, alias="MARKET_SENTIMENT_TIMEOUT_SECONDS")
+
     @property
     def redis_url_resolved(self) -> str:
         """解析 Redis URL"""

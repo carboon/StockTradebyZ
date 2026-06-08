@@ -32,6 +32,18 @@ class TestIndustryChainMapper:
         sectors = [c.sector for c in chains]
         assert "新能源汽车" in sectors
 
+    def test_map_nanjing_port(self):
+        chains = self.mapper.map_entities(["南京港"])
+        assert len(chains) > 0
+        sectors = [c.sector for c in chains]
+        codes = [
+            stock["code"]
+            for chain in chains
+            for stock in chain.a_share_mapping
+        ]
+        assert "港口航运" in sectors
+        assert "002040.SZ" in codes
+
     def test_get_stocks_for_sectors(self):
         stocks = self.mapper.get_stocks_for_sectors(["AI算力"])
         assert len(stocks) > 0

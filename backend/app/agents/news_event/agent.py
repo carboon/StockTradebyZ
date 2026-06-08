@@ -238,6 +238,7 @@ class NewsEventAnalysisAgent:
     ) -> AnalysisResult:
         try:
             allowed_stock_codes = self._allowed_stock_codes(chain_data, entities)
+            market_sentiment = self._current_market_sentiment()
             llm_result = self._llm_final_analysis(
                 title=request.title,
                 summary=request.summary,
@@ -252,6 +253,7 @@ class NewsEventAnalysisAgent:
                 entities=entities,
                 chain_data=chain_data,
                 realization=realization,
+                market_sentiment=market_sentiment,
                 allowed_stock_codes=allowed_stock_codes,
                 round_num=len(rounds),
             )
@@ -270,6 +272,14 @@ class NewsEventAnalysisAgent:
             for s in llm_result.get("related_stocks", [])
         ]
         related_stocks = self._select_top_stocks(raw_stocks, max_count=5, allowed_codes=allowed_stock_codes)
+        if not related_stocks:
+            related_stocks = self._select_top_stocks(
+                self._related_stocks_from_chain_data(chain_data),
+                max_count=5,
+                allowed_codes=allowed_stock_codes,
+            )
+        chain_sectors = self._sectors_from_chain_data(chain_data)
+        direct_sectors = llm_result.get("direct_sectors", []) or chain_sectors[:5]
 
         return AnalysisResult(
             status=AgentStatus.READY,
@@ -282,10 +292,11 @@ class NewsEventAnalysisAgent:
                 ImpactPath(**p) if isinstance(p, dict) else ImpactPath(description=str(p))
                 for p in llm_result.get("impact_path", [])
             ],
-            direct_sectors=llm_result.get("direct_sectors", []),
+            direct_sectors=direct_sectors,
             indirect_sectors=llm_result.get("indirect_sectors", []),
             related_stocks=related_stocks,
             market_realization=realization,
+            market_sentiment=market_sentiment,
             upstream_downstream=llm_result.get("upstream_downstream", []),
             risks=llm_result.get("risks", []),
             watch_points=llm_result.get("watch_points", []),
@@ -355,6 +366,7 @@ class NewsEventAnalysisAgent:
             entities=json.dumps(kwargs.get("entities", []), ensure_ascii=False, indent=2),
             industry_chains=json.dumps(kwargs.get("chain_data", []), ensure_ascii=False, indent=2),
             market_realization=json.dumps(kwargs.get("realization", []), ensure_ascii=False, indent=2),
+            market_sentiment=json.dumps(kwargs.get("market_sentiment", {}), ensure_ascii=False, indent=2),
             allowed_stock_codes=json.dumps(kwargs.get("allowed_stock_codes", []), ensure_ascii=False, indent=2),
             round_num=kwargs.get("round_num", 1),
             max_rounds=self._max_rounds,
@@ -417,6 +429,38 @@ class NewsEventAnalysisAgent:
         return codes
 
     @staticmethod
+    def _related_stocks_from_chain_data(chain_data: list[dict[str, Any]]) -> list[RelatedStock]:
+        stocks: list[RelatedStock] = []
+        seen_codes: set[str] = set()
+        for chain in chain_data:
+            for item in chain.get("a_share_mapping") or []:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code") or "")
+                if not code or code in seen_codes:
+                    continue
+                seen_codes.add(code)
+                stocks.append(RelatedStock(
+                    code=code,
+                    name=str(item.get("name") or ""),
+                    relation=str(item.get("relation") or chain.get("sector") or ""),
+                    mapping_strength=item.get("strength") or "medium",
+                    reason=str(item.get("reason") or "由产业链知识库映射生成"),
+                ))
+        return stocks
+
+    @staticmethod
+    def _sectors_from_chain_data(chain_data: list[dict[str, Any]]) -> list[str]:
+        sectors: list[str] = []
+        seen: set[str] = set()
+        for chain in chain_data:
+            sector = str(chain.get("sector") or "")
+            if sector and sector not in seen:
+                seen.add(sector)
+                sectors.append(sector)
+        return sectors
+
+    @staticmethod
     def _call_llm_json(system_prompt: str, user_prompt: str,
                        temperature: float = 0.2) -> dict[str, Any]:
         api_key = str(settings.deepseek_api_key or "").strip()
@@ -456,6 +500,8 @@ class NewsEventAnalysisAgent:
             "华为", "比亚迪", "宁德时代", "茅台", "腾讯", "阿里",
             "芯片", "AI", "人工智能", "半导体", "新能源", "光伏",
             "机器人", "自动驾驶", "创新药",
+            "南京港", "港口航运", "港口", "航运", "国际航线",
+            "外贸物流", "物流", "集装箱",
         ]
         for kw in priority_keywords:
             if kw in text:
@@ -545,6 +591,7 @@ class NewsEventAnalysisAgent:
             ) for s in all_stocks
         ]
         related_stocks = self._select_top_stocks(all_related, max_count=5)
+        market_sentiment = self._current_market_sentiment()
 
         impact_text = "减持" if "减持" in text else "公告"
         sentiment_text = "偏利空" if any(kw in text for kw in ("减持", "处罚", "下调", "跌超", "下跌")) else "中性观察"
@@ -562,10 +609,38 @@ class NewsEventAnalysisAgent:
             direct_sectors=sectors[:5],
             related_stocks=related_stocks,
             market_realization=realization,
+            market_sentiment=market_sentiment,
             risks=["本分析基于规则匹配和知识库，未经 LLM 深度分析，建议设置 DEEPSEEK_API_KEY 获取更完整分析。"],
             watch_points=["关注后续公告和市场反应"],
             reason="(规则降级模式，未使用 LLM)",
         )
+
+    @staticmethod
+    def _current_market_sentiment() -> dict[str, Any] | None:
+        try:
+            from app.services.market_sentiment_service import market_sentiment_service
+
+            result = market_sentiment_service.get_current(force_refresh=False)
+            if isinstance(result, dict) and result.get("status") == "ok":
+                return {
+                    key: result.get(key)
+                    for key in (
+                        "status",
+                        "provider",
+                        "score",
+                        "level",
+                        "level_label",
+                        "interpretation",
+                        "risk_hint",
+                        "updated_at",
+                        "fetched_at",
+                        "cached",
+                        "stale",
+                    )
+                }
+        except Exception as exc:
+            logger.debug("读取市场情绪失败: %s", exc)
+        return None
 
     def _extract_stocks_from_evidence(
         self, evidence: list[dict[str, Any]], db: Optional[Session] = None,

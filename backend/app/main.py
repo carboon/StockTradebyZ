@@ -69,7 +69,7 @@ from app.config import settings
 from sqlalchemy import text
 
 from app.database import engine, Base, get_db, SessionLocal
-from app.api import analysis, auth, config, concept_memory, custom_concepts, news_board, stock, tasks, value_lowland, watchlist
+from app.api import analysis, auth, config, concept_memory, custom_concepts, market_sentiment, news_board, stock, tasks, value_lowland, watchlist
 from app.schema_migrations import apply_startup_sql_migrations
 from app.services.auto_update_service import AutoDailyUpdateScheduler
 from app.services.news_board_update_scheduler import NewsBoardUpdateScheduler
@@ -338,6 +338,7 @@ app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["分析"])
 app.include_router(custom_concepts.router, prefix="/api/v1/custom-concepts", tags=["自定义概念"])
 app.include_router(concept_memory.router, prefix="/api/v1/concept-memory", tags=["概念记忆库"])
 app.include_router(news_board.router, prefix="/api/v1/news-board", tags=["消息板块"])
+app.include_router(market_sentiment.router, prefix="/api/v1/market-sentiment", tags=["市场情绪"])
 app.include_router(value_lowland.router, prefix="/api/v1/value-lowland", tags=["价值洼地"])
 app.include_router(watchlist.router, prefix="/api/v1/watchlist", tags=["重点观察"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["任务调度"])

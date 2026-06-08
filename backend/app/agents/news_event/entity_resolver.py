@@ -86,6 +86,19 @@ COMMODITY_KEYWORDS: dict[str, str] = {
     "大宗商品": "大宗商品",
 }
 
+INDUSTRY_KEYWORDS: dict[str, str] = {
+    "南京港": "南京港",
+    "港口航运": "港口航运",
+    "港口": "港口航运",
+    "航运": "港口航运",
+    "国际航线": "港口航运",
+    "外贸物流": "港口航运",
+    "集装箱": "港口航运",
+    "多式联运": "港口航运",
+    "跨境物流": "物流运输",
+    "物流": "物流运输",
+}
+
 
 class EntityResolver:
     """实体识别器 - 抽取实体并映射到本地股票库。"""
@@ -119,6 +132,18 @@ class EntityResolver:
                     matched_name=commodity_name,
                     is_overseas=False,
                     confidence=0.9,
+                ))
+
+        for kw, industry_name in INDUSTRY_KEYWORDS.items():
+            if kw in text and industry_name.lower() not in seen_names:
+                seen_names.add(industry_name.lower())
+                entities.append(ResolvedEntity(
+                    entity_type=EntityType.INDUSTRY_ENTITY,
+                    name=industry_name,
+                    matched_code=None,
+                    matched_name=industry_name,
+                    is_overseas=False,
+                    confidence=0.88,
                 ))
 
         if db:
