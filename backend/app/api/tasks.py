@@ -234,6 +234,21 @@ def _get_latest_date_from_csv(csv_path: Path) -> str | None:
         return None
 
 
+def _count_csv_data_rows(csv_path: Path, *, max_rows: int = 130) -> int:
+    try:
+        with csv_path.open("r", encoding="utf-8", errors="ignore") as f:
+            next(f, None)
+            count = 0
+            for line in f:
+                if line.strip():
+                    count += 1
+                    if count >= max_rows:
+                        break
+            return count
+    except Exception:
+        return 0
+
+
 def _assess_raw_csv_progress(latest_trade_date: str | None) -> dict[str, int | str | None]:
     """评估 CSV 文件进度（带缓存优化）"""
     import time
@@ -250,6 +265,7 @@ def _assess_raw_csv_progress(latest_trade_date: str | None) -> dict[str, int | s
     stale = 0
     invalid = 0
     latest_local_date: str | None = None
+    min_history_rows = 120
 
     # 采样检查优化：只检查前 100 个文件来快速评估状态
     # 这样可以在大量文件时大幅提高响应速度
@@ -265,6 +281,9 @@ def _assess_raw_csv_progress(latest_trade_date: str | None) -> dict[str, int | s
             continue
         csv_latest = _get_latest_date_from_csv(csv_path)
         if not csv_latest:
+            invalid += 1
+            continue
+        if _count_csv_data_rows(csv_path, max_rows=min_history_rows) < min_history_rows:
             invalid += 1
             continue
         if latest_local_date is None or csv_latest > latest_local_date:
@@ -289,6 +308,9 @@ def _assess_raw_csv_progress(latest_trade_date: str | None) -> dict[str, int | s
                 continue
             csv_latest = _get_latest_date_from_csv(csv_path)
             if not csv_latest:
+                invalid += 1
+                continue
+            if _count_csv_data_rows(csv_path, max_rows=min_history_rows) < min_history_rows:
                 invalid += 1
                 continue
             if latest_local_date is None or csv_latest > latest_local_date:
@@ -920,10 +942,7 @@ async def start_incremental_update(
         }
 
     tushare_service = TushareService()
-    resolved_end_date = end_date or await asyncio.to_thread(
-        tushare_service.get_effective_latest_trade_date,
-        prefer_realtime=True,
-    )
+    resolved_end_date = end_date or await asyncio.to_thread(tushare_service.get_latest_trade_date)
     if not resolved_end_date:
         raise HTTPException(status_code=503, detail="无法确定目标交易日")
 
@@ -973,10 +992,7 @@ async def start_daily_batch_update(
         _raise_initialization_in_progress(active_full_task)
 
     service = TushareService()
-    resolved_trade_date = trade_date or await asyncio.to_thread(
-        service.get_effective_latest_trade_date,
-        prefer_realtime=True,
-    )
+    resolved_trade_date = trade_date or await asyncio.to_thread(service.get_latest_trade_date)
     if not resolved_trade_date:
         raise HTTPException(status_code=503, detail="无法确定目标交易日")
 

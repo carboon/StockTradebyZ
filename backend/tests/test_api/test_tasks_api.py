@@ -498,7 +498,7 @@ def test_start_incremental_update_blocked_by_running_full_update(test_client_wit
 
 
 @pytest.mark.api
-def test_start_incremental_update_prefers_realtime_latest_trade_date_when_available(test_client_with_db: Any) -> None:
+def test_start_incremental_update_uses_latest_calendar_trade_date_without_readiness_probe(test_client_with_db: Any) -> None:
     with patch(
         "app.services.market_service.MarketService.get_update_state",
         return_value=_mock_incremental_state(status="idle", running=False),
@@ -507,7 +507,7 @@ def test_start_incremental_update_prefers_realtime_latest_trade_date_when_availa
             patch("app.services.market_service.MarketService.incremental_update", return_value={"ok": True, "updated": 0, "skipped": 0, "failed": 0}), \
             patch("app.api.tasks.TushareService") as mock_service_class:
         mock_service = MagicMock()
-        mock_service.get_effective_latest_trade_date.return_value = "2026-05-06"
+        mock_service.get_latest_trade_date.return_value = "2026-05-06"
         mock_service_class.return_value = mock_service
 
         response = test_client_with_db.post("/api/v1/tasks/start-incremental")
@@ -516,7 +516,25 @@ def test_start_incremental_update_prefers_realtime_latest_trade_date_when_availa
     data = response.json()
     assert data["success"] is True
     assert "2026-05-06" in data["message"]
-    mock_service.get_effective_latest_trade_date.assert_called_once_with(prefer_realtime=True)
+    mock_service.get_latest_trade_date.assert_called_once_with()
+    mock_service.get_effective_latest_trade_date.assert_not_called()
+
+
+@pytest.mark.api
+def test_start_daily_batch_uses_latest_calendar_trade_date_without_readiness_probe(test_client_with_db: Any) -> None:
+    with patch("app.api.tasks.TushareService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service.get_latest_trade_date.return_value = "2026-05-06"
+        mock_service_class.return_value = mock_service
+
+        response = test_client_with_db.post("/api/v1/tasks/start-daily-batch")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["trade_date"] == "2026-05-06"
+    mock_service.get_latest_trade_date.assert_called_once_with()
+    mock_service.get_effective_latest_trade_date.assert_not_called()
 
 
 @pytest.mark.api

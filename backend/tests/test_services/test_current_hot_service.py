@@ -6,6 +6,7 @@ import pytest
 
 from app.models import Config, CurrentHotAnalysisResult, CurrentHotCandidate, CurrentHotRun, Stock, StockDaily, StockFinancial
 from app.services.current_hot_service import CurrentHotService
+from app.services.realtime_daily_bar_service import RealtimeDailyBar
 
 
 def _seed_stock_history(test_db, code: str, end_date: date, days: int = 90, base: float = 10.0) -> None:
@@ -42,6 +43,9 @@ class _FakeSelector:
         prepared["zxdkx"] = [1.0] * len(prepared)
         prepared["wma_bull"] = [True] * len(prepared)
         return prepared
+
+    def check_b1(self, df: pd.DataFrame, code: str) -> dict:
+        return {"b1_passed": True, "b1_signal_type": "old_b1", "j": 10.0}
 
 
 @pytest.mark.service
@@ -123,12 +127,13 @@ def test_load_financial_metrics_refreshes_missing_or_incomplete_cache(test_db) -
 
 
 @pytest.mark.service
-def test_load_price_streak_days_uses_current_candle_direction(test_db) -> None:
+def test_load_price_streak_days_uses_close_to_previous_close(test_db) -> None:
     dates = [date(2026, 5, day) for day in range(4, 9)]
     test_db.add_all([
         Stock(code="600000", name="连涨", market="SH"),
         Stock(code="600001", name="今日转跌", market="SH"),
         Stock(code="600002", name="平盘", market="SH"),
+        Stock(code="600003", name="红K下跌", market="SH"),
     ])
     test_db.add_all([
         StockDaily(code="600000", trade_date=dates[0], open=10.0, close=9.8, high=10.1, low=9.7, volume=100),
@@ -139,17 +144,20 @@ def test_load_price_streak_days_uses_current_candle_direction(test_db) -> None:
         StockDaily(code="600001", trade_date=dates[3], open=10.0, close=10.2, high=10.3, low=9.9, volume=100),
         StockDaily(code="600001", trade_date=dates[4], open=10.2, close=10.0, high=10.3, low=9.9, volume=100),
         StockDaily(code="600002", trade_date=dates[4], open=10.0, close=10.0, high=10.1, low=9.9, volume=100),
+        StockDaily(code="600003", trade_date=dates[3], open=10.0, close=10.2, high=10.3, low=9.9, volume=100),
+        StockDaily(code="600003", trade_date=dates[4], open=9.9, close=10.1, high=10.2, low=9.8, volume=100),
     ])
     test_db.commit()
 
     result = CurrentHotService(test_db)._load_price_streak_days(
-        ["600000", "600001", "600002"],
+        ["600000", "600001", "600002", "600003"],
         dates[4],
     )
 
     assert result["600000"] == 4
     assert result["600001"] == -1
     assert result["600002"] == 0
+    assert result["600003"] == -1
 
 
 @pytest.mark.service
@@ -234,6 +242,78 @@ def test_generate_current_hot_persists_and_updates_consecutive_metrics(test_db) 
     assert [item["code"] for item in results_payload["results"]] == ["600000", "688001"]
     assert results_payload["results"][0]["total_score"] == 5.2
     assert test_db.query(CurrentHotAnalysisResult).count() == 4
+
+
+@pytest.mark.service
+def test_generate_current_hot_preview_realtime_appends_today_bar(test_db) -> None:
+    today = date(2026, 5, 8)
+    previous_trade_date = date(2026, 5, 7)
+    _seed_stock_history(test_db, "600000", previous_trade_date, days=70, base=10.0)
+    service = CurrentHotService(test_db)
+
+    def fake_quant_review(code: str, df: pd.DataFrame, check_date: str) -> dict:
+        assert check_date == today.isoformat()
+        assert pd.Timestamp(df.iloc[-1]["date"]).date() == today
+        assert df.iloc[-1]["close"] == 12.3
+        return {
+            "score": 6.0,
+            "verdict": "PASS",
+            "signal_type": "trend_start",
+            "comment": "preview",
+            "signal_reasoning": None,
+            "scores": {},
+            "trend_reasoning": None,
+            "position_reasoning": None,
+            "volume_reasoning": None,
+            "abnormal_move_reasoning": None,
+        }
+
+    realtime_bar = RealtimeDailyBar(
+        code="600000",
+        trade_date=today,
+        open=12.0,
+        close=12.3,
+        high=12.5,
+        low=11.9,
+        volume=456000,
+        amount=5600000,
+        turnover_rate=6.6,
+        volume_ratio=1.7,
+        total_mv=10_000_000_000,
+        circ_mv=9_000_000_000,
+        source="tencent_quote",
+        quote_time="20260508150100",
+    )
+
+    with patch.object(
+        CurrentHotService,
+        "_load_pool_config",
+        return_value={"测试主题": {"浦发银行": "600000"}},
+    ), patch.object(
+        service.realtime_daily_bar_service,
+        "get_today",
+        return_value=today,
+    ), patch.object(
+        service.realtime_daily_bar_service,
+        "fetch_bars",
+        return_value={"600000": realtime_bar},
+    ), patch(
+        "app.services.current_hot_service.analysis_service._build_hybrid_b1_selector",
+        return_value=_FakeSelector(),
+    ), patch(
+        "app.services.current_hot_service.analysis_service._quant_review_for_date",
+        side_effect=fake_quant_review,
+    ):
+        payload = service.generate_for_trade_date(preview_realtime=True, recalculate_consecutive=False)
+
+    assert payload["status"] == "ok"
+    assert payload["trade_date"] == today
+    candidate = test_db.query(CurrentHotCandidate).filter(CurrentHotCandidate.pick_date == today, CurrentHotCandidate.code == "600000").one()
+    assert candidate.close_price == 12.3
+    assert candidate.turnover_rate == 6.6
+    result = test_db.query(CurrentHotAnalysisResult).filter(CurrentHotAnalysisResult.pick_date == today, CurrentHotAnalysisResult.code == "600000").one()
+    assert result.details_json["data_source"] == "preview_realtime"
+    assert result.details_json["realtime_source"] == "tencent_quote"
 
 
 @pytest.mark.service
@@ -353,6 +433,42 @@ def test_generate_current_hot_can_skip_remote_history_backfill(test_db) -> None:
     assert analysis.comment == "历史数据不足"
     assert analysis.turnover_rate == 13.1383
     assert analysis.volume_ratio == 0.78
+
+
+@pytest.mark.service
+def test_current_hot_change_pct_uses_previous_close(test_db) -> None:
+    target_date = date(2026, 5, 8)
+    test_db.add(Stock(code="688795", name="摩尔线程-U", market="SH", industry="半导体"))
+    test_db.add_all(
+        [
+            StockDaily(
+                code="688795",
+                trade_date=date(2026, 5, 7),
+                open=90.0,
+                close=100.0,
+                high=101.0,
+                low=89.0,
+                volume=100000,
+            ),
+            StockDaily(
+                code="688795",
+                trade_date=target_date,
+                open=110.0,
+                close=105.0,
+                high=112.0,
+                low=104.0,
+                volume=100000,
+                turnover_rate=13.1383,
+                volume_ratio=0.78,
+            ),
+        ]
+    )
+    test_db.commit()
+
+    payload = CurrentHotService(test_db).build_trade_snapshot("688795", target_date)
+
+    assert payload["comment"] == "历史数据不足"
+    assert payload["change_pct"] == pytest.approx(5.0)
 
 
 @pytest.mark.service

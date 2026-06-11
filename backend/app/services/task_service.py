@@ -1661,6 +1661,7 @@ class TaskService:
         code = params.get("code")
         check_date = params.get("check_date")
         force = bool(params.get("force", False))
+        preview_realtime = bool(params.get("preview_realtime", False))
         if not code or not check_date:
             raise Exception("缺少股票代码或交易日")
 
@@ -1680,6 +1681,7 @@ class TaskService:
             code,
             check_date,
             force,
+            preview_realtime,
         )
         if not result.get("success"):
             raise Exception(result.get("error", "诊断详情生成失败"))

@@ -23,6 +23,7 @@ from app.config import settings
 from app.services.analysis_cache import analysis_cache
 from app.services.daily_data_service import DailyDataService
 from app.services.kline_service import get_daily_data
+from app.services.realtime_daily_bar_service import RealtimeDailyBarService
 from app.database import SessionLocal
 from app.models import AnalysisResult, DailyB1Check, DailyB1CheckDetail, StockDaily
 
@@ -42,6 +43,7 @@ class AnalysisService:
         self._reviewer = None
         self._history_active_pool_cache: dict[tuple[str, str, int, int], dict[pd.Timestamp, set[str]]] = {}
         self._history_active_pool_rank_cache: dict[tuple[str, str, int, int, tuple[str, ...]], dict[str, dict[pd.Timestamp, int]]] = {}
+        self.realtime_daily_bar_service = RealtimeDailyBarService()
 
     def clear_active_pool_factor_cache(self) -> None:
         """清理进程内活跃池派生因子缓存。"""
@@ -533,6 +535,9 @@ class AnalysisService:
                 "volume_healthy": record.get("volume_healthy"),
                 "turnover_rate": record.get("turnover_rate"),
                 "volume_ratio": record.get("volume_ratio"),
+                "data_source": record.get("data_source"),
+                "realtime_source": record.get("realtime_source"),
+                "realtime_quote_time": record.get("realtime_quote_time"),
                 "pullback_quality": score_result.get("pullback_quality"),
                 "pullback_negative_flags": score_result.get("pullback_negative_flags") or [],
                 "pullback_has_abnormal_bear_bar": score_result.get("pullback_has_abnormal_bear_bar"),
@@ -549,6 +554,36 @@ class AnalysisService:
         if "change_pct" not in prepared.columns:
             prepared["change_pct"] = prepared["close"].pct_change() * 100
         return prepared
+
+    def _append_realtime_daily_bar(self, df: pd.DataFrame, code: str, target_date: date_class) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        today = self.realtime_daily_bar_service.get_today()
+        if target_date != today:
+            return df
+        work = df.copy()
+        work["date"] = pd.to_datetime(work["date"], errors="coerce")
+        existing_dates = {pd.Timestamp(item).date() for item in work["date"].dropna().tolist()}
+        if target_date in existing_dates:
+            return df
+        bars = self.realtime_daily_bar_service.fetch_bars([code], trade_date=target_date)
+        bar = bars.get(code.zfill(6))
+        if bar is None or bar.close is None:
+            return df
+        realtime_row = {
+            "date": pd.Timestamp(target_date),
+            "open": bar.open,
+            "close": bar.close,
+            "high": bar.high,
+            "low": bar.low,
+            "volume": bar.volume,
+            "amount": bar.amount,
+            "turnover_rate": bar.turnover_rate,
+            "volume_ratio": bar.volume_ratio,
+            "realtime_source": bar.source,
+            "realtime_quote_time": bar.quote_time,
+        }
+        return pd.concat([work, pd.DataFrame([realtime_row])], ignore_index=True)
 
     def get_recent_trade_dates(self, code: str, days: int = HISTORY_WINDOW_DAYS) -> list[str]:
         days = max(1, min(int(days), self.HISTORY_WINDOW_DAYS))
@@ -799,6 +834,9 @@ class AnalysisService:
                         "signal_type": score_result.get("signal_type"),
                         "tomorrow_star_pass": tomorrow_star_pass,
                         "notes": fail_reason,
+                        "data_source": "preview_realtime" if row.get("realtime_source") else "tushare_daily",
+                        "realtime_source": row.get("realtime_source"),
+                        "realtime_quote_time": row.get("realtime_quote_time"),
                     }
                     detail_payload = self._build_history_detail_payload(record=record, score_result=score_result)
 
@@ -868,6 +906,7 @@ class AnalysisService:
         page_size: int = 10,
         force: bool = False,
         include_prefilter: bool = False,
+        preview_realtime: bool = False,
     ) -> dict[str, Any]:
         code = code.zfill(6)
         status = self.get_history_refresh_status(
@@ -910,6 +949,8 @@ class AnalysisService:
         df = self.load_stock_data(code, days=max(days + 240, 365))
         if df is None or df.empty:
             return {"success": False, "error": "数据不存在"}
+        if preview_realtime and target_dates:
+            df = self._append_realtime_daily_bar(df, code, date_class.fromisoformat(target_dates[0]))
         prepared_df = self._prepare_history_dataframe(df)
         if prepared_df.empty:
             return {"success": False, "error": "数据不存在"}
@@ -941,6 +982,7 @@ class AnalysisService:
         target_dates: list[date_class],
         *,
         force: bool = False,
+        preview_realtime: bool = False,
     ) -> dict[str, Any]:
         code = code.zfill(6)
         normalized_dates = sorted({item for item in target_dates if isinstance(item, date_class)})
@@ -990,6 +1032,9 @@ class AnalysisService:
         df = self.load_stock_data(code, days=max(len(normalized_dates) + 300, 365))
         if df is None or df.empty:
             return {"success": False, "error": "数据不存在", "code": code}
+        if preview_realtime:
+            for target_date in normalized_dates:
+                df = self._append_realtime_daily_bar(df, code, target_date)
         prepared_df = self._prepare_history_dataframe(df)
         if prepared_df.empty:
             return {"success": False, "error": "数据不存在", "code": code}
@@ -1727,6 +1772,7 @@ class AnalysisService:
         days: int = HISTORY_WINDOW_DAYS,
         clean: bool = True,
         target_dates: Optional[list[str | date_class]] = None,
+        preview_realtime: bool = False,
     ) -> dict:
         """
         重新刷新并持久化股票历史检查数据
@@ -1757,6 +1803,9 @@ class AnalysisService:
                     )
                 except ValueError:
                     continue
+            if preview_realtime and normalized_target_dates:
+                df = self._append_realtime_daily_bar(df, code, normalized_target_dates[0])
+                prepared_df = self._prepare_history_dataframe(df)
             available_dates = {
                 pd.Timestamp(ts).date()
                 for ts in prepared_df["date"].tolist()
@@ -1824,7 +1873,7 @@ class AnalysisService:
                 },
             }
 
-    def generate_history_detail(self, code: str, check_date: Any, force: bool = False) -> dict[str, Any]:
+    def generate_history_detail(self, code: str, check_date: Any, force: bool = False, preview_realtime: bool = False) -> dict[str, Any]:
         code = code.zfill(6)
         check_date_obj = self._normalize_check_date(check_date)
         if not check_date_obj:
@@ -1837,6 +1886,8 @@ class AnalysisService:
         df = self.load_stock_data(code, days=365)
         if df is None or df.empty:
             return {"success": False, "error": "数据不存在"}
+        if preview_realtime:
+            df = self._append_realtime_daily_bar(df, code, check_date_obj)
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
@@ -1901,6 +1952,9 @@ class AnalysisService:
                 verdict=score_result.get("verdict"),
                 signal_type=score_result.get("signal_type"),
             ),
+            "data_source": "preview_realtime" if last_row.get("realtime_source") else "tushare_daily",
+            "realtime_source": last_row.get("realtime_source"),
+            "realtime_quote_time": last_row.get("realtime_quote_time"),
         }
         payload = self._build_history_detail_payload(record=record, score_result=score_result)
         with SessionLocal() as db:

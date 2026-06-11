@@ -3568,6 +3568,18 @@ async function refreshCurrentHotCandidates() {
     return
   }
 
+  if (authStore.isAdmin) {
+    currentHotLoading.value = true
+    try {
+      await apiAnalysis.generateCurrentHot('quant', true)
+    } catch (error) {
+      currentHotLoading.value = false
+      ElMessage.error(getUserSafeErrorMessage(error, '实时预分析生成失败'))
+      return
+    }
+    currentHotLoading.value = false
+  }
+
   currentHotCandidatesCache.value.clear()
   await loadCurrentHotData(true)
 

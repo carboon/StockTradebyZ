@@ -1160,6 +1160,7 @@ async function searchStock(requestId: number, options: { autoRefreshHistory?: bo
   stockCode.value = matchedStock.code.padStart(6, '0')
   stockName.value = matchedStock.name || ''
   searchForm.value.code = stockCode.value
+  syncDiagnosisRouteCode(stockCode.value)
   analysisResult.value = null
   stockAiAnalysisResult.value = null
   trendStartDates.value = []
@@ -1181,6 +1182,20 @@ async function searchStock(requestId: number, options: { autoRefreshHistory?: bo
   if (options.autoRefreshHistory !== false) {
     await maybeAutoRefreshHistory()
   }
+}
+
+function syncDiagnosisRouteCode(code: string) {
+  if (route.path !== '/diagnosis') return
+
+  const routeCode = normalizeRouteCode(route.query.code)
+  const preserveRouteContext = routeCode === code && shouldLoadRouteReadOnly()
+  if (routeCode === code && preserveRouteContext) return
+
+  const query = preserveRouteContext
+    ? { ...route.query, code }
+    : { code }
+
+  void router.replace({ path: '/diagnosis', query })
 }
 
 function buildAnalysisResultFromHistory(row: B1Check): DiagnosisViewResult {
@@ -1351,6 +1366,7 @@ async function triggerHistoryRefresh(silent: boolean = false, force: boolean = f
       historyPage.value,
       historyPageSize,
       force,
+      false,
       { signal: refreshSignal },
     )
     lastAutoHistoryRefreshAt.value[stockCode.value] = Date.now()

@@ -154,6 +154,64 @@ class IntradayAnalysisSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class LateSessionScreenRun(Base):
+    """尾盘筛选运行批次。"""
+    __tablename__ = "late_session_screen_runs"
+    __table_args__ = (
+        UniqueConstraint("trade_date", name="uq_late_session_screen_runs_trade_date"),
+        Index("ix_late_session_screen_runs_status_trade_date", "status", "trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    snapshot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready", index=True)
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    final_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    funnel_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    market_overview_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    generated_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    force_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class LateSessionScreenResult(Base):
+    """尾盘筛选单股结果。"""
+    __tablename__ = "late_session_screen_results"
+    __table_args__ = (
+        UniqueConstraint("run_id", "code", name="uq_late_session_screen_results_run_code"),
+        Index("ix_late_session_screen_results_run_score", "run_id", "final_score"),
+        Index("ix_late_session_screen_results_trade_date_code", "trade_date", "code"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("late_session_screen_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), ForeignKey("stocks.code"), nullable=False, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    industry: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    latest_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    turnover_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    circ_mv: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    final_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    final_pass: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    hard_pass: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    volume_pattern: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    ma_pattern: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    intraday_pattern: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    hot_topics_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class ClosingAnalysisReport(Base):
     """收盘分析日报。"""
     __tablename__ = "closing_analysis_reports"

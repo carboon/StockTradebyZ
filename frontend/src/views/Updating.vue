@@ -43,11 +43,12 @@ const authStore = useAuthStore()
 const refreshing = ref(false)
 const activeTask = ref<Task | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+const DIAGNOSIS_STATE_KEY = 'stocktrade:diagnosis:state:v3'
 
 const isAdmin = computed(() => authStore.isAdmin)
 const redirectPath = computed(() => {
   const raw = typeof route.query.redirect === 'string' ? route.query.redirect : ''
-  return raw || '/tomorrow-star'
+  return raw || getDiagnosisRedirectFallback() || '/tomorrow-star'
 })
 const displayMessage = computed(() => {
   if (!activeTask.value) {
@@ -67,6 +68,22 @@ function taskTypeLabel(taskType: string) {
     recent_120_rebuild: '近120交易日重建',
   }
   return labels[taskType] || taskType
+}
+
+function getDiagnosisRedirectFallback(): string {
+  if (typeof window === 'undefined') return ''
+
+  try {
+    const raw = sessionStorage.getItem(DIAGNOSIS_STATE_KEY)
+    if (!raw) return ''
+
+    const state = JSON.parse(raw)
+    const code = typeof state?.stockCode === 'string' ? state.stockCode.trim() : ''
+    return code ? `/diagnosis?code=${encodeURIComponent(code)}` : ''
+  } catch {
+    sessionStorage.removeItem(DIAGNOSIS_STATE_KEY)
+    return ''
+  }
 }
 
 async function refreshState() {

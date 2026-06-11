@@ -32,6 +32,7 @@ from app.services.daily_data_service import DailyDataService
 from app.services.financial_data_service import FinancialDataService
 from app.services.risk_regime_ai_service import RiskRegimeAIService
 from app.services.risk_regime_service import RiskRegimeService
+from app.services.realtime_daily_bar_service import RealtimeDailyBar, RealtimeDailyBarService
 from app.services.sector_analysis_config import (
     resolve_sector_analysis_catalog,
     resolve_sector_stock_pool,
@@ -73,6 +74,7 @@ class CurrentHotService:
         self.db = db
         self.tushare_service = TushareService()
         self._prefilter = None
+        self.realtime_daily_bar_service = RealtimeDailyBarService()
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
@@ -514,7 +516,7 @@ class CurrentHotService:
             return {}
 
         rows = (
-            self.db.query(StockDaily.code, StockDaily.trade_date, StockDaily.open, StockDaily.close)
+            self.db.query(StockDaily.code, StockDaily.trade_date, StockDaily.close)
             .filter(
                 StockDaily.code.in_(normalized_codes),
                 StockDaily.trade_date.in_(recent_dates),
@@ -523,30 +525,31 @@ class CurrentHotService:
             .all()
         )
 
-        grouped: dict[str, list[tuple[date, float, float]]] = {}
+        grouped: dict[str, list[tuple[date, float]]] = {}
         seen_dates_by_code: dict[str, set[date]] = {}
-        for code, trade_date, open_price, close_price in rows:
-            if trade_date is None or open_price is None or close_price is None:
+        for code, trade_date, close_price in rows:
+            if trade_date is None or close_price is None:
                 continue
             normalized_code = str(code).zfill(6)
             seen_dates = seen_dates_by_code.setdefault(normalized_code, set())
             if trade_date in seen_dates:
                 continue
             seen_dates.add(trade_date)
-            grouped.setdefault(normalized_code, []).append((trade_date, float(open_price), float(close_price)))
+            grouped.setdefault(normalized_code, []).append((trade_date, float(close_price)))
 
         result: dict[str, int] = {}
         for code, points_desc in grouped.items():
-            if not points_desc:
+            if len(points_desc) < 2:
+                result[code] = 0
                 continue
-            first_sign = self._price_day_sign(points_desc[0][1], points_desc[0][2])
+            first_sign = self._close_change_sign(points_desc[0][1], points_desc[1][1])
             if first_sign == 0:
                 result[code] = 0
                 continue
 
             streak = 0
-            for _, open_price, close_price in points_desc:
-                sign = self._price_day_sign(open_price, close_price)
+            for index in range(len(points_desc) - 1):
+                sign = self._close_change_sign(points_desc[index][1], points_desc[index + 1][1])
                 if sign != first_sign:
                     break
                 streak += 1
@@ -554,8 +557,8 @@ class CurrentHotService:
         return result
 
     @staticmethod
-    def _price_day_sign(open_price: float, close_price: float) -> int:
-        diff = close_price - open_price
+    def _close_change_sign(close_price: float, previous_close_price: float) -> int:
+        diff = close_price - previous_close_price
         if abs(diff) < 1e-9:
             return 0
         return 1 if diff > 0 else -1
@@ -809,7 +812,14 @@ class CurrentHotService:
             )
         self.db.flush()
 
-    def load_stock_frame(self, code: str, trade_date: date, days: int = 365) -> pd.DataFrame:
+    def load_stock_frame(
+        self,
+        code: str,
+        trade_date: date,
+        days: int = 365,
+        *,
+        realtime_bar: RealtimeDailyBar | None = None,
+    ) -> pd.DataFrame:
         rows = (
             self.db.query(StockDaily)
             .filter(
@@ -820,11 +830,10 @@ class CurrentHotService:
             .limit(days)
             .all()
         )
-        if not rows:
+        if not rows and realtime_bar is None:
             return pd.DataFrame()
         ordered_rows = list(reversed(rows))
-        return pd.DataFrame(
-            [
+        items = [
                 {
                     "date": row.trade_date,
                     "open": self._safe_float(row.open),
@@ -836,8 +845,24 @@ class CurrentHotService:
                     "volume_ratio": self._safe_float(row.volume_ratio),
                 }
                 for row in ordered_rows
-            ]
-        )
+        ]
+        if realtime_bar is not None and realtime_bar.trade_date == trade_date:
+            items = [item for item in items if item["date"] != trade_date]
+            items.append(
+                {
+                    "date": realtime_bar.trade_date,
+                    "open": realtime_bar.open,
+                    "close": realtime_bar.close,
+                    "high": realtime_bar.high,
+                    "low": realtime_bar.low,
+                    "volume": realtime_bar.volume,
+                    "turnover_rate": realtime_bar.turnover_rate,
+                    "volume_ratio": realtime_bar.volume_ratio,
+                    "realtime_source": realtime_bar.source,
+                    "realtime_quote_time": realtime_bar.quote_time,
+                }
+            )
+        return pd.DataFrame(items)
 
     def _persist_history_frame(self, code: str, frame: Optional[pd.DataFrame]) -> int:
         if frame is None or frame.empty:
@@ -1002,9 +1027,7 @@ class CurrentHotService:
         last_row = frame.iloc[-1] if frame is not None and not frame.empty else None
         open_price = self._safe_float(last_row.get("open")) if last_row is not None else None
         close_price = self._safe_float(last_row.get("close")) if last_row is not None else None
-        change_pct = None
-        if open_price not in (None, 0) and close_price is not None:
-            change_pct = (close_price - open_price) / open_price * 100
+        change_pct = self._calc_frame_change_pct(frame)
         turnover_rate = self._safe_float(last_row.get("turnover_rate")) if last_row is not None else None
         volume_ratio = self._safe_float(last_row.get("volume_ratio")) if last_row is not None else None
         return {
@@ -1040,8 +1063,14 @@ class CurrentHotService:
             },
         }
 
-    def build_trade_snapshot(self, code: str, trade_date: date) -> dict[str, Any]:
-        frame = self.load_stock_frame(code, trade_date, days=365)
+    def build_trade_snapshot(
+        self,
+        code: str,
+        trade_date: date,
+        *,
+        realtime_bar: RealtimeDailyBar | None = None,
+    ) -> dict[str, Any]:
+        frame = self.load_stock_frame(code, trade_date, days=365, realtime_bar=realtime_bar)
         if frame.empty or len(frame) < 60:
             return self._build_fallback_snapshot(
                 code=code,
@@ -1063,11 +1092,11 @@ class CurrentHotService:
 
             last_row = prepared.iloc[-1]
             last_price_row = frame.iloc[-1]
+            realtime_source = last_price_row.get("realtime_source")
+            realtime_quote_time = last_price_row.get("realtime_quote_time")
             open_price = self._safe_float(last_price_row.get("open"))
             close_price = self._safe_float(last_price_row.get("close"))
-            change_pct = None
-            if open_price not in (None, 0) and close_price is not None:
-                change_pct = (close_price - open_price) / open_price * 100
+            change_pct = self._calc_frame_change_pct(frame)
 
             b1_result = selector.check_b1(prepared, code)
             b1_passed = bool(b1_result.get("b1_passed", False))
@@ -1119,6 +1148,9 @@ class CurrentHotService:
                     "volume_healthy": analysis_service._calculate_volume_health(prepared),
                     "turnover_rate": self._safe_float(last_price_row.get("turnover_rate")),
                     "volume_ratio": self._safe_float(last_price_row.get("volume_ratio")),
+                    "data_source": "preview_realtime" if realtime_source else "tushare_daily",
+                    "realtime_source": realtime_source,
+                    "realtime_quote_time": realtime_quote_time,
                 },
             }
         except Exception as exc:
@@ -1128,6 +1160,15 @@ class CurrentHotService:
                 reason=f"分析失败: {exc}",
                 frame=frame,
             )
+
+    @staticmethod
+    def _calc_frame_change_pct(frame: Optional[pd.DataFrame]) -> Optional[float]:
+        if frame is None or frame.empty or len(frame.index) < 2:
+            return None
+        close = pd.to_numeric(frame["close"], errors="coerce")
+        if close.empty or pd.isna(close.iloc[-1]) or pd.isna(close.iloc[-2]) or float(close.iloc[-2]) == 0:
+            return None
+        return (float(close.iloc[-1]) - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
 
     def _get_or_create_run(
         self,
@@ -1242,8 +1283,11 @@ class CurrentHotService:
         *,
         backfill_missing_history: bool = True,
         recalculate_consecutive: bool = True,
+        preview_realtime: bool = False,
     ) -> dict[str, Any]:
-        target_trade_date = self._normalize_trade_date(trade_date) or self.get_latest_trade_date()
+        target_trade_date = self._normalize_trade_date(trade_date) or (
+            self.realtime_daily_bar_service.get_today() if preview_realtime else self.get_latest_trade_date()
+        )
         if target_trade_date is None:
             return {
                 "trade_date": None,
@@ -1279,6 +1323,14 @@ class CurrentHotService:
                 target_trade_date,
                 backfill_missing_history=backfill_missing_history,
             )
+            realtime_bars: dict[str, RealtimeDailyBar] = {}
+            if preview_realtime:
+                realtime_bars = self.realtime_daily_bar_service.fetch_bars(
+                    [entry.code for entry in entries],
+                    trade_date=target_trade_date,
+                )
+                if not realtime_bars:
+                    raise RuntimeError("实时行情抓取失败，未生成预分析")
             self.db.query(CurrentHotCandidate).filter(
                 CurrentHotCandidate.pick_date == target_trade_date
             ).delete(synchronize_session=False)
@@ -1289,7 +1341,11 @@ class CurrentHotService:
             candidate_rows: list[CurrentHotCandidate] = []
             analysis_rows: list[CurrentHotAnalysisResult] = []
             for entry in entries:
-                payload = self.build_trade_snapshot(entry.code, target_trade_date)
+                payload = self.build_trade_snapshot(
+                    entry.code,
+                    target_trade_date,
+                    realtime_bar=realtime_bars.get(entry.code),
+                )
                 if payload.get("close_price") is None:
                     skipped_count += 1
                 else:

@@ -461,6 +461,60 @@ class IntradayAnalysisPrefetchResponse(BaseModel):
     downloaded_count: int = 0
 
 
+class LateSessionFunnelStep(BaseModel):
+    key: str
+    label: str
+    count: int
+
+
+class LateSessionScreenItem(BaseModel):
+    id: int
+    trade_date: date_class
+    code: str
+    name: Optional[str] = None
+    industry: Optional[str] = None
+    latest_price: Optional[float] = None
+    change_pct: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    circ_mv: Optional[float] = None
+    volume: Optional[float] = None
+    amount: Optional[float] = None
+    final_score: Optional[float] = None
+    final_pass: bool = False
+    hard_pass: bool = False
+    reject_reason: Optional[str] = None
+    volume_pattern: Optional[str] = None
+    ma_pattern: Optional[str] = None
+    intraday_pattern: Optional[str] = None
+    hot_topics: List[str] = Field(default_factory=list)
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class LateSessionScreenResponse(BaseModel):
+    trade_date: date_class
+    snapshot_time: Optional[datetime] = None
+    window_open: bool
+    has_data: bool
+    status: str
+    message: Optional[str] = None
+    funnel: List[LateSessionFunnelStep] = Field(default_factory=list)
+    market_overview: Optional[Dict[str, Any]] = None
+    items: List[LateSessionScreenItem] = Field(default_factory=list)
+    total: int = 0
+    final_count: int = 0
+
+
+class LateSessionWatchlistAddRequest(BaseModel):
+    codes: List[str]
+
+
+class LateSessionWatchlistAddResponse(BaseModel):
+    added_count: int = 0
+    skipped_count: int = 0
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class CurrentHotIntradayAnalysisItem(BaseModel):
     """当前热盘中盘分析快照项"""
     id: int

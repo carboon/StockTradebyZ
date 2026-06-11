@@ -42,6 +42,7 @@ from app.services.closing_analysis_service import ClosingAnalysisService
 from app.services.diagnosis_history_cache_service import diagnosis_history_cache_service
 from app.services.hot_news_aggregator_service import HotNewsAggregatorService
 from app.services.intraday_analysis_service import IntradayAnalysisService
+from app.services.late_session_screen_service import LateSessionScreenService
 from app.services.market_service import MarketService
 from app.services.sector_analysis_service import SectorAnalysisService
 from app.services.stock_ai_analysis_service import StockAiAnalysisService
@@ -82,6 +83,9 @@ from app.schemas import (
     IntradayAnalysisGenerateResponse,
     IntradayAnalysisPrefetchResponse,
     IntradayAnalysisResponse,
+    LateSessionScreenResponse,
+    LateSessionWatchlistAddRequest,
+    LateSessionWatchlistAddResponse,
     DiagnosisHistoryResponse,
     DiagnosisHistoryDetailResponse,
     B1CheckItem,
@@ -1684,11 +1688,18 @@ def get_sector_analysis_rows(
 def generate_current_hot(
     date: Optional[str] = Query(default=None, description="交易日"),
     reviewer: str = Query(default="quant", description="评审者类型"),
+    preview_realtime: bool = Query(default=False, description="使用实时行情合成今日临时K线进行预分析"),
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ) -> dict:
-    ensure_tushare_ready()
-    result = CurrentHotService(db).generate_for_trade_date(date, reviewer=reviewer)
+    if not preview_realtime:
+        ensure_tushare_ready()
+    result = CurrentHotService(db).generate_for_trade_date(
+        date,
+        reviewer=reviewer,
+        preview_realtime=preview_realtime,
+        backfill_missing_history=not preview_realtime,
+    )
     # generate 成功后清除聚合缓存，确保后续请求拿到最新数据
     if result.get("status") == "ok":
         CurrentHotAggregateService.invalidate_cache()
@@ -1924,6 +1935,63 @@ async def prefetch_intraday_analysis(
     return IntradayAnalysisPrefetchResponse(**payload)
 
 
+@router.get("/late-session/status", response_model=LateSessionScreenResponse)
+def get_late_session_status(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_user),
+) -> LateSessionScreenResponse:
+    service = LateSessionScreenService(db)
+    status = service.get_status(is_admin=current_user.role == "admin")
+    return LateSessionScreenResponse(
+        trade_date=status.trade_date,
+        snapshot_time=status.snapshot_time,
+        window_open=status.window_open,
+        has_data=status.has_data,
+        status=status.status,
+        message=status.message,
+        funnel=[],
+        market_overview=None,
+        items=[],
+        total=0,
+        final_count=0,
+    )
+
+
+@router.get("/late-session/data", response_model=LateSessionScreenResponse)
+def get_late_session_data(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_user),
+) -> LateSessionScreenResponse:
+    payload = LateSessionScreenService(db).get_payload(is_admin=current_user.role == "admin")
+    return LateSessionScreenResponse(**payload)
+
+
+@router.post("/late-session/generate", response_model=LateSessionScreenResponse)
+async def generate_late_session_screen(
+    force: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user=Depends(require_user),
+) -> LateSessionScreenResponse:
+    await ensure_tushare_ready_if_configured_async()
+    payload = await asyncio.to_thread(
+        LateSessionScreenService(db).generate,
+        user_id=current_user.id,
+        is_admin=current_user.role == "admin",
+        force=force,
+    )
+    return LateSessionScreenResponse(**payload)
+
+
+@router.post("/late-session/add-watchlist", response_model=LateSessionWatchlistAddResponse)
+def add_late_session_watchlist(
+    request: LateSessionWatchlistAddRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_user),
+) -> LateSessionWatchlistAddResponse:
+    payload = LateSessionScreenService(db).add_watchlist(user_id=current_user.id, codes=request.codes)
+    return LateSessionWatchlistAddResponse(**payload)
+
+
 @router.get("/diagnosis/{code}/history", response_model=DiagnosisHistoryResponse)
 async def get_diagnosis_history(
     code: str,
@@ -2008,6 +2076,7 @@ async def generate_diagnosis_history(
     page: int = Query(default=1, description="当前页码"),
     page_size: int = Query(default=10, description="当前页大小"),
     force: bool = Query(default=False, description="是否强制刷新当前页"),
+    preview_realtime: bool = Query(default=False, description="使用实时行情合成今日临时K线进行预分析"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
@@ -2024,6 +2093,7 @@ async def generate_diagnosis_history(
         page=page,
         page_size=page_size,
         force=force,
+        preview_realtime=preview_realtime,
     )
 
     if not result.get("success"):
@@ -2104,6 +2174,7 @@ async def generate_diagnosis_history_detail(
     code: str,
     check_date: str,
     force: bool = Query(default=False, description="是否强制重新生成"),
+    preview_realtime: bool = Query(default=False, description="使用实时行情合成今日临时K线进行预分析"),
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ) -> dict:
@@ -2128,6 +2199,7 @@ async def generate_diagnosis_history_detail(
             "code": code.zfill(6),
             "check_date": check_date,
             "force": force,
+            "preview_realtime": preview_realtime,
             "reviewer": "quant",
             "trigger_source": "manual",
         },

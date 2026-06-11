@@ -61,6 +61,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '消息板块', icon: 'Bell', keepAlive: true, requiresAuth: true },
   },
   {
+    path: '/late-session-screen',
+    name: 'LateSessionScreen',
+    component: () => import('@/views/LateSessionScreen.vue'),
+    meta: { title: '尾盘筛选', icon: 'Filter', keepAlive: true, requiresAuth: true },
+  },
+  {
     path: '/value-lowland',
     name: 'ValueLowland',
     component: () => import('@/views/ValueLowland.vue'),

@@ -287,7 +287,7 @@ import { ref, computed, onMounted, onUnmounted, watch, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   TrendCharts, Expand, Fold, Setting, Star, Refresh, Search, View, Document, Grid, Bell,
-  Coin,
+  Coin, Filter,
   User as UserIcon,
 } from '@element-plus/icons-vue'
 import { apiTasks } from '@/api'
@@ -548,6 +548,7 @@ const menuRoutes = computed<MenuRouteItem[]>(() => {
   const routes: MenuRouteItem[] = [
     { path: '/tomorrow-star', icon: Star, meta: { title: '全盘分析', icon: 'Star' } },
     { path: '/news-board', icon: Bell, meta: { title: '消息板块', icon: 'Bell' } },
+    { path: '/late-session-screen', icon: Filter, meta: { title: '尾盘筛选', icon: 'Filter' } },
     { path: '/value-lowland', icon: Coin, meta: { title: '价值洼地', icon: 'Coin' } },
     {
       path: SECTOR_ANALYSIS_MENU_GROUP_INDEX,

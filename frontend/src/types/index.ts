@@ -928,6 +928,56 @@ export type CurrentHotIntradayAnalysisResponse = IntradayAnalysisResponse
 export type CurrentHotIntradayAnalysisActionResponse = IntradayAnalysisActionResponse
 export type CurrentHotIntradayAnalysisPrefetchResponse = IntradayAnalysisPrefetchResponse
 
+export interface LateSessionFunnelStep {
+  key: string
+  label: string
+  count: number
+}
+
+export interface LateSessionScreenItem {
+  id: number
+  trade_date: string
+  code: string
+  name?: string | null
+  industry?: string | null
+  latest_price?: number | null
+  change_pct?: number | null
+  volume_ratio?: number | null
+  turnover_rate?: number | null
+  circ_mv?: number | null
+  volume?: number | null
+  amount?: number | null
+  final_score?: number | null
+  final_pass: boolean
+  hard_pass: boolean
+  reject_reason?: string | null
+  volume_pattern?: string | null
+  ma_pattern?: string | null
+  intraday_pattern?: string | null
+  hot_topics?: string[]
+  details?: Record<string, any>
+}
+
+export interface LateSessionScreenResponse {
+  trade_date?: string | null
+  snapshot_time?: string | null
+  window_open?: boolean | null
+  has_data: boolean
+  status?: string | null
+  message?: string | null
+  funnel: LateSessionFunnelStep[]
+  market_overview?: Record<string, any> | null
+  items: LateSessionScreenItem[]
+  total: number
+  final_count: number
+}
+
+export interface LateSessionWatchlistAddResponse {
+  added_count: number
+  skipped_count: number
+  items: Array<Record<string, any>>
+}
+
 export interface ClosingSectorFlowItem {
   sector_name: string
   net_mf_amount: number

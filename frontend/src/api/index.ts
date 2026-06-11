@@ -37,6 +37,8 @@ import type {
   IncrementalUpdateResponse,
   IncrementalUpdateStatus,
   KLineData,
+  LateSessionScreenResponse,
+  LateSessionWatchlistAddResponse,
   LoginResponse,
   SaveEnvResponse,
   SignalReturnAnalysisResponse,
@@ -410,8 +412,8 @@ export const apiAnalysis = {
     }),
 
   // 生成当前热盘
-  generateCurrentHot: (reviewer: string = 'quant') =>
-    api.post<null, { task_id: number }>('/v1/analysis/current-hot/generate', null, { params: { reviewer } }),
+  generateCurrentHot: (reviewer: string = 'quant', previewRealtime: boolean = false) =>
+    api.post<null, { task_id: number }>('/v1/analysis/current-hot/generate', null, { params: { reviewer, preview_realtime: previewRealtime } }),
 
   // 获取中盘分析状态
   getMiddayStatus: (options?: RequestOptions) =>
@@ -432,6 +434,21 @@ export const apiAnalysis = {
   // 预下载中盘分时数据
   prefetchMidday: () =>
     api.post<null, IntradayAnalysisPrefetchResponse>('/v1/analysis/intraday/prefetch', null, { timeout: TIMEOUTS.standard }),
+
+  getLateSessionStatus: (options?: RequestOptions) =>
+    api.get<never, LateSessionScreenResponse>('/v1/analysis/late-session/status', withRequestOptions(options, TIMEOUTS.short)),
+
+  getLateSessionData: (options?: RequestOptions) =>
+    api.get<never, LateSessionScreenResponse>('/v1/analysis/late-session/data', withRequestOptions(options, TIMEOUTS.standard)),
+
+  generateLateSession: (force: boolean = false, options?: RequestOptions) =>
+    api.post<null, LateSessionScreenResponse>('/v1/analysis/late-session/generate', null, {
+      ...withRequestOptions(options, TIMEOUTS.aiLong),
+      params: { force },
+    }),
+
+  addLateSessionWatchlist: (codes: string[], options?: RequestOptions) =>
+    api.post<{ codes: string[] }, LateSessionWatchlistAddResponse>('/v1/analysis/late-session/add-watchlist', { codes }, withRequestOptions(options, TIMEOUTS.standard)),
 
   // 获取当前热盘中盘分析状态
   getCurrentHotMiddayStatus: (options?: RequestOptions) =>
@@ -506,6 +523,7 @@ export const apiAnalysis = {
     page: number = 1,
     pageSize: number = 10,
     force: boolean = false,
+    previewRealtime: boolean = false,
     options?: RequestOptions,
   ) =>
     api.post<null, {
@@ -521,7 +539,7 @@ export const apiAnalysis = {
     }>(
       `/v1/analysis/diagnosis/${code}/generate-history`,
       null,
-      { ...withRequestOptions(options, TIMEOUTS.long), params: { days, page, page_size: pageSize, force } },
+      { ...withRequestOptions(options, TIMEOUTS.long), params: { days, page, page_size: pageSize, force, preview_realtime: previewRealtime } },
     ),
 
   getHistoryDetail: (code: string, checkDate: string, options?: RequestOptions) =>
@@ -530,11 +548,11 @@ export const apiAnalysis = {
       withRequestOptions(options, TIMEOUTS.standard),
     ),
 
-  ensureHistoryDetail: (code: string, checkDate: string, force: boolean = false, options?: RequestOptions) =>
+  ensureHistoryDetail: (code: string, checkDate: string, force: boolean = false, previewRealtime: boolean = false, options?: RequestOptions) =>
     api.post<null, { task_id?: number; status: string; message: string; code: string; check_date: string; ws_url?: string }>(
       `/v1/analysis/diagnosis/${code}/history/${checkDate}/detail`,
       null,
-      { ...withRequestOptions(options, TIMEOUTS.standard), params: { force } },
+      { ...withRequestOptions(options, TIMEOUTS.standard), params: { force, preview_realtime: previewRealtime } },
     ),
 
   // 启动单股分析（后台任务模式）

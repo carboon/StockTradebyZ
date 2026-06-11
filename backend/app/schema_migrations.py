@@ -188,6 +188,16 @@ def _user_session_last_activity_migration_satisfied(inspector: Any) -> bool:
     )
 
 
+def _late_session_screen_migration_satisfied(inspector: Any) -> bool:
+    return (
+        _has_table(inspector, "late_session_screen_runs")
+        and _has_table(inspector, "late_session_screen_results")
+        and _has_unique_constraint(inspector, "late_session_screen_runs", "uq_late_session_screen_runs_trade_date")
+        and _has_unique_constraint(inspector, "late_session_screen_results", "uq_late_session_screen_results_run_code")
+        and _has_index(inspector, "late_session_screen_results", "ix_late_session_screen_results_trade_date_code")
+    )
+
+
 _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "tomorrow_star_180d.sql": _tomorrow_star_migration_satisfied,
     "daily_b1_check_details_180d.sql": _daily_b1_detail_migration_satisfied,
@@ -204,6 +214,7 @@ _COMPATIBILITY_CHECKS: dict[str, _MigrationCheck] = {
     "add_b1_signal_type.sql": _daily_b1_signal_type_migration_satisfied,
     "add_user_login_tracking.sql": _user_login_tracking_migration_satisfied,
     "add_user_session_last_activity.sql": _user_session_last_activity_migration_satisfied,
+    "add_late_session_screen_tables.sql": _late_session_screen_migration_satisfied,
 }
 
 

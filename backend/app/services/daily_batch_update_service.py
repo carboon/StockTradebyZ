@@ -6,12 +6,12 @@ Daily Batch Update Service
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Any, Callable
 
 import pandas as pd
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, delete
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -19,6 +19,7 @@ from app.database import SessionLocal
 from app.models import StockDaily
 from app.services.daily_data_service import bulk_upsert_stock_daily
 from app.services.raw_data_manifest_service import RawDataManifestService
+from app.services.realtime_daily_bar_service import RealtimeDailyBarService
 from app.services.tushare_service import TushareService
 from app.utils.tushare_rate_limit import acquire_tushare_slot
 
@@ -34,6 +35,7 @@ class DailyBatchUpdateService:
         self._owns_session = db is None
         self.tushare_service = TushareService(token=token)
         self.manifest_service = RawDataManifestService(self.db)
+        self.realtime_daily_bar_service = RealtimeDailyBarService()
 
     def __enter__(self) -> "DailyBatchUpdateService":
         return self
@@ -131,7 +133,7 @@ class DailyBatchUpdateService:
         acquire_tushare_slot("daily")
         frame = self.tushare_service.pro.daily(trade_date=normalized)
         if frame is None or frame.empty:
-            return pd.DataFrame()
+            return self._fetch_realtime_trade_date_snapshot(trade_date)
 
         frame = frame.rename(
             columns={
@@ -192,6 +194,70 @@ class DailyBatchUpdateService:
         frame["code"] = frame["ts_code"].astype(str).str.split(".").str[0].str.zfill(6)
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
         frame = self._fill_missing_volume_ratio_from_history(frame)
+        return frame.sort_values(["trade_date", "code"]).reset_index(drop=True)
+
+    def _load_realtime_target_codes(self) -> list[str]:
+        latest_trade_date = self.db.execute(select(func.max(StockDaily.trade_date))).scalar()
+        if latest_trade_date is None:
+            return []
+        rows = self.db.execute(
+            select(StockDaily.code)
+            .where(StockDaily.trade_date == latest_trade_date)
+            .order_by(StockDaily.code.asc())
+        ).scalars().all()
+        return [str(code).zfill(6) for code in rows if code]
+
+    def _fetch_realtime_trade_date_snapshot(self, trade_date: str) -> pd.DataFrame:
+        trade_day = datetime.fromisoformat(trade_date).date()
+        codes = self._load_realtime_target_codes()
+        if not codes:
+            logger.warning("实时日K兜底失败：本地无可参考股票池 trade_date=%s", trade_date)
+            return pd.DataFrame()
+        bars = self.realtime_daily_bar_service.fetch_bars(codes, trade_date=trade_day)
+        if not bars:
+            logger.warning("实时日K兜底失败：腾讯行情无完整返回 trade_date=%s target_count=%s", trade_date, len(codes))
+            return pd.DataFrame()
+
+        rows: list[dict[str, Any]] = []
+        for code in sorted(bars):
+            bar = bars[code]
+            if bar.open is None or bar.close is None or bar.high is None or bar.low is None or bar.volume is None:
+                continue
+            if bar.open <= 0 or bar.close <= 0 or bar.high <= 0 or bar.low <= 0 or bar.volume <= 0:
+                continue
+            market = "SH" if code.startswith("6") else ("BJ" if code.startswith(("4", "8", "9")) else "SZ")
+            rows.append(
+                {
+                    "ts_code": f"{code}.{market}",
+                    "trade_date": trade_day,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "turnover_rate": bar.turnover_rate,
+                    "turnover_rate_f": None,
+                    "volume_ratio": bar.volume_ratio,
+                    "free_share": None,
+                    "circ_mv": (bar.circ_mv / 10_000.0) if bar.circ_mv is not None else None,
+                    "buy_sm_amount": None,
+                    "sell_sm_amount": None,
+                    "buy_md_amount": None,
+                    "sell_md_amount": None,
+                    "buy_lg_amount": None,
+                    "sell_lg_amount": None,
+                    "buy_elg_amount": None,
+                    "sell_elg_amount": None,
+                    "net_mf_amount": None,
+                    "code": code,
+                    "data_source": "tencent_quote",
+                }
+            )
+
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            logger.warning("实时日K兜底失败：腾讯行情无有效 OHLCV trade_date=%s target_count=%s", trade_date, len(codes))
+            return frame
         return frame.sort_values(["trade_date", "code"]).reset_index(drop=True)
 
     def _frame_to_records(self, frame: pd.DataFrame) -> list[dict[str, Any]]:
@@ -255,6 +321,133 @@ class DailyBatchUpdateService:
             csv_df = csv_df.drop_duplicates(subset="date", keep="last").sort_values("date").reset_index(drop=True)
             csv_df.to_csv(csv_path, index=False)
 
+    def _sync_raw_csv_from_db(
+        self,
+        *,
+        codes: list[str],
+        end_date: date,
+        min_history_days: int = 260,
+    ) -> dict[str, int]:
+        """Rewrite raw CSV from DB so selector inputs keep enough warmup history."""
+        normalized_codes = sorted({str(code or "").zfill(6) for code in codes if str(code or "").strip()})
+        if not normalized_codes:
+            return {"updated_files": 0, "synced_rows": 0}
+
+        start_date = end_date - timedelta(days=max(365, int(min_history_days * 2)))
+        rows = (
+            self.db.query(
+                StockDaily.code,
+                StockDaily.trade_date,
+                StockDaily.open,
+                StockDaily.close,
+                StockDaily.high,
+                StockDaily.low,
+                StockDaily.volume,
+                StockDaily.turnover_rate,
+                StockDaily.turnover_rate_f,
+                StockDaily.volume_ratio,
+                StockDaily.free_share,
+                StockDaily.circ_mv,
+                StockDaily.buy_sm_amount,
+                StockDaily.sell_sm_amount,
+                StockDaily.buy_md_amount,
+                StockDaily.sell_md_amount,
+                StockDaily.buy_lg_amount,
+                StockDaily.sell_lg_amount,
+                StockDaily.buy_elg_amount,
+                StockDaily.sell_elg_amount,
+                StockDaily.net_mf_amount,
+            )
+            .filter(
+                StockDaily.code.in_(normalized_codes),
+                StockDaily.trade_date >= start_date,
+                StockDaily.trade_date <= end_date,
+            )
+            .order_by(StockDaily.code.asc(), StockDaily.trade_date.asc(), StockDaily.id.asc())
+            .yield_per(10000)
+        )
+
+        raw_dir = ROOT / settings.raw_data_dir
+        raw_dir.mkdir(parents=True, exist_ok=True)
+
+        updated_files = 0
+        synced_rows = 0
+        current_code: str | None = None
+        current_rows: list[dict[str, Any]] = []
+
+        def flush_current() -> None:
+            nonlocal updated_files, synced_rows, current_code, current_rows
+            if current_code is None or not current_rows:
+                return
+            frame = pd.DataFrame(current_rows)
+            frame = frame[columns].copy()
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            frame.to_csv(raw_dir / f"{current_code}.csv", index=False)
+            updated_files += 1
+            synced_rows += len(frame.index)
+            current_rows = []
+
+        columns = [
+            "date",
+            "open",
+            "close",
+            "high",
+            "low",
+            "volume",
+            "turnover_rate",
+            "turnover_rate_f",
+            "volume_ratio",
+            "free_share",
+            "circ_mv",
+            "buy_sm_amount",
+            "sell_sm_amount",
+            "buy_md_amount",
+            "sell_md_amount",
+            "buy_lg_amount",
+            "sell_lg_amount",
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "net_mf_amount",
+            "code",
+        ]
+
+        for row in rows:
+            code = str(row.code).zfill(6)
+            if current_code is None:
+                current_code = code
+            elif code != current_code:
+                flush_current()
+                current_code = code
+            current_rows.append(
+                {
+                    "date": row.trade_date,
+                    "open": row.open,
+                    "close": row.close,
+                    "high": row.high,
+                    "low": row.low,
+                    "volume": row.volume,
+                    "turnover_rate": row.turnover_rate,
+                    "turnover_rate_f": row.turnover_rate_f,
+                    "volume_ratio": row.volume_ratio,
+                    "free_share": row.free_share,
+                    "circ_mv": row.circ_mv,
+                    "buy_sm_amount": row.buy_sm_amount,
+                    "sell_sm_amount": row.sell_sm_amount,
+                    "buy_md_amount": row.buy_md_amount,
+                    "sell_md_amount": row.sell_md_amount,
+                    "buy_lg_amount": row.buy_lg_amount,
+                    "sell_lg_amount": row.sell_lg_amount,
+                    "buy_elg_amount": row.buy_elg_amount,
+                    "sell_elg_amount": row.sell_elg_amount,
+                    "net_mf_amount": row.net_mf_amount,
+                    "code": code,
+                }
+            )
+
+        flush_current()
+
+        return {"updated_files": updated_files, "synced_rows": synced_rows}
+
     def _load_records_to_db(self, records: list[dict[str, Any]]) -> tuple[int, int]:
         kline_records = [
             {
@@ -292,6 +485,19 @@ class DailyBatchUpdateService:
             select(func.count(distinct(StockDaily.code))).where(StockDaily.trade_date == trade_date)
         ).scalar() or 0
         return int(result["inserted"] or 0), int(db_stock_count or 0)
+
+    def _delete_stale_records_for_trade_date(self, trade_day: date, codes: list[str]) -> int:
+        normalized_codes = sorted({str(code or "").zfill(6) for code in codes if str(code or "").strip()})
+        if not normalized_codes:
+            return 0
+
+        stmt = delete(StockDaily).where(
+            StockDaily.trade_date == trade_day,
+            StockDaily.code.not_in(normalized_codes),
+        )
+        result = self.db.execute(stmt)
+        self.db.commit()
+        return int(result.rowcount or 0)
 
     @staticmethod
     def _emit_progress(
@@ -381,8 +587,6 @@ class DailyBatchUpdateService:
             )
             records = self._frame_to_records(frame)
             snapshot_path, file_size, checksum = self._save_snapshot_file(trade_date, records)
-            if sync_raw_csv:
-                self._sync_raw_csv_files(frame)
 
             self._emit_progress(
                 progress_callback,
@@ -394,7 +598,21 @@ class DailyBatchUpdateService:
                 current=0,
                 record_count=int(len(records)),
             )
-            db_record_count, db_stock_count = self._load_records_to_db(records)
+            db_record_count, _ = self._load_records_to_db(records)
+            snapshot_codes = [str(code).zfill(6) for code in frame["code"].dropna().astype(str).unique().tolist()]
+            stale_deleted_count = self._delete_stale_records_for_trade_date(trade_day, snapshot_codes)
+            db_stock_count = int(
+                self.db.execute(
+                    select(func.count(distinct(StockDaily.code))).where(StockDaily.trade_date == trade_day)
+                ).scalar()
+                or 0
+            )
+            raw_csv_sync_result = {"updated_files": 0, "synced_rows": 0}
+            if sync_raw_csv:
+                raw_csv_sync_result = self._sync_raw_csv_from_db(
+                    codes=snapshot_codes,
+                    end_date=trade_day,
+                )
 
             self.manifest_service.complete_batch(
                 batch,
@@ -404,7 +622,11 @@ class DailyBatchUpdateService:
                 storage_path=str(snapshot_path),
                 file_size_bytes=file_size,
                 checksum=checksum,
-                meta={"mode": "daily_batch", "db_record_count": db_record_count},
+                meta={
+                    "mode": "daily_batch",
+                    "db_record_count": db_record_count,
+                    "stale_deleted_count": stale_deleted_count,
+                },
             )
             manifest = self.manifest_service.upsert_manifest(
                 trade_date=trade_day,
@@ -418,7 +640,7 @@ class DailyBatchUpdateService:
                 db_stock_count=db_stock_count,
                 file_size_bytes=file_size,
                 checksum=checksum,
-                meta={"mode": "daily_batch"},
+                meta={"mode": "daily_batch", "stale_deleted_count": stale_deleted_count},
                 fetched_at=batch.started_at,
                 loaded_to_db_at=batch.completed_at,
             )
@@ -431,6 +653,9 @@ class DailyBatchUpdateService:
                 "db_stock_count": manifest.db_stock_count,
                 "storage_path": manifest.storage_path,
                 "raw_csv_synced": sync_raw_csv,
+                "raw_csv_updated_files": raw_csv_sync_result["updated_files"],
+                "raw_csv_synced_rows": raw_csv_sync_result["synced_rows"],
+                "stale_deleted_count": stale_deleted_count,
             }
             self._emit_progress(
                 progress_callback,
